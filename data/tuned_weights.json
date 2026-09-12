@@ -1,0 +1,18 @@
+{
+ "foreign": 0.75,
+ "trust": 1.0,
+ "dealer": 0.75,
+ "fut_foreign": 1.25,
+ "gov8": 1.0,
+ "margin": 1.0,
+ "maint": 1.0,
+ "short": 0.75,
+ "sbl": 1.0,
+ "pcr": 1.0,
+ "large": 1.0,
+ "volume": 0.75,
+ "trend": 0.5,
+ "reversion": 1.25,
+ "global": 1.25,
+ "fx_flow": 0.75
+}

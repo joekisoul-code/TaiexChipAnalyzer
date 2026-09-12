@@ -1,0 +1,73 @@
+name: publish-app
+
+# 無伺服器版：GitHub Actions 依排程計算，結果 (site/) 發布到 GitHub Pages；平板直接開 Pages 網址。
+on:
+  schedule:
+    - cron: "*/5 1-5 * * 1-5"      # 台北 09:00~13:59 每 5 分鐘 (UTC+8)：盤中快照 (fast)
+    - cron: "40 7 * * 1-5"         # 台北 15:40：盤後法人/期貨公布後 完整重算
+    - cron: "45 13 * * 1-5"        # 台北 21:45：融資融券/借券公布後 完整重算
+    - cron: "0 22 * * 6"           # 週日 06:00：重訓模型 + 長歷史回測
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "fast | full | train"
+        default: "full"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      TZ: Asia/Taipei
+      FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+      CHIP_WATCHLIST: ${{ vars.CHIP_WATCHLIST }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: decide mode
+        id: mode
+        run: |
+          MODE="${{ github.event.inputs.mode }}"
+          if [ -z "$MODE" ]; then
+            case "${{ github.event.schedule }}" in
+              "*/5 1-5 * * 1-5") MODE=fast ;;
+              "0 22 * * 6") MODE=train ;;
+              *) MODE=full ;;
+            esac
+          fi
+          echo "mode=$MODE" >> $GITHUB_OUTPUT
+      - name: restore data cache (快取 / SQLite / 模型)
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: chip-data-${{ github.run_id }}
+          restore-keys: chip-data-
+      - name: playwright (玩股網)
+        if: steps.mode.outputs.mode != 'fast'
+        run: python -m playwright install --with-deps chromium
+      - name: export
+        run: |
+          case "${{ steps.mode.outputs.mode }}" in
+            fast)  python tools/export_static.py --fast --no-wantgoo ;;
+            train) python cli.py optimize && python cli.py global && python cli.py cross && python tools/export_static.py --train ;;
+            *)     python tools/export_static.py ;;
+          esac
+      - name: deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          publish_branch: gh-pages
+          force_orphan: true
+          commit_message: "publish ${{ steps.mode.outputs.mode }} ${{ github.run_id }}"
