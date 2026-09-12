@@ -19,6 +19,7 @@ import pandas as pd
 
 from .. import config
 from ..analysis import backtest
+from ..analysis.common import zscore
 from ..sources import finmind
 from . import model as M
 from .features import FEATURE_NAMES, market_matrix
@@ -38,11 +39,24 @@ ST_FEATURES = [
     "g_kospi_r1", "g_kospi_r5", "g_usdtwd_r5", "g_dxy_r1", "g_us10y_r5", "g_vix_term",
 ]
 NIGHT_FEATURE = "night_chg_pct"
+# v2.1 新資料源 (2026-09-13 消融研究後加入)：
+#   亞股同日收盤 (韓/日/港，台股收盤後 1 小時內已知) → 無夜盤時 1~3 日 IC 0.05→0.09
+#   小台散戶多空比、選擇權外資/自營 買賣權淨部位、台指期近月期現價差、期貨 OI/量 (2018-06~) → 無夜盤時 3/5 日偏多檔命中 59%→63%
+#   美股同夜 (ADR/費半) 對夜盤變體無增益 (夜盤已反映) → 不加
+ASIA_FEATURES = ["kospi_r0", "nikkei_r0", "hsi_r0"]
+CHIP_FEATURES = ["mtx_retail_ratio", "mtx_retail_chg5", "mtx_foreign_net_z", "txo_f_call_z", "txo_f_put_z", "txo_f_cp_diff_z", "txo_d_cp_diff_z",
+                 "tx_basis_pct", "tx_basis_chg1", "tx_oi_chg1_z", "tx_vol_z"]
+FEATURE_SETS = {"short": ST_FEATURES, "+asia": ST_FEATURES + ASIA_FEATURES, "+asia+chip": ST_FEATURES + ASIA_FEATURES + CHIP_FEATURES}
 NAMES = {**FEATURE_NAMES, "ret1_l1": "前 1 日漲跌%", "ret1_l2": "前 2 日漲跌%", "gap_open": "今日開盤跳空%", "range_pct": "今日振幅%",
-         "clv": "收盤在當日區間位置", "up5": "近 5 日上漲天數", NIGHT_FEATURE: "前晚夜盤台指期%"}
+         "clv": "收盤在當日區間位置", "up5": "近 5 日上漲天數", NIGHT_FEATURE: "前晚夜盤台指期%",
+         "kospi_r0": "KOSPI 今日%", "nikkei_r0": "日經今日%", "hsi_r0": "恆生今日%",
+         "mtx_retail_ratio": "小台散戶多空比", "mtx_retail_chg5": "小台散戶多空比 5 日變化", "mtx_foreign_net_z": "小台外資淨部位 z",
+         "txo_f_call_z": "選擇權外資買權淨 z", "txo_f_put_z": "選擇權外資賣權淨 z", "txo_f_cp_diff_z": "選擇權外資買減賣權 z", "txo_d_cp_diff_z": "選擇權自營買減賣權 z",
+         "tx_basis_pct": "台指期近月期現價差%", "tx_basis_chg1": "期現價差日變化", "tx_oi_chg1_z": "台指期 OI 日變化 z", "tx_vol_z": "台指期成交量 z"}
 LGB_PARAMS = dict(M.PARAMS, n_estimators=120, min_child_samples=150)
 RIDGE_ALPHA = 30.0
-TIER = 0.30          # 前/後 30% 才叫方向
+TIER = 0.30          # 前/後 30% 才叫方向 (一般)
+TIER_STRONG = 0.15   # 前/後 15% 為「強」叫牌 (另報命中率)
 MIN_EDGE = 0.03      # 檔位命中率需高於基準 3 個百分點才啟用
 
 
@@ -64,9 +78,74 @@ def build_matrix(scored: pd.DataFrame, night: pd.DataFrame | None = None) -> pd.
         nm = dict(zip(night["date"].astype(str), night["night_chg_pct"].astype(float)))
         nxt = d["date"].astype(str).shift(-1)
         d[NIGHT_FEATURE] = nxt.map(nm)
-    for col in ST_FEATURES:
+    try:
+        d = _add_extra_features(d)
+    except Exception as e:  # noqa: BLE001
+        log.warning("extra features: %s", e)
+    for col in ST_FEATURES + ASIA_FEATURES + CHIP_FEATURES:
         if col not in d:
             d[col] = np.nan
+    return d
+
+
+def _asof_return(dates: pd.Series, sym: str) -> pd.Series:
+    """該市場「日期 <= D」最後一個交易日的日報酬% (亞股同日收盤，台股收盤後已知)。"""
+    from ..sources import global_markets as gm
+    h = gm.history(sym).sort_values("date")
+    h["r"] = h["close"].astype(float).pct_change() * 100
+    src = list(zip(h["date"].astype(str), h["r"]))
+    out, j, last = [], 0, np.nan
+    for dte in dates:
+        while j < len(src) and src[j][0] <= dte:
+            if pd.notna(src[j][1]):
+                last = src[j][1]
+            j += 1
+        out.append(last)
+    return pd.Series(out, index=dates.index, dtype=float)
+
+
+def _add_extra_features(d: pd.DataFrame) -> pd.DataFrame:
+    dates = d["date"].astype(str)
+    c = d["close"].astype(float)
+    for col, sym in (("kospi_r0", "^KS11"), ("nikkei_r0", "^N225"), ("hsi_r0", "^HSI")):
+        try:
+            d[col] = _asof_return(dates, sym)
+        except Exception as e:  # noqa: BLE001
+            log.debug("%s: %s", col, e)
+    by = lambda s: pd.Series([s.get(x, np.nan) for x in dates], index=d.index, dtype=float)  # noqa: E731
+    # 小台 MTX：散戶淨部位 = -(三大法人淨部位)，除以近月全部 OI
+    mtx = finmind.fetch("TaiwanFuturesInstitutionalInvestors", "MTX", "2018-01-01")
+    if not mtx.empty:
+        mtx["net"] = mtx["long_open_interest_balance_volume"] - mtx["short_open_interest_balance_volume"]
+        inst_net = mtx.groupby("date")["net"].sum()
+        mfor = mtx[mtx["institutional_investors"].astype(str).str.contains("外資")].groupby("date")["net"].sum()
+        mtxd = finmind.fetch("TaiwanFuturesDaily", "MTX", "2018-01-01")
+        if not mtxd.empty:
+            reg = mtxd[(mtxd["trading_session"] == "position") & (~mtxd["contract_date"].astype(str).str.contains("/"))]
+            tot = reg.groupby("date")["open_interest"].sum()
+            ratio = (-inst_net).reindex(tot.index) / tot.replace(0, np.nan)
+            d["mtx_retail_ratio"] = by(ratio.to_dict())
+            d["mtx_retail_chg5"] = d["mtx_retail_ratio"].diff(5)
+        d["mtx_foreign_net_z"] = zscore(by(mfor.to_dict()), 60)
+    # 選擇權 TXO：外資 / 自營 買權、賣權 淨部位
+    txo = finmind.fetch("TaiwanOptionInstitutionalInvestors", "TXO", "2018-01-01")
+    if not txo.empty:
+        txo["net"] = txo["long_open_interest_balance_volume"] - txo["short_open_interest_balance_volume"]
+        def opt(inv, cp):
+            m = txo[txo["institutional_investors"].astype(str).str.contains(inv) & (txo["call_put"] == cp)]
+            return by(m.groupby("date")["net"].sum().to_dict())
+        fc, fp, dc, dp = opt("外資", "買權"), opt("外資", "賣權"), opt("自營", "買權"), opt("自營", "賣權")
+        d["txo_f_call_z"], d["txo_f_put_z"] = zscore(fc, 60), zscore(fp, 60)
+        d["txo_f_cp_diff_z"], d["txo_d_cp_diff_z"] = zscore(fc - fp, 60), zscore(dc - dp, 60)
+    # 台指期日盤：近月期現價差、全部 OI 日變化、成交量
+    txd = finmind.fetch("TaiwanFuturesDaily", "TX", "2010-01-01")
+    if not txd.empty:
+        txr = txd[(txd["trading_session"] == "position") & (~txd["contract_date"].astype(str).str.contains("/"))].sort_values(["date", "contract_date"])
+        near = txr.groupby("date").first()
+        d["tx_basis_pct"] = (by(near["close"].to_dict()) / c - 1) * 100
+        d["tx_basis_chg1"] = d["tx_basis_pct"].diff()
+        d["tx_oi_chg1_z"] = zscore(by(txr.groupby("date")["open_interest"].sum().to_dict()).diff(), 60)
+        d["tx_vol_z"] = zscore(by(txr.groupby("date")["volume"].sum().to_dict()), 60)
     return d
 
 
@@ -152,7 +231,12 @@ def tier_stats(oos: pd.DataFrame) -> dict:
     dn_on = bool(dn_hit >= (1 - base_up) + MIN_EDGE)
     calls = (len(up) if up_on else 0) + (len(dn) if dn_on else 0)
     hits = (float((up["actual"] > 0).sum()) if up_on else 0) + (float((dn["actual"] < 0).sum()) if dn_on else 0)
+    # 強叫牌 (前/後 15%)
+    slo, shi = float(oos["pred"].quantile(TIER_STRONG)), float(oos["pred"].quantile(1 - TIER_STRONG))
+    sup, sdn = oos[oos["pred"] >= shi], oos[oos["pred"] <= slo]
     return {"edge_lo": round(lo, 4), "edge_hi": round(hi, 4), "base_up": round(base_up, 3),
+            "strong_lo": round(slo, 4), "strong_hi": round(shi, 4),
+            "up_hit_strong": round(float((sup["actual"] > 0).mean()), 3) if len(sup) else None, "dn_hit_strong": round(float((sdn["actual"] < 0).mean()), 3) if len(sdn) else None,
             "up_hit": round(up_hit, 3), "up_n": int(len(up)), "up_on": up_on, "up_mean": round(float(up["actual"].mean()), 2) if len(up) else None,
             "dn_hit": round(dn_hit, 3), "dn_n": int(len(dn)), "dn_on": dn_on, "dn_mean": round(float(dn["actual"].mean()), 2) if len(dn) else None,
             "mid_up": round(float((mid["actual"] > 0).mean()), 3) if len(mid) else None,
@@ -205,34 +289,37 @@ def train(write: bool = True, verbose: bool = True) -> dict:
     night = _night_hist()
     mat = build_matrix(scored, night)
     results = {}
+    mn = mat.dropna(subset=[NIGHT_FEATURE])
     for h in HORIZONS:
         tgt = f"fwd{h}"
-        # 基本變體 (2010~)
-        oos_l = _wf(mat, ST_FEATURES, tgt, h, FIRST_TEST_YEAR, lambda: LgbModel())
-        oos_r = _wf(mat, ST_FEATURES, tgt, h, FIRST_TEST_YEAR, lambda: RidgeModel())
-        cands = {"lgb": oos_l, "ridge": oos_r, "ens": _combine(oos_l, oos_r) if not oos_l.empty and not oos_r.empty else pd.DataFrame()}
-        key, reps = _pick(cands)
-        # 夜盤變體 (2017-05~)
-        mn = mat.dropna(subset=[NIGHT_FEATURE])
-        feats_n = ST_FEATURES + [NIGHT_FEATURE]
-        oos_ln = _wf(mn, feats_n, tgt, h, FIRST_TEST_YEAR_NIGHT, lambda: LgbModel(), min_train=400)
-        oos_rn = _wf(mn, feats_n, tgt, h, FIRST_TEST_YEAR_NIGHT, lambda: RidgeModel(), min_train=400)
-        cands_n = {"lgb": oos_ln, "ridge": oos_rn, "ens": _combine(oos_ln, oos_rn) if not oos_ln.empty and not oos_rn.empty else pd.DataFrame()}
-        key_n, reps_n = _pick(cands_n)
-        results[h] = {"base": {"chosen": key, "reports": reps}, "night": {"chosen": key_n, "reports": reps_n}}
-        if verbose:
-            r = reps.get(key, {}).get("tiers", {}); rn = reps_n.get(key_n, {}).get("tiers", {})
-            print(f"h{h}: 基本 {key} IC {reps.get(key, {}).get('rank_ic')} 基準 {r.get('base_up')} 叫牌命中 {r.get('call_hit')} (覆蓋 {r.get('call_cov')}; 偏多 {r.get('up_hit')}{'✓' if r.get('up_on') else '✗'} 偏空 {r.get('dn_hit')}{'✓' if r.get('dn_on') else '✗'})"
-                  f" | 夜盤 {key_n} IC {reps_n.get(key_n, {}).get('rank_ic')} 叫牌命中 {rn.get('call_hit')} (覆蓋 {rn.get('call_cov')}; 偏多 {rn.get('up_hit')} 偏空 {rn.get('dn_hit')})")
-        if write:
-            for variant, feats, dd, k, rr in (("base", ST_FEATURES, mat, key, reps), ("night", feats_n, mn, key_n, reps_n)):
-                if not k:
-                    continue
+        results[h] = {}
+        for variant in ("base", "night"):
+            dd = mat if variant == "base" else mn
+            first = FIRST_TEST_YEAR if variant == "base" else FIRST_TEST_YEAR_NIGHT
+            # 特徵集 × 模型 全部跑 OOS，依叫牌命中率 (次序 IC) 選
+            cands, featmap = {}, {}
+            for sname, feats in FEATURE_SETS.items():
+                f = feats + ([NIGHT_FEATURE] if variant == "night" else [])
+                oos_l = _wf(dd, f, tgt, h, first, lambda: LgbModel())
+                oos_r = _wf(dd, f, tgt, h, first, lambda: RidgeModel())
+                cands[f"{sname}|lgb"], cands[f"{sname}|ridge"] = oos_l, oos_r
+                cands[f"{sname}|ens"] = _combine(oos_l, oos_r) if not oos_l.empty and not oos_r.empty else pd.DataFrame()
+                for mk in ("lgb", "ridge", "ens"):
+                    featmap[f"{sname}|{mk}"] = f
+            key, reps = _pick(cands)
+            results[h][variant] = {"chosen": key, "reports": reps}
+            if verbose and key:
+                t = reps[key]["tiers"]
+                print(f"h{h} {variant:<5} {key:<16} IC {reps[key]['rank_ic']} ({reps[key]['ic_positive_years']}) 基準 {t['base_up']} 叫牌命中 {t['call_hit']} 覆蓋 {t['call_cov']} "
+                      f"偏多 {t['up_hit']}{'✓' if t['up_on'] else '✗'}(強 {t['up_hit_strong']}) 偏空 {t['dn_hit']}{'✓' if t['dn_on'] else '✗'}(強 {t['dn_hit_strong']})")
+            if write and key:
+                sname, mk = key.split("|")
+                feats = featmap[key]
                 d = dd.dropna(subset=[tgt])
-                bundle = {"horizon": h, "variant": variant, "chosen": k, "features": feats, "trained_at": dt.datetime.now(config.TZ).isoformat(),
-                          "train_end": str(d["date"].max()), "n_train": int(len(d)), "report": rr[k],
-                          "lgb": LgbModel().fit(d[feats], d[tgt]) if k in ("lgb", "ens") else None,
-                          "ridge": RidgeModel().fit(d[feats], d[tgt]) if k in ("ridge", "ens") else None}
+                bundle = {"horizon": h, "variant": variant, "chosen": key, "features": feats, "trained_at": dt.datetime.now(config.TZ).isoformat(),
+                          "train_end": str(d["date"].max()), "n_train": int(len(d)), "report": reps[key],
+                          "lgb": LgbModel().fit(d[feats], d[tgt]) if mk in ("lgb", "ens") else None,
+                          "ridge": RidgeModel().fit(d[feats], d[tgt]) if mk in ("ridge", "ens") else None}
                 M.save(f"st_h{h}_{variant}", bundle)
     if write:
         M.save_json("short_term_metrics", {str(h): {v: {"chosen": results[h][v]["chosen"], **{kk: vv for kk, vv in (results[h][v]["reports"].get(results[h][v]["chosen"]) or {}).items() if kk != "calibration"}}
@@ -262,7 +349,7 @@ def forecast(scored: pd.DataFrame, snapshot: dict | None = None) -> dict:
     snap = snapshot or {}
     tn = snap.get("tx_night") or {}
     use_night = tn.get("change_pct") is not None and snap.get("phase") in ("night", "closed", "pre")
-    mat = build_matrix(scored, None)
+    mat = build_matrix(scored.tail(400).reset_index(drop=True), None)   # 只需最後一列；400 列足夠算 60 日 z
     row = mat.iloc[[-1]].copy()
     if use_night:
         row[NIGHT_FEATURE] = float(tn["change_pct"])
@@ -277,13 +364,17 @@ def forecast(scored: pd.DataFrame, snapshot: dict | None = None) -> dict:
         rep = b["report"]
         cal = M.apply_calibration(rep["calibration"], pred)
         t = rep["tiers"]
-        call, call_hit = "中性", t.get("mid_up")
+        call, call_hit, strength = "中性", t.get("mid_up"), ""
         if t.get("up_on") and pred >= t["edge_hi"]:
             call, call_hit = "偏多", t["up_hit"]
+            if t.get("strong_hi") is not None and pred >= t["strong_hi"] and (t.get("up_hit_strong") or 0) >= t["up_hit"]:
+                strength, call_hit = "強", t["up_hit_strong"]
         elif t.get("dn_on") and pred <= t["edge_lo"]:
             call, call_hit = "偏空", t["dn_hit"]
+            if t.get("strong_lo") is not None and pred <= t["strong_lo"] and (t.get("dn_hit_strong") or 0) >= t["dn_hit"]:
+                strength, call_hit = "強", t["dn_hit_strong"]
         out[h] = {"pred_std": round(pred, 3), "p_up": cal["p_up"], "hist_mean": cal["hist_mean"], "q20": cal["q20"], "q80": cal["q80"], "bin": cal["bin"],
-                  "base_hit": cal["base_hit"], "call": call, "call_hit": round(call_hit, 3) if call_hit is not None else None,
+                  "base_hit": cal["base_hit"], "call": call, "call_strength": strength, "call_hit": round(call_hit, 3) if call_hit is not None else None,
                   "tier_up_hit": t.get("up_hit"), "tier_dn_hit": t.get("dn_hit"), "call_cov": t.get("call_cov"),
                   "variant": variant, "model": b["chosen"], "rank_ic": rep.get("rank_ic"), "drivers": drivers,
                   "note": f"短線模型 v2 ({variant == 'night' and '含夜盤' or '不含夜盤'}‧{b['chosen']}‧OOS IC {rep.get('rank_ic')}‧叫牌命中 {t.get('call_hit')} 覆蓋 {t.get('call_cov')})"}

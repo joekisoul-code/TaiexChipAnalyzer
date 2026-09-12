@@ -149,7 +149,7 @@ def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, sign
             if not r:
                 continue
             x["daily_model_v1"] = {k: x.get(k) for k in ("p_up", "level", "hist_mean")}
-            x.update({k: r[k] for k in ("p_up", "hist_mean", "q20", "q80", "bin", "base_hit", "call", "call_hit", "tier_up_hit", "tier_dn_hit", "call_cov", "variant", "drivers")})
+            x.update({k: r[k] for k in ("p_up", "hist_mean", "q20", "q80", "bin", "base_hit", "call", "call_strength", "call_hit", "tier_up_hit", "tier_dn_hit", "call_cov", "variant", "drivers")})
             x["level"] = round(base_px * (1 + (r["hist_mean"] or 0) / 100))
             x["level_lo"] = round(base_px * (1 + (r["q20"] or 0) / 100))
             x["level_hi"] = round(base_px * (1 + (r["q80"] or 0) / 100))
@@ -157,9 +157,9 @@ def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, sign
         if 5 in st and 5 in hz:
             r = st[5]
             hz[5]["daily_model_v1"] = {k: hz[5].get(k) for k in ("p_up", "hist_mean")}
-            hz[5].update({k: r[k] for k in ("p_up", "hist_mean", "q20", "q80", "bin", "base_hit", "call", "call_hit", "tier_up_hit", "tier_dn_hit", "call_cov", "variant", "drivers")})
+            hz[5].update({k: r[k] for k in ("p_up", "hist_mean", "q20", "q80", "bin", "base_hit", "call", "call_strength", "call_hit", "tier_up_hit", "tier_dn_hit", "call_cov", "variant", "drivers")})
             hz[5]["source"] = r["note"]
-        calls = "、".join(f"{x['label']} {x.get('call')} ({(x.get('call_hit') or 0):.0%})" for x in nd if x.get("call")) + (f"、5 日 {st[5]['call']} ({(st[5].get('call_hit') or 0):.0%})" if 5 in st else "")
+        calls = "、".join(f"{x['label']} {x.get('call')}{x.get('call_strength') or ''} ({(x.get('call_hit') or 0):.0%})" for x in nd if x.get("call")) + (f"、5 日 {st[5]['call']}{st[5].get('call_strength') or ''} ({(st[5].get('call_hit') or 0):.0%})" if 5 in st else "")
         notes.append(f"短線模型 v2 ({'含夜盤' if st[min(st)]['variant'] == 'night' else '不含夜盤'})：叫牌 {calls}；括號為該檔位樣本外命中率")
     # 1) 夜盤跳空
     tn = snap.get("tx_night")
