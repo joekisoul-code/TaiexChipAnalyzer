@@ -27,6 +27,25 @@ python -m playwright install chromium     # 選用：抓玩股網 (大盤融資�
 - 本專案 `tools/export_static.py` 發佈到 GitHub Pages 的 `data/*.json` (realtime / market / forecast / watchlist) 被 SKYNET 直接讀取 (GitHub Pages 回 `Access-Control-Allow-Origin: *`)：16 因子判讀、買賣點規則、LightGBM 日/小時預測、追蹤清單成本分布都顯示在 SKYNET 的「籌碼判讀 · 大盤進場」面板。
 - 因此本專案的 GitHub Actions 排程 (`.github/workflows/publish.yml`) 要持續運作，SKYNET 才有雲端資料；JSON 欄位若改名，需同步改 `js/fusion.js` / `js/ui.js`。
 
+## 前五日預測模組 v2 (`chip/predict/short_term.py`，`python cli.py short [--train]`)
+
+目標是**方向命中率**。做法：短線專用特徵 (當日/前兩日漲跌、開盤跳空、振幅、收盤位置、近 5 日上漲天數、乖離、量能、外資當日/5 日、外資期貨變化、結算週、前晚美股/費半/ADR/韓股、VIX)；
+淺層 LightGBM 多種子 + Ridge 集成；另訓「含前晚夜盤台指期」變體 (2017-05 起有資料)；以 OOS 預測分位切三檔 (前 30% 偏多 / 後 30% 偏空 / 中間中性)，
+**只有該檔位樣本外命中率高於基準 3 個百分點才啟用叫牌**，並把該檔位歷史命中率一起輸出。每個視野在 {lgb, ridge, ens} 中依 OOS 叫牌命中率自動選。
+
+2026-09-12 首次訓練 (基本變體 2014~2026 逐年擴張、夜盤變體 2020~2026，皆樣本外)：
+
+| 視野 | 不含夜盤 (2010~) | 含夜盤 (2017-05~，收盤後~開盤前使用) |
+|---|---|---|
+| 1 日 | IC 0.06；偏多檔 57% / 偏空檔 47% 都沒贏過基準 → 一律中性 | **IC 0.60 (7/7 年正)；偏多檔命中 83%、偏空檔 79%，叫牌命中 81%，覆蓋 60%**（基準上漲率 55%） |
+| 2 日 | IC 0.07；不叫牌 | IC 0.44；偏多 77% / 偏空 66%，叫牌命中 71% |
+| 3 日 | IC 0.05；不叫牌 | IC 0.33；偏多 72% / 偏空 61%，叫牌命中 66% |
+| 5 日 | IC 0.07；不叫牌 | IC 0.23；偏多 67% / 偏空 53%（基準下跌率 41%），叫牌命中 60% |
+
+結論：**沒有夜盤資訊時 1~5 日方向基本不可預測**（模型誠實地只給中性）；有夜盤時 1 日可預測性很高、隨天數遞減，5 日仍略優於基準。
+輸出併入 `forecast.json` 的 `next_days[]`/`horizons[5]`：`call`(偏多/偏空/中性)、`call_hit`(該檔位 OOS 命中率)、`call_cov`、`variant`、`source`；
+盤中 (live) 不用此模組。夜盤變體 IC 高的原因是夜盤本身反映了隔日開盤跳空，屬「已知資訊」，並非預知盤中走勢。
+
 ## 八大行庫監測 (`chip/analysis/gov8.py`，`python cli.py gov8`，輸出 `data/gov8.json`、API `/api/gov8`)
 
 - **全市場序列**：HiStock 只給近半年 → 每次執行把 `gov8_net` 寫入 SQLite，並與已發布的 Pages `gov8.json` 取聯集，歷史逐日累積 (GitHub Actions 的 `data` cache + Pages 雙保險)。

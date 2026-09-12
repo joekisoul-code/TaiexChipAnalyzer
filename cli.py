@@ -10,6 +10,7 @@
   python cli.py global            國際市場 (美日韓股、VIX、原油、黃金、比特幣、匯率) × 台股歷史研究
   python cli.py chips [代碼...]    追蹤清單籌碼分布 (成本、分價量、大戶、券商均價)
   python cli.py signals           大盤買點/賣點規則驗證與目前狀態
+  python cli.py short [--train]   前五日預測模組 v2：樣本外叫牌命中率報告 + 目前 1/2/3/5 日叫牌
   python cli.py gov8 [代碼...]     八大行庫監測：全市場進出/行為模式/事件統計/排行 (連續上榜)/追蹤清單各行庫張數
   python cli.py train [--stock]   訓練 LightGBM 走勢預測模型 (大盤；--stock 加個股) 並輸出樣本外指標
   python cli.py forecast [2330]   即時預測：未來 5/10/20 日上漲機率、期望報酬區間、驅動因子 (+個股)
@@ -298,6 +299,33 @@ def cmd_signals(args):
         print(f"  🟩 賣點 {s['name']} {s['days']} 10日超額 {s['excess10']:+.2f}% 驗證 {s['valid']}")
 
 
+def cmd_short(args):
+    """前五日預測模組 v2：訓練/驗證報告 (--train) 與目前叫牌。"""
+    from chip import realtime
+    from chip.predict import short_term
+    if args.train:
+        short_term.train(write=True, verbose=True)
+    m = short_term.load_metrics() or {}
+    print("═══ 短線模型 v2 樣本外 (2014~ 逐年擴張；夜盤變體 2020~) ═══")
+    for h, v in m.items():
+        for var in ("base", "night"):
+            x = v.get(var) or {}
+            t = x.get("tiers") or {}
+            if not t:
+                continue
+            print(f"  {h} 日 {var:<5} {x.get('chosen'):<5} IC {x.get('rank_ic')} ({x.get('ic_positive_years')} 年正)  基準上漲率 {t.get('base_up'):.0%}  "
+                  f"偏多檔命中 {t.get('up_hit'):.0%}{'✓' if t.get('up_on') else '✗'} (n={t.get('up_n')})  偏空檔命中 {t.get('dn_hit'):.0%}{'✓' if t.get('dn_on') else '✗'} (n={t.get('dn_n')})  "
+                  f"叫牌命中 {t.get('call_hit') if t.get('call_hit') is None else format(t.get('call_hit'), '.0%')} 覆蓋 {t.get('call_cov'):.0%}")
+    scored, _, _ = market.run(use_wantgoo=False)
+    snap = realtime.snapshot(scored)
+    st = short_term.forecast(scored, snap)
+    print(f"\n目前 ({snap['phase']})：")
+    for h, r in st.items():
+        print(f"  {h} 日：{r['call']} (檔位命中 {r['call_hit']})  上漲率 {r['p_up']:.0%} (基準 {r['base_hit']:.0%})  同分位均 {r['hist_mean']:+.2f}%  {r['note']}")
+        drv = r.get("drivers") or {}
+        print("     ＋ " + "、".join(f"{d['name']} {d['contrib']:+.2f}" for d in drv.get("positive", [])[:4]) + "  ／  － " + "、".join(f"{d['name']} {d['contrib']:+.2f}" for d in drv.get("negative", [])[:4]))
+
+
 def cmd_gov8(args):
     """八大行庫監測：全市場進出、行為模式、事件統計、排行 (連續上榜)、追蹤清單各行庫張數。"""
     from chip.analysis import chips, gov8
@@ -382,6 +410,9 @@ def main():
     c.add_argument("ids", nargs="*", help="股票代碼，預設追蹤清單 2330 00631L 00685L 00981A 00988A")
     c.set_defaults(fn=cmd_chips)
     sub.add_parser("signals").set_defaults(fn=cmd_signals)
+    st_ = sub.add_parser("short")
+    st_.add_argument("--train", action="store_true", help="重新訓練前五日模組 (約數分鐘)")
+    st_.set_defaults(fn=cmd_short)
     g = sub.add_parser("gov8")
     g.add_argument("ids", nargs="*", help="追蹤清單代碼 (預設 2330 00631L 00685L 00981A 00988A)")
     g.add_argument("--no-watch", action="store_true", help="只看全市場與排行")

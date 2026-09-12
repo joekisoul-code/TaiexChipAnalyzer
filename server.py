@@ -63,7 +63,7 @@ def refresh_slow():
         out["signals"] = {"error": str(e)}
     try:
         out["forecast"] = market_forecast.refine_short_term(out["forecast"], out["hourly"] if not out["hourly"].get("error") else None, snap,
-                                                            out["signals"] if "error" not in out["signals"] else None)
+                                                            out["signals"] if "error" not in out["signals"] else None, scored)
     except Exception as e:  # noqa: BLE001
         log.warning("refine_short_term: %s", e)
     out["global_report"] = global_study.load_report()

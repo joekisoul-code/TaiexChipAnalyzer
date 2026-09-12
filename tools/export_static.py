@@ -71,6 +71,8 @@ def main() -> None:
         print("training models…")
         market_forecast.train()
         intraday.train()
+        from chip.predict import short_term
+        short_term.train(verbose=False)
     scored, A, meta = market.run(use_wantgoo=use_wg)
     snap = realtime.snapshot(scored)
     snap["combined"] = realtime.combined_view(A["composite_smooth"], A["regime"], snap["score"]["score"], snap["score"]["label"], snap["phase"])
@@ -95,7 +97,7 @@ def main() -> None:
     except Exception as e:  # noqa: BLE001
         hr = {"error": str(e)}
     try:   # 近五日精修：夜盤跳空 β、隔天用小時模型、5 日規則覆蓋
-        fc = market_forecast.refine_short_term(fc, hr if not hr.get("error") else None, snap, sg if "error" not in sg else None)
+        fc = market_forecast.refine_short_term(fc, hr if not hr.get("error") else None, snap, sg if "error" not in sg else None, scored)
     except Exception as e:  # noqa: BLE001
         print("  refine_short_term failed:", e)
     dump("forecast", {"updated": time.strftime("%Y-%m-%d %H:%M:%S"), "forecast": fc, "hourly": hr})

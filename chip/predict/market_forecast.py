@@ -125,7 +125,7 @@ def night_gap_beta() -> tuple[float, float, int]:
     return _GAP_CACHE[key]
 
 
-def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, signals_res: dict | None) -> dict:
+def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, signals_res: dict | None, scored: pd.DataFrame | None = None) -> dict:
     if not fc or fc.get("error") or not fc.get("next_days"):
         return fc
     fc = dict(fc)
@@ -135,6 +135,32 @@ def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, sign
     live = bool(fc.get("intraday"))
     base_px = fc["intraday"]["price"] if live else fc["close"]
     snap = snapshot or {}
+    # 0) 短線模型 v2 (1/2/3/5 日：短線特徵 + LGB/Ridge 集成 + 夜盤變體 + 叫牌檔位)：取代日模型的分位校準值
+    st = {}
+    if scored is not None and not live:
+        try:
+            from . import short_term
+            st = short_term.forecast(scored, snap)
+        except Exception as e:  # noqa: BLE001
+            log.warning("short_term.forecast: %s", e)
+    if st:
+        for x in nd:
+            r = st.get(x["n"])
+            if not r:
+                continue
+            x["daily_model_v1"] = {k: x.get(k) for k in ("p_up", "level", "hist_mean")}
+            x.update({k: r[k] for k in ("p_up", "hist_mean", "q20", "q80", "bin", "base_hit", "call", "call_hit", "tier_up_hit", "tier_dn_hit", "call_cov", "variant", "drivers")})
+            x["level"] = round(base_px * (1 + (r["hist_mean"] or 0) / 100))
+            x["level_lo"] = round(base_px * (1 + (r["q20"] or 0) / 100))
+            x["level_hi"] = round(base_px * (1 + (r["q80"] or 0) / 100))
+            x["source"] = r["note"]
+        if 5 in st and 5 in hz:
+            r = st[5]
+            hz[5]["daily_model_v1"] = {k: hz[5].get(k) for k in ("p_up", "hist_mean")}
+            hz[5].update({k: r[k] for k in ("p_up", "hist_mean", "q20", "q80", "bin", "base_hit", "call", "call_hit", "tier_up_hit", "tier_dn_hit", "call_cov", "variant", "drivers")})
+            hz[5]["source"] = r["note"]
+        calls = "、".join(f"{x['label']} {x.get('call')} ({(x.get('call_hit') or 0):.0%})" for x in nd if x.get("call")) + (f"、5 日 {st[5]['call']} ({(st[5].get('call_hit') or 0):.0%})" if 5 in st else "")
+        notes.append(f"短線模型 v2 ({'含夜盤' if st[min(st)]['variant'] == 'night' else '不含夜盤'})：叫牌 {calls}；括號為該檔位樣本外命中率")
     # 1) 夜盤跳空
     tn = snap.get("tx_night")
     gap = None
@@ -160,7 +186,7 @@ def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, sign
         nd[0]["source"] = "小時模型 13:30 目標 (含前晚夜盤跳空，樣本外 IC≈0.6、命中 74% vs 基準 57%)"
         nd[0]["daily_model"] = keep
         notes.append(f"隔天改用小時模型收盤目標 {t.get('level'):,.0f} (上漲率 {t.get('p_up', 0):.0%})；日模型原值 {keep['level']:,.0f} ({(keep['p_up'] or 0):.0%})")
-    elif nd:
+    elif nd and not nd[0].get("source"):
         nd[0]["source"] = "日模型 (1 日 IC 僅 0.02~0.04，可預測性低)"
     # 3) 5 日規則覆蓋
     cur = (signals_res or {}).get("current") or {}
