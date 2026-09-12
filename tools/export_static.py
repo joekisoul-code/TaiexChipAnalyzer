@@ -22,6 +22,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
+import requests  # noqa: E402
 
 from chip import config, notify, realtime  # noqa: E402
 from chip.analysis import backtest, chips, cross_market, global_study, gov8, market, signals  # noqa: E402
@@ -117,6 +118,18 @@ def main() -> None:
                 slim[sid]["flows_tail"] = fl.tail(60)[[c for c in ("date", "close", "foreign", "trust", "dealer", "main", "skp5", "skp20", "gov8", "margin_chg") if c in fl]]
         dump("watchlist", {"updated": time.strftime("%Y-%m-%d %H:%M:%S"), "stocks": slim})
         dump("global", {"global": global_study.load_report(), "cross": cross_market.load_report()})
+    else:
+        # fast 模式不重算追蹤清單/國際研究；Pages 部署是整站覆蓋 (force_orphan)，若不把上次發布的檔案帶回來，
+        # 盤中每 5 分鐘一次的 fast 會把 watchlist.json / global.json 洗掉 (SKYNET 個股籌碼成本會 404)
+        for name in ("watchlist", "global"):
+            if not (DATA / f"{name}.json").exists():
+                try:
+                    r = requests.get(gov8.PAGES_URL.rstrip("/") + f"/data/{name}.json", timeout=20)
+                    if r.ok and r.text.strip().startswith("{"):
+                        (DATA / f"{name}.json").write_text(r.text, encoding="utf-8")
+                        print(f"  carried over {name}.json from Pages")
+                except Exception as e:  # noqa: BLE001
+                    print(f"  carry {name} failed:", e)
     # 八大行庫監測：全市場序列 (累積) + 排行 (連續上榜) + 追蹤清單各行庫張數；fast 模式追蹤清單沿用上次發布
     try:
         dump("gov8", gov8.build(scored, res))
