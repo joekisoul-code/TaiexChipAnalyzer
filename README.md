@@ -25,7 +25,10 @@ python -m playwright install chromium     # 選用：抓玩股網 (大盤融資�
 連同 PWA 頁面發布到 GitHub Pages；平板只是打開一個網頁 (加入主畫面後就是 App)。瀏覽器無法直接抓證交所即時報價
 (只有 TWSE rwd 與 FinMind 允許跨域)，所以即時資料由排程每 5 分鐘更新一次，延遲約 5~8 分鐘。
 
-**一次性設定 (約 10 分鐘)**
+**目前已部署**：repo https://github.com/joekisoul-code/TaiexChipAnalyzer ，平板網址 **https://joekisoul-code.github.io/TaiexChipAnalyzer/**
+(第一次完整計算在 Actions 上約 7.5 分鐘；盤中 fast 模式約 1~2 分鐘)。
+
+**一次性設定 (約 10 分鐘，已完成，留作參考)**
 1. 到 GitHub 建立一個 repository (可以 Private)，把本資料夾推上去：
    ```bash
    cd D:\TaiexChipAnalyzer
