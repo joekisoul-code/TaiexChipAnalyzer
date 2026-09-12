@@ -90,6 +90,111 @@ def forecast(scored: pd.DataFrame, snapshot: dict | None = None) -> dict:
     return out
 
 
+# ============================================================ 近五日精修 (v3)
+# 日模型 1~5 日 IC 僅 0.02~0.04；短天期真正有預測力的是「前晚夜盤台指期」(隔日開盤跳空，樣本外 IC≈0.6) 與
+# 已在 2010~ 逐條驗證的買賣點規則。這裡把兩者疊到 ML 輸出上：
+#   1) 夜盤跳空 β：以歷史「隔日開盤跳空 vs 夜盤漲跌」回歸的斜率，把預期跳空併入各日水準 (收盤後/夜盤/開盤前才適用)
+#   2) 隔天改用小時模型 13:30 目標 (含夜盤，命中 74% vs 基準 57%)
+#   3) 5 日視野：近 3 日觸發且驗證有效 (✓) 的規則，用其歷史 5 日超額報酬做覆蓋 (上限 ±1.5%)
+_GAP_CACHE: dict = {}
+
+
+def night_gap_beta() -> tuple[float, float, int]:
+    """隔日開盤跳空 % 對 夜盤台指期漲跌 % 的回歸斜率 (近 3 年)。回傳 (beta, corr, n)。"""
+    key = dt.date.today().isoformat()
+    if key in _GAP_CACHE:
+        return _GAP_CACHE[key]
+    from ..sources import finmind
+    start = (dt.date.today() - dt.timedelta(days=3 * 365)).isoformat()
+    beta, corr, n = 0.85, 0.0, 0
+    try:
+        # FinMind after_market 的 date = 該夜盤「準備的隔一交易日」→ 對齊該日開盤相對前一日收盤的跳空
+        px = finmind.taiex_price(start)[["date", "open", "close"]].sort_values("date").reset_index(drop=True)
+        px["gap"] = (px["open"] / px["close"].shift(1) - 1) * 100
+        night = finmind.tx_night_history(start)
+        d = px.merge(night[["date", "night_chg_pct"]], on="date", how="inner").dropna(subset=["gap", "night_chg_pct"])
+        d = d[(d["gap"].abs() < 8) & (d["night_chg_pct"].abs() < 8)]
+        if len(d) >= 60:
+            x, y = d["night_chg_pct"].astype(float), d["gap"].astype(float)
+            beta = float(((x - x.mean()) * (y - y.mean())).sum() / ((x - x.mean()) ** 2).sum())
+            corr = float(x.corr(y))
+            n = int(len(d))
+    except Exception as e:  # noqa: BLE001
+        log.warning("night_gap_beta: %s", e)
+    _GAP_CACHE[key] = (round(beta, 3), round(corr, 3), n)
+    return _GAP_CACHE[key]
+
+
+def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, signals_res: dict | None) -> dict:
+    if not fc or fc.get("error") or not fc.get("next_days"):
+        return fc
+    fc = dict(fc)
+    nd = [dict(x) for x in fc["next_days"]]
+    hz = {k: dict(v) for k, v in fc["horizons"].items()}
+    notes: list[str] = []
+    live = bool(fc.get("intraday"))
+    base_px = fc["intraday"]["price"] if live else fc["close"]
+    snap = snapshot or {}
+    # 1) 夜盤跳空
+    tn = snap.get("tx_night")
+    gap = None
+    if tn and tn.get("change_pct") is not None and not live and snap.get("phase") in ("night", "closed", "pre"):
+        beta, corr, n = night_gap_beta()
+        gap = beta * float(tn["change_pct"]) / 100
+        for x in nd:
+            hm = (x.get("hist_mean") or 0) / 100
+            x["level_raw"] = x["level"]
+            x["level"] = round(base_px * (1 + gap) * (1 + hm))
+            x["level_lo"] = round(base_px * (1 + gap) * (1 + (x.get("q20") or 0) / 100))
+            x["level_hi"] = round(base_px * (1 + gap) * (1 + (x.get("q80") or 0) / 100))
+            x["gap_adj"] = round(gap * 100, 2)
+        for h, r in hz.items():
+            r["gap_adj"] = round(gap * 100, 2)
+        notes.append(f"夜盤台指 {tn['change_pct']:+.2f}% → 預期跳空 {gap * 100:+.2f}% (歷史 β={beta:.2f}、r={corr:.2f}、n={n})，已併入各日水準")
+    # 2) 隔天用小時模型 13:30 目標
+    tg = (hourly or {}).get("targets") or {}
+    if hourly and not hourly.get("live") and "13:30" in tg and nd and hourly.get("day") == nd[0]["date"]:
+        t = tg["13:30"]
+        keep = {k: nd[0].get(k) for k in ("p_up", "level", "hist_mean")}
+        nd[0].update({k: t.get(k) for k in ("p_up", "base_hit", "pred", "hist_mean", "q20", "q80", "level", "level_lo", "level_hi") if t.get(k) is not None})
+        nd[0]["source"] = "小時模型 13:30 目標 (含前晚夜盤跳空，樣本外 IC≈0.6、命中 74% vs 基準 57%)"
+        nd[0]["daily_model"] = keep
+        notes.append(f"隔天改用小時模型收盤目標 {t.get('level'):,.0f} (上漲率 {t.get('p_up', 0):.0%})；日模型原值 {keep['level']:,.0f} ({(keep['p_up'] or 0):.0%})")
+    elif nd:
+        nd[0]["source"] = "日模型 (1 日 IC 僅 0.02~0.04，可預測性低)"
+    # 3) 5 日規則覆蓋
+    cur = (signals_res or {}).get("current") or {}
+    ev = (signals_res or {}).get("evaluation")
+    try:
+        rows = ev.to_dict("records") if hasattr(ev, "to_dict") else (ev or [])
+        stats = {r["訊號"]: r for r in rows}
+        base5 = (stats.get("全體基準") or {}).get("5日均報酬%") or 0.0
+        excess, used = 0.0, []
+        for s in cur.get("buy_signals", []):
+            r = stats.get(s["name"])
+            if r and s.get("valid") == "✓" and r.get("5日均報酬%") is not None:
+                excess += r["5日均報酬%"] - base5
+                used.append(f"{s['name']} ({r['5日均報酬%'] - base5:+.2f}%)")
+        for s in cur.get("sell_signals", []):
+            r = stats.get(s["name"])
+            if r and s.get("valid") == "✓" and r.get("5日均報酬%") is not None:
+                excess += r["5日均報酬%"] - base5
+                used.append(f"{s['name']} ({r['5日均報酬%'] - base5:+.2f}%)")
+        excess = max(-1.5, min(1.5, excess))
+        if used and abs(excess) >= 0.1 and 5 in hz:
+            r5 = hz[5]
+            r5["hist_mean_raw"], r5["p_up_raw"] = r5.get("hist_mean"), r5.get("p_up")
+            r5["hist_mean"] = round((r5.get("hist_mean") or 0) + excess, 2)
+            r5["p_up"] = round(max(0.2, min(0.85, (r5.get("p_up") or 0.5) + excess * 0.06)), 3)
+            r5["rule_overlay"] = round(excess, 2)
+            notes.append(f"5 日視野加上驗證有效規則的歷史 5 日超額 {excess:+.2f}%：" + "、".join(used))
+    except Exception as e:  # noqa: BLE001
+        log.debug("rule overlay: %s", e)
+    fc["next_days"], fc["horizons"], fc["short_term_notes"] = nd, hz, notes
+    fc["summary"] = summarize(fc)
+    return fc
+
+
 def _tone(r: dict) -> str:
     diff = (r["p_up"] or 0) - r["base_hit"]
     return "偏多" if diff >= 0.04 else "偏空" if diff <= -0.04 else "中性"

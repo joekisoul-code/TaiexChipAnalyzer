@@ -93,6 +93,10 @@ def main() -> None:
         hr = intraday.forecast(scored, snap)
     except Exception as e:  # noqa: BLE001
         hr = {"error": str(e)}
+    try:   # 近五日精修：夜盤跳空 β、隔天用小時模型、5 日規則覆蓋
+        fc = market_forecast.refine_short_term(fc, hr if not hr.get("error") else None, snap, sg if "error" not in sg else None)
+    except Exception as e:  # noqa: BLE001
+        print("  refine_short_term failed:", e)
     dump("forecast", {"updated": time.strftime("%Y-%m-%d %H:%M:%S"), "forecast": fc, "hourly": hr})
     res = None
     if not args.fast:
@@ -108,6 +112,9 @@ def main() -> None:
             slim[sid]["profile"] = {k: p.get(k) for k in ("poc", "va_lo", "va_hi", "above_pct", "below_pct", "last")}
             slim[sid]["profile_bins"] = p.get("bins")
             slim[sid]["brokers"] = a["brokers"].head(10)
+            fl = a.get("flows")
+            if fl is not None and hasattr(fl, "tail"):   # 近 60 日各路資金 (主力/籌碼集中度 有玩股網時才有)
+                slim[sid]["flows_tail"] = fl.tail(60)[[c for c in ("date", "close", "foreign", "trust", "dealer", "main", "skp5", "skp20", "gov8", "margin_chg") if c in fl]]
         dump("watchlist", {"updated": time.strftime("%Y-%m-%d %H:%M:%S"), "stocks": slim})
         dump("global", {"global": global_study.load_report(), "cross": cross_market.load_report()})
     # 八大行庫監測：全市場序列 (累積) + 排行 (連續上榜) + 追蹤清單各行庫張數；fast 模式追蹤清單沿用上次發布
