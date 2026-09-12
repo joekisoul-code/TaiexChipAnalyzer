@@ -81,6 +81,11 @@ def forecast(scored: pd.DataFrame, snapshot: dict | None = None) -> dict:
                                  "level": round(base_px * (1 + (r["hist_mean"] or 0) / 100), 0),
                                  "level_lo": round(base_px * (1 + (r["q20"] or 0) / 100), 0), "level_hi": round(base_px * (1 + (r["q80"] or 0) / 100), 0),
                                  "drivers": r["drivers"]})
+    # 未來 45 個交易日日曆 (跳過週末與 TWSE 休市日)：供前端畫預測路徑，避免把假日當交易日
+    try:
+        out["calendar"] = twse.next_trading_days(out["date"], 45)
+    except Exception:  # noqa: BLE001
+        out["calendar"] = []
     out["summary"] = summarize(out)
     return out
 
