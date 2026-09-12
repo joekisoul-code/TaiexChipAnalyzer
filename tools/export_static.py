@@ -26,7 +26,7 @@ import pandas as pd  # noqa: E402
 from chip import config, notify, realtime  # noqa: E402
 from chip.analysis import backtest, chips, cross_market, global_study, market, signals  # noqa: E402
 from chip.predict import intraday, market_forecast  # noqa: E402
-from server import clean  # noqa: E402
+from chip.serialize import clean  # noqa: E402
 
 SITE = ROOT / "site"
 DATA = SITE / "data"
