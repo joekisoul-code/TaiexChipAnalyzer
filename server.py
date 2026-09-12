@@ -22,7 +22,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from chip import config, notify, realtime
-from chip.analysis import backtest, chips, cross_market, global_study, market, signals
+from chip.analysis import backtest, chips, cross_market, global_study, gov8, market, signals
 from chip.predict import intraday, market_forecast
 
 logging.basicConfig(level=logging.WARNING)
@@ -63,6 +63,10 @@ def refresh_slow():
         out["signals"] = {"error": str(e)}
     out["global_report"] = global_study.load_report()
     out["cross_report"] = cross_market.load_report()
+    try:
+        out["gov8"] = gov8.build(scored, None, prev=STATE.get("gov8") or {})
+    except Exception as e:  # noqa: BLE001
+        out["gov8"] = {"error": str(e)}
     with LOCK:
         STATE.update(out)
         STATE["scored"] = scored
@@ -86,9 +90,16 @@ def refresh_watchlist():
         slim[sid]["flows_tail"] = a["flows"].tail(60)[[c for c in ("date", "close", "foreign", "trust", "main", "gov8", "margin_lots") if c in a["flows"]]]
         slim[sid]["concentration"] = a.get("concentration")
         slim[sid]["brokers"] = a["brokers"].head(10)
+    try:
+        g8 = gov8.build(STATE.get("scored"), res, prev=STATE.get("gov8") or {})
+    except Exception as e:  # noqa: BLE001
+        g8 = None
+        log.warning("gov8 watchlist: %s", e)
     with LOCK:
         STATE["watchlist"] = slim
         STATE["watchlist_updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        if g8:
+            STATE["gov8"] = g8
 
 
 def loop():
@@ -162,6 +173,14 @@ def api_watchlist():
         return JSONResponse({"ready": False, "message": "追蹤清單計算中"}, status_code=202)
     with LOCK:
         return JSONResponse(clean({"updated": STATE.get("watchlist_updated"), "stocks": STATE["watchlist"]}))
+
+
+@app.get("/api/gov8")
+def api_gov8():
+    if "gov8" not in STATE:
+        return JSONResponse({"ready": False, "message": "八大行庫資料計算中"}, status_code=202)
+    with LOCK:
+        return JSONResponse(clean(STATE["gov8"]))
 
 
 @app.get("/api/global")

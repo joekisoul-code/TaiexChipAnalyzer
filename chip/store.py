@@ -76,3 +76,16 @@ def save_snapshot(date: str, source: str, payload) -> None:
     with conn() as c:
         c.execute("INSERT OR REPLACE INTO snapshots VALUES (?,?,?)",
                   (date, source, json.dumps(payload, ensure_ascii=False, default=str)))
+
+
+def load_snapshots(source: str, limit: int = 10) -> list[tuple[str, dict]]:
+    """某來源最近 limit 天的快照，最新在前：[(date, payload), ...]"""
+    with conn() as c:
+        rows = c.execute("SELECT date,payload FROM snapshots WHERE source=? ORDER BY date DESC LIMIT ?", (source, limit)).fetchall()
+    out = []
+    for d, p in rows:
+        try:
+            out.append((d, json.loads(p)))
+        except Exception:  # noqa: BLE001
+            continue
+    return out

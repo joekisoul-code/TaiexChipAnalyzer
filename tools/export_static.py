@@ -24,7 +24,7 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from chip import config, notify, realtime  # noqa: E402
-from chip.analysis import backtest, chips, cross_market, global_study, market, signals  # noqa: E402
+from chip.analysis import backtest, chips, cross_market, global_study, gov8, market, signals  # noqa: E402
 from chip.predict import intraday, market_forecast  # noqa: E402
 from chip.serialize import clean  # noqa: E402
 
@@ -94,6 +94,7 @@ def main() -> None:
     except Exception as e:  # noqa: BLE001
         hr = {"error": str(e)}
     dump("forecast", {"updated": time.strftime("%Y-%m-%d %H:%M:%S"), "forecast": fc, "hourly": hr})
+    res = None
     if not args.fast:
         res = chips.assess_watchlist(chips.WATCHLIST, use_wantgoo=use_wg)
         slim = {}
@@ -109,6 +110,11 @@ def main() -> None:
             slim[sid]["brokers"] = a["brokers"].head(10)
         dump("watchlist", {"updated": time.strftime("%Y-%m-%d %H:%M:%S"), "stocks": slim})
         dump("global", {"global": global_study.load_report(), "cross": cross_market.load_report()})
+    # 八大行庫監測：全市場序列 (累積) + 排行 (連續上榜) + 追蹤清單各行庫張數；fast 模式追蹤清單沿用上次發布
+    try:
+        dump("gov8", gov8.build(scored, res))
+    except Exception as e:  # noqa: BLE001
+        print("  gov8 failed:", e)
     dump("status", {"ready": True, "updated": time.strftime("%Y-%m-%d %H:%M:%S"), "mode": "fast" if args.fast else "full", "seconds": round(time.time() - t0)})
     print(f"done in {time.time() - t0:.0f}s → {SITE}")
 

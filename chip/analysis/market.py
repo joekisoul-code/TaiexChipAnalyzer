@@ -97,7 +97,8 @@ def build_frame(use_wantgoo: bool = True) -> tuple[pd.DataFrame, dict]:
     inst = _safe(finmind.total_institutional, meta, "FinMind 三大法人", pd.DataFrame())
     margin = _safe(finmind.total_margin, meta, "FinMind 融資融券", pd.DataFrame())
     fut = _safe(finmind.tx_futures_institutional, meta, "FinMind 期貨法人", pd.DataFrame())
-    gov8 = _safe(histock.government_banks_history, meta, "HiStock 八大行庫", pd.DataFrame())
+    from . import gov8 as gov8mod
+    gov8 = _safe(lambda: gov8mod.market_history(), meta, "HiStock 八大行庫 (+SQLite 累積)", pd.DataFrame())   # HiStock 近半年 ∪ SQLite ∪ 已發布
     pcr = _safe(taifex.put_call_ratio, meta, "TAIFEX P/C ratio", pd.DataFrame())
     large = _safe(taifex.large_traders_tx, meta, "TAIFEX 大額交易人")
     fut_latest = _safe(taifex.futures_institutional_latest, meta, "TAIFEX 期貨法人(最新)", pd.DataFrame())

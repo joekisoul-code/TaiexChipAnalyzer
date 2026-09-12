@@ -19,6 +19,23 @@ python -m playwright install chromium     # 選用：抓玩股網 (大盤融資�
 | `CHIP_WANTGOO=0` | 停用玩股網 (Playwright) |
 | `CHIP_DATA_DIR` | 快取與 SQLite 位置 (預設 `./data`) |
 
+## 與 SKYNET 天穹之網 合併 (2026-09-12)
+
+`D:\AI PROJECT\天穹之網 SKYNET\SKYNET-STOCK` (純前端 PWA + Cloudflare Worker) 已把本專案的判斷邏輯併入，介面與架構以 SKYNET 為底：
+
+- `js/fusion.js` 把本專案驗證過的大盤因子 (外資期貨部位+現貨一致性、外資投信現貨、融資四象限、超跌回歸、國際盤 VIX/費半/KOSPI、匯率資金流) 用 FinMind 免費資料與 Worker `/idxh` 在瀏覽器端重算 5 年序列，成為 SKYNET 可回測、可自學權重的「籌碼模型」理論。
+- 本專案 `tools/export_static.py` 發佈到 GitHub Pages 的 `data/*.json` (realtime / market / forecast / watchlist) 被 SKYNET 直接讀取 (GitHub Pages 回 `Access-Control-Allow-Origin: *`)：16 因子判讀、買賣點規則、LightGBM 日/小時預測、追蹤清單成本分布都顯示在 SKYNET 的「籌碼判讀 · 大盤進場」面板。
+- 因此本專案的 GitHub Actions 排程 (`.github/workflows/publish.yml`) 要持續運作，SKYNET 才有雲端資料；JSON 欄位若改名，需同步改 `js/fusion.js` / `js/ui.js`。
+
+## 八大行庫監測 (`chip/analysis/gov8.py`，`python cli.py gov8`，輸出 `data/gov8.json`、API `/api/gov8`)
+
+- **全市場序列**：HiStock 只給近半年 → 每次執行把 `gov8_net` 寫入 SQLite，並與已發布的 Pages `gov8.json` 取聯集，歷史逐日累積 (GitHub Actions 的 `data` cache + Pages 雙保險)。
+- **行為模式**：逆勢護盤 (指數 5 日跌且連買 ≥3 日)／順勢加碼／高檔調節 (指數漲且連賣 ≥3 日)／順勢減碼／小幅買賣超；逆勢係數 = 60 日官股淨額與指數日漲跌相關 (負 = 跌買漲賣)。
+- **事件統計**：護盤、調節、極端買超 (p90)、極端賣超 (p10)、5 日累計 z±1.5 之後 5/10/20 日平均報酬與勝率 vs 全體基準 (2026-09-12 首次：124 日樣本，護盤後 10 日 +5.97% vs 基準 +3.16%，n=17；樣本少且在單邊行情內，僅供觀察)。
+- **排行**：當日買超/賣超前 15 檔含 8 家行庫明細 → 主買/主賣行庫、幾家同向、各行庫今日合計 (誰在主導)；每日排行存 SQLite snapshots → **連續上榜天數與上榜期間累計金額**。
+- **追蹤清單**：近 20 日逐日張數、5/20/60 日累計、連買賣天數、20 日成本與現價差、20 日各行庫張數。
+- 已併入 SKYNET 右欄「八大行庫 監測」面板與新理論 `cf_gov8`。
+
 ## 平板 App 無伺服器版 (GitHub Pages + GitHub Actions)
 
 原理：**你不需要開電腦、也不需要自己的伺服器**。GitHub Actions (免費) 依排程在雲端執行本專案的計算，把結果輸出成靜態 JSON

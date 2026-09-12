@@ -10,6 +10,7 @@
   python cli.py global            國際市場 (美日韓股、VIX、原油、黃金、比特幣、匯率) × 台股歷史研究
   python cli.py chips [代碼...]    追蹤清單籌碼分布 (成本、分價量、大戶、券商均價)
   python cli.py signals           大盤買點/賣點規則驗證與目前狀態
+  python cli.py gov8 [代碼...]     八大行庫監測：全市場進出/行為模式/事件統計/排行 (連續上榜)/追蹤清單各行庫張數
   python cli.py train [--stock]   訓練 LightGBM 走勢預測模型 (大盤；--stock 加個股) 並輸出樣本外指標
   python cli.py forecast [2330]   即時預測：未來 5/10/20 日上漲機率、期望報酬區間、驅動因子 (+個股)
 """
@@ -297,6 +298,38 @@ def cmd_signals(args):
         print(f"  🟩 賣點 {s['name']} {s['days']} 10日超額 {s['excess10']:+.2f}% 驗證 {s['valid']}")
 
 
+def cmd_gov8(args):
+    """八大行庫監測：全市場進出、行為模式、事件統計、排行 (連續上榜)、追蹤清單各行庫張數。"""
+    from chip.analysis import chips, gov8
+    scored, _, _ = market.run(use_wantgoo=False)
+    res = chips.assess_watchlist(args.ids or None, use_wantgoo=False) if not args.no_watch else None
+    g = gov8.build(scored, res)
+    m = g["market"]
+    if m:
+        print(f"═══ 八大行庫 {m['date']} ═══  今日 {m['net']:+.1f} 億｜5日 {m['cum5']:+.1f}｜20日 {m['cum20']:+.1f}｜60日 {m['cum60']:+.1f}｜連{'買' if m['streak'] > 0 else '賣'} {abs(m['streak'])} 日｜歷史百分位 {m['percentile']:.0f}%")
+        print(f"模式【{m['mode']}】{m['mode_text']}；60 日與指數日漲跌相關 {m['corr60']} → {m['corr_text']}")
+        print(f"歷史 {m['history_days']} 日 (自 {m['history_from']})；{m['verdict']}")
+        print(f"  基準：5日 {m['baseline']['fwd5']:+.2f}%/{m['baseline']['win5']}%  10日 {m['baseline']['fwd10']:+.2f}%/{m['baseline']['win10']}%  20日 {m['baseline']['fwd20']:+.2f}%/{m['baseline']['win20']}%")
+        for k, e in m["events"].items():
+            if e:
+                print(f"  {k:<28} n={e['n']:<3} 5日 {e['fwd5']:+.2f}%/{e['win5']}%  10日 {e['fwd10']:+.2f}%/{e['win10']}%  20日 {e['fwd20']:+.2f}%/{e['win20']}%  最近 {e['last']}")
+    r = g["ranking"]
+    print(f"\n排行 {r['date']}  主導行庫：" + "、".join(f"{b['bank']} {b['net']:+.1f}億" for b in r["banks"][:4]))
+    for side, txt in (("buy", "買超"), ("sell", "賣超")):
+        print(f"  {txt}前 10：")
+        for x in r[side][:10]:
+            print(f"    {x['code']:<7}{x['name']:<8}{x['total']:+7.2f} 億  主{txt[0]} {x['top_bank']} {x['top_bank_amt']:+.2f}  {x['n_banks']} 家同向  連續上榜 {x.get('days_on', 0)} 日 (累計 {x.get('cum_on', 0):+.1f})")
+    for sid, w in g["watchlist"].items():
+        print(f"\n{sid} {w.get('name') or ''}  今日 {w['today']:+,} 張｜5日 {w['cum5']:+,}｜20日 {w['cum20']:+,}｜60日 {w['cum60']:+,}｜連{'買' if w['streak'] > 0 else '賣'} {abs(w['streak'])} 日"
+              + (f"｜20 日成本 {w['cost20']} (現價 {w['vs20']:+.2f}%)" if w.get('cost20') else ""))
+        if w.get("banks20"):
+            print("   20 日各行庫：" + "、".join(f"{b['bank']} {b['lots']:+,}" for b in w["banks20"]))
+    if g["alerts"]:
+        print("\n警示：")
+        for a in g["alerts"]:
+            print("  ⚠", a)
+
+
 def cmd_rt(args):
     from chip import realtime
     scored, a, _ = market.run(use_wantgoo=not args.no_wantgoo)
@@ -349,6 +382,10 @@ def main():
     c.add_argument("ids", nargs="*", help="股票代碼，預設追蹤清單 2330 00631L 00685L 00981A 00988A")
     c.set_defaults(fn=cmd_chips)
     sub.add_parser("signals").set_defaults(fn=cmd_signals)
+    g = sub.add_parser("gov8")
+    g.add_argument("ids", nargs="*", help="追蹤清單代碼 (預設 2330 00631L 00685L 00981A 00988A)")
+    g.add_argument("--no-watch", action="store_true", help="只看全市場與排行")
+    g.set_defaults(fn=cmd_gov8)
     o = sub.add_parser("optimize")
     o.add_argument("--dry-run", action="store_true", help="只顯示結果，不寫入 tuned_weights.json")
     o.set_defaults(fn=cmd_optimize)
