@@ -47,10 +47,12 @@ jobs:
             esac
           fi
           echo "mode=$MODE" >> $GITHUB_OUTPUT
-      - name: restore data cache (快取 / SQLite / 模型)
+      - name: restore data cache (快取 / SQLite；模型不進 cache，一律以 git 版本為準)
         uses: actions/cache@v4
         with:
-          path: data
+          path: |
+            data/cache
+            data/chip.sqlite
           key: chip-data-${{ github.run_id }}
           restore-keys: chip-data-
       - name: playwright (玩股網)
@@ -63,6 +65,13 @@ jobs:
             train) python cli.py optimize && python cli.py global && python cli.py cross && python tools/export_static.py --train ;;
             *)     python tools/export_static.py ;;
           esac
+      - name: commit retrained models (train 模式：把 data/models 推回 main，之後每次排程都用新模型)
+        if: steps.mode.outputs.mode == 'train'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/models
+          git diff --cached --quiet || (git commit -m "weekly retrain: update models [skip ci]" && git push origin HEAD:main)
       - name: deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
         with:
