@@ -76,17 +76,30 @@ def _days_to_settle(dates: pd.Series) -> pd.Series:
     return pd.Series(out, index=dates.index)
 
 
+def busdays_to_period_end(dates: pd.Series, freq: str) -> pd.Series:
+    """該日之後到 月底/季底 (含) 還有幾個「週一~週五」；freq='M' 或 'Q'。
+
+    純日曆定義 (np.busday_count，不扣 TWSE 休市日)：訓練與即時推論算出來完全相同，
+    不像 groupby(period).cumcount(ascending=False) 會讓「任何 frame 的最後一列」永遠是 0 (訓練/推論偏差)。
+    不扣休市日的原因：TWSE 休市日快取只有近兩年，2010~ 訓練列無法一致扣除；週末以外的假日 (春節等) 只讓數值略偏大，
+    且訓練/推論一致。當月最後一個週間日 = 0，與舊定義在「完整月份」的語意相同。
+    """
+    dts = pd.to_datetime(dates)
+    end = dts.dt.to_period(freq).dt.end_time.dt.normalize()
+    a = dts.values.astype("datetime64[D]") + np.timedelta64(1, "D")      # 從隔天起算 (不含當日)
+    b = end.values.astype("datetime64[D]") + np.timedelta64(1, "D")      # busday_count 的 end 不含 → 含月底當天
+    return pd.Series(np.busday_count(a, b), index=dates.index).astype(int)
+
+
 def add_time_features(d: pd.DataFrame) -> pd.DataFrame:
     dates = pd.to_datetime(d["date"])
     d["dow"] = dates.dt.weekday
     d["month"] = dates.dt.month
     d["days_to_settle"] = _days_to_settle(d["date"])
     d["settle_week"] = (d["days_to_settle"] <= 4).astype(int)
-    # 距月底/季底的交易日數 (以資料內的交易日計算；最後一個月用日曆估)
-    ym = dates.dt.to_period("M")
-    d["days_to_month_end"] = d.groupby(ym).cumcount(ascending=False)
-    yq = dates.dt.to_period("Q")
-    d["days_to_quarter_end"] = d.groupby(yq).cumcount(ascending=False)
+    # 距月底/季底的週間日數 (日曆定義，訓練與推論一致；見 busdays_to_period_end)
+    d["days_to_month_end"] = busdays_to_period_end(d["date"], "M")
+    d["days_to_quarter_end"] = busdays_to_period_end(d["date"], "Q")
     return d
 
 
@@ -145,5 +158,6 @@ def as_if_close(scored: pd.DataFrame, price: float, projected_amount: float | No
     for col in ("foreign", "trust", "dealer", "total", "gov8_net", "fut_foreign_net_trade"):
         if col in new:
             new[col] = np.nan     # 今日籌碼未知
-    d = pd.concat([d, new.to_frame().T], ignore_index=True)
+    # to_frame().T 會讓所有欄位變 object dtype → add_features 的 amount/amount_ma20 除法在 pandas 3 會 ZeroDivisionError；還原數值 dtype
+    d = pd.concat([d, new.to_frame().T], ignore_index=True).infer_objects()
     return d

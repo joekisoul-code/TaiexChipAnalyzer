@@ -150,6 +150,12 @@ def cmd_train(args):
         print("═══ 訓練大盤模型 (2010~，逐年 walk-forward 自 2014，淺層 LightGBM ×5 種子；視野 1/2/3/5/10/20 日) ═══")
         for h, m in market_forecast.train().items():
             _print_metrics(h, m)
+        print("\n═══ 訓練 7 個交易日趨勢閘門 trend7 (regime 規則 + 淺層 LightGBM P(fwd7<0)；逐年 walk-forward 自 2014) ═══")
+        from chip.predict import range_levels, short_term, trend7
+        trend7.train(verbose=True)
+        print("\n═══ 擬合路徑型買賣點乘數 range_levels (sigma 波動縮放 + 夜盤位移；全歷史分位數) ═══")
+        from chip.analysis import backtest
+        range_levels.fit_multipliers(backtest.load_long(), short_term._night_hist(), verbose=True)
     if args.intraday or args.intraday_only or not only:
         print("\n═══ 訓練小時模型 (Yahoo ^TWII 小時 K 近 2 年 + 前日籌碼 + 夜盤；逐月 walk-forward) ═══")
         for tm, m in intraday.train().items():

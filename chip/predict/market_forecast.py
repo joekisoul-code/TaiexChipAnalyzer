@@ -57,6 +57,7 @@ def forecast(scored: pd.DataFrame, snapshot: dict | None = None) -> dict:
     if snapshot and snapshot.get("phase") in ("open", "pre", "post") and idx.get("last") and not snapshot.get("same_day", False):
         try:
             d2 = market.score_frame(market.add_features(as_if_close(scored, float(idx["last"]), snapshot.get("amount_projected"))))
+            d2 = d2.loc[:, ~d2.columns.duplicated(keep="last")]      # scored 已含 f_*/composite，score_frame 以 concat 併入會重複 → 留最新一份
             m2 = market_matrix(d2).iloc[[-1]]
             out["intraday"] = {"price": float(idx["last"]), "chg_pct": idx.get("chg_pct"), "time": idx.get("time"),
                                "horizons": {h: _predict_row(b, m2) for h, b in bundles.items()}}
@@ -154,13 +155,25 @@ def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, sign
             x["level_lo"] = round(base_px * (1 + (r["q20"] or 0) / 100))
             x["level_hi"] = round(base_px * (1 + (r["q80"] or 0) / 100))
             x["source"] = r["note"]
+            x["caveat"] = r.get("caveat") or ""      # 叫牌可信度提醒 (v2.2)：獨立鍵，小時模型覆寫 source 後仍保留
         if 5 in st and 5 in hz:
             r = st[5]
             hz[5]["daily_model_v1"] = {k: hz[5].get(k) for k in ("p_up", "hist_mean")}
             hz[5].update({k: r[k] for k in ("p_up", "hist_mean", "q20", "q80", "bin", "base_hit", "call", "call_strength", "call_hit", "tier_up_hit", "tier_dn_hit", "call_cov", "variant", "drivers")})
             hz[5]["source"] = r["note"]
+            hz[5]["caveat"] = r.get("caveat") or ""
         calls = "、".join(f"{x['label']} {x.get('call')}{x.get('call_strength') or ''} ({(x.get('call_hit') or 0):.0%})" for x in nd if x.get("call")) + (f"、5 日 {st[5]['call']}{st[5].get('call_strength') or ''} ({(st[5].get('call_hit') or 0):.0%})" if 5 in st else "")
         notes.append(f"短線模型 v2 ({'含夜盤' if st[min(st)]['variant'] == 'night' else '不含夜盤'})：叫牌 {calls}；括號為該檔位樣本外命中率")
+    # 0b) 路徑型買賣點 (拉回買 buy_at / 反彈賣 sell_at / 停損 stop / 目標 target；level_lo/level_hi 覆寫為 20%/80% 路徑分位)
+    #     夜盤模式只在夜盤結束且日期對齊時套用 (range_levels._night_final)，因此下方跳空與小時模型都不得再改 level_lo/level_hi
+    if scored is not None:
+        try:
+            from . import range_levels as RLV
+            rn = RLV.attach_to_next_days(nd, scored, snap, base_px, live=live)
+            if rn:
+                notes.append(rn)
+        except Exception as e:  # noqa: BLE001
+            log.warning("range_levels: %s", e)
     # 1) 夜盤跳空
     tn = snap.get("tx_night")
     gap = None
@@ -171,8 +184,9 @@ def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, sign
             hm = (x.get("hist_mean") or 0) / 100
             x["level_raw"] = x["level"]
             x["level"] = round(base_px * (1 + gap) * (1 + hm))
-            x["level_lo"] = round(base_px * (1 + gap) * (1 + (x.get("q20") or 0) / 100))
-            x["level_hi"] = round(base_px * (1 + gap) * (1 + (x.get("q80") or 0) / 100))
+            if x.get("range_mode") is None:      # 路徑型水準已含 (或刻意不含) 夜盤位移，再乘跳空會重複計算
+                x["level_lo"] = round(base_px * (1 + gap) * (1 + (x.get("q20") or 0) / 100))
+                x["level_hi"] = round(base_px * (1 + gap) * (1 + (x.get("q80") or 0) / 100))
             x["gap_adj"] = round(gap * 100, 2)
         for h, r in hz.items():
             r["gap_adj"] = round(gap * 100, 2)
@@ -181,8 +195,9 @@ def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, sign
     tg = (hourly or {}).get("targets") or {}
     if hourly and not hourly.get("live") and "13:30" in tg and nd and hourly.get("day") == nd[0]["date"]:
         t = tg["13:30"]
-        keep = {k: nd[0].get(k) for k in ("p_up", "level", "hist_mean")}
-        nd[0].update({k: t.get(k) for k in ("p_up", "base_hit", "pred", "hist_mean", "q20", "q80", "level", "level_lo", "level_hi") if t.get(k) is not None})
+        keep = {k: nd[0].get(k) for k in ("p_up", "level", "hist_mean", "caveat")}
+        hk = ("p_up", "base_hit", "pred", "hist_mean", "q20", "q80", "level") if nd[0].get("range_mode") else ("p_up", "base_hit", "pred", "hist_mean", "q20", "q80", "level", "level_lo", "level_hi")
+        nd[0].update({k: t.get(k) for k in hk if t.get(k) is not None})      # 路徑型 level_lo/level_hi 不被小時模型收盤分位覆寫
         nd[0]["source"] = "小時模型 13:30 目標 (含前晚夜盤跳空，樣本外 IC≈0.6、命中 74% vs 基準 57%)"
         nd[0]["daily_model"] = keep
         notes.append(f"隔天改用小時模型收盤目標 {t.get('level'):,.0f} (上漲率 {t.get('p_up', 0):.0%})；日模型原值 {keep['level']:,.0f} ({(keep['p_up'] or 0):.0%})")
@@ -216,6 +231,20 @@ def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, sign
             notes.append(f"5 日視野加上驗證有效規則的歷史 5 日超額 {excess:+.2f}%：" + "、".join(used))
     except Exception as e:  # noqa: BLE001
         log.debug("rule overlay: %s", e)
+    # 4) 7 個交易日趨勢閘門：down → 不推薦買點 (僅賣點/觀望)；up → 不推薦賣點；以最後一個已收盤列計算 (盤中不重算)
+    try:
+        from . import trend7
+        g = trend7.trend7_gate(scored) if scored is not None else trend7._empty("無 scored 資料")
+    except Exception as e:  # noqa: BLE001
+        log.warning("trend7: %s", e)
+        g = {"available": False, "state": "flat", "confidence": "", "p_down": None, "exp_ret7": None, "reasons": [], "text": f"trend7 失敗 ({e})",
+             "drivers_toward_down": [], "drivers_toward_up": [], "oos": {}, "horizon_note": "7 個交易日"}
+    fc["trend7"] = g
+    if g.get("available"):
+        if g.get("state") == "down":
+            notes.append(f"7 個交易日趨勢閘門 [{g.get('confidence')}]：偏下 → 不推薦買點，僅賣點/觀望 (" + "；".join(g.get("reasons") or []) + ")")
+        elif g.get("state") == "up":
+            notes.append("7 個交易日趨勢閘門：偏上 → 不推薦賣點 (" + "；".join(g.get("reasons") or []) + ")")
     fc["next_days"], fc["horizons"], fc["short_term_notes"] = nd, hz, notes
     fc["summary"] = summarize(fc)
     return fc

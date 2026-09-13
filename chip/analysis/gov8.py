@@ -11,6 +11,8 @@ HiStock 只給近半年 → 全市場序列另存 SQLite 累積，並與已發�
 - history  逐日序列 (畫圖用)
 - ranking  今日買超/賣超前 15 檔：金額 (億)、主買/主賣行庫、連續上榜天數、上榜期間累計；各行庫今日合計 (誰在主導)、各行庫近 5 日趨勢 (bank5，由每日快照累加)
 - watchlist 追蹤清單個股：近 20 日逐日張數、5/20/60 日累計、各行庫 20 日張數、20 日成本與現價差
+- dist     價位別籌碼分布 (market.dist / watchlist[sid].dist，見 gov8_dist.py)：各價位桶淨買賣、20/60/120/全期成本、支撐/供給/套牢區、
+           FIFO 剩餘部位成本、主力狀態 (官股逢跌加碼中 / 高檔調節 / 套牢；描述性，非交易訊號)
 - alerts   文字警示
 """
 from __future__ import annotations
@@ -25,12 +27,14 @@ import pandas as pd
 from .. import config, store
 from ..http import session
 from ..sources import histock
+from . import gov8_dist
 from .common import streak, zscore
 
 log = logging.getLogger(__name__)
 PAGES_URL = os.getenv("CHIP_PAGES_URL", "https://joekisoul-code.github.io/TaiexChipAnalyzer/")
 BANKS = histock.BANKS
 WAN_TO_YI = 1e-4  # 萬元 → 億
+WATCH_IDS = ["2330", "00631L", "00685L", "00981A", "00988A"]   # 與 chips.WATCHLIST 相同 (fast 模式無 prev 時的備援)
 
 
 # ------------------------------------------------------------------ 已發布資料 (Actions 跨次累積的保險)
@@ -340,8 +344,12 @@ def alerts(view: dict, rank: dict, wl: dict) -> list[str]:
             if r.get("days_on", 0) >= 3:
                 al.append(f"{r['code']} {r['name']} 八大行庫連續 {r['days_on']} 日{txt}上榜，累計 {abs(r['cum_on']):.1f} 億")
     for sid, r in wl.items():
-        if abs(r["streak"]) >= 3:
-            al.append(f"{sid} {r.get('name') or ''} 八大行庫連{'買' if r['streak'] > 0 else '賣'} {abs(r['streak'])} 日，20 日累計 {r['cum20']:+,} 張")
+        st = int(r.get("streak") or 0)
+        if abs(st) >= 3 and r.get("cum20") is not None:
+            al.append(f"{sid} {r.get('name') or ''} 八大行庫連{'買' if st > 0 else '賣'} {abs(st)} 日，20 日累計 {r['cum20']:+,} 張")
+        w = ((r.get("dist") or {}).get("current") or {}).get("warn")
+        if w:
+            al.append(f"{sid} {r.get('name') or ''} {w} (現價低於八大行庫 60 日成本)")
     return al[:12]
 
 
@@ -355,7 +363,17 @@ def build(scored: pd.DataFrame | None = None, watch_res: dict | None = None, pre
     except Exception as e:  # noqa: BLE001
         log.warning("gov8 ranking: %s", e)
         rank = prev.get("ranking") or {"date": "", "buy": [], "sell": [], "banks": []}
-    wl = watchlist(watch_res) if watch_res is not None else (prev.get("watchlist") or {})
+    prev_wl = prev.get("watchlist") or {}
+    wl = watchlist(watch_res) if watch_res is not None else dict(prev_wl)
+    # 價位別籌碼分布 + 主力狀態 (描述性)：完整模式用 chips 的 flows；fast 模式用快取價重算，算不出來沿用上次發布的 dist
+    try:
+        mdist, sdist = gov8_dist.dist_section(h, watch_res, prev_wl, ids=None if watch_res is not None else (list(prev_wl) or WATCH_IDS))
+        if mdist:
+            view["dist"] = mdist
+        for sid, d in sdist.items():
+            wl.setdefault(sid, {"stock_id": sid})["dist"] = d
+    except Exception as e:  # noqa: BLE001
+        log.warning("gov8 dist: %s", e)
     cols = [c for c in ("date", "gov8_net", "close", "ret1", "cum5", "cum20", "ma20", "inv", "streak", "z5") if c in h]
     return {
         "generated": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M:%S"),

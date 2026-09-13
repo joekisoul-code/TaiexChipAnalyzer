@@ -71,8 +71,15 @@ def main() -> None:
         print("training models…")
         market_forecast.train()
         intraday.train()
-        from chip.predict import short_term
+        from chip.predict import range_levels, short_term, trend7
         short_term.train(verbose=False)
+        try:   # 7 個交易日趨勢閘門 (走 walk-forward + 最終擬合，約 10 秒) 與 路徑型買賣點乘數 (數秒)
+            print("  trend7:")
+            trend7.train(verbose=True)
+            print("  range_levels:")
+            range_levels.fit_multipliers(backtest.load_long(), short_term._night_hist(), verbose=True)
+        except Exception as e:  # noqa: BLE001
+            print("  trend7/range_levels train failed:", e)
     scored, A, meta = market.run(use_wantgoo=use_wg)
     snap = realtime.snapshot(scored)
     snap["combined"] = realtime.combined_view(A["composite_smooth"], A["regime"], snap["score"]["score"], snap["score"]["label"], snap["phase"])

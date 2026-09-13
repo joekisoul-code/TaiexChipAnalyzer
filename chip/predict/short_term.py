@@ -46,13 +46,21 @@ NIGHT_FEATURE = "night_chg_pct"
 ASIA_FEATURES = ["kospi_r0", "nikkei_r0", "hsi_r0"]
 CHIP_FEATURES = ["mtx_retail_ratio", "mtx_retail_chg5", "mtx_foreign_net_z", "txo_f_call_z", "txo_f_put_z", "txo_f_cp_diff_z", "txo_d_cp_diff_z",
                  "tx_basis_pct", "tx_basis_chg1", "tx_oi_chg1_z", "tx_vol_z"]
-FEATURE_SETS = {"short": ST_FEATURES, "+asia": ST_FEATURES + ASIA_FEATURES, "+asia+chip": ST_FEATURES + ASIA_FEATURES + CHIP_FEATURES}
+# v2.2 價格型態特徵 (2026-09-13 R3 方向研究)：2010~ 條件統計顯示 1 日方向為「短線動能」(韓股同日/振幅/跳空/K 棒) 而非均值回歸。
+#   加入第四組特徵集後，1 日不含夜盤 OOS 叫牌命中 0.547→0.558 (IC 0.100→0.116；滾動門檻 0.553→0.563；種子重抽 +0.4~+1.6pp，10/10 為正)，
+#   2/3 日與夜盤變體在 ±1pp 雜訊內無差異 (由 _pick 自動保留原特徵集；h2 base 可能無害地翻選 +px|ridge 0.601 vs 0.602)。
+#   注意：增益來自 ~300 個邊際檔位日的更替，屬「小但方向一致」的改善；2025~26 未見增益。盤中以未收盤 K 棒計算時屬暫定值。
+PX_FEATURES = ["streak", "range_ratio", "body", "upper_wick", "lower_wick", "gap_filled", "ret1_x_clv", "kospi_rel0", "new_hi20", "new_lo20"]
+FEATURE_SETS = {"short": ST_FEATURES, "+asia": ST_FEATURES + ASIA_FEATURES, "+asia+chip": ST_FEATURES + ASIA_FEATURES + CHIP_FEATURES,
+                "+asia+chip+px": ST_FEATURES + ASIA_FEATURES + CHIP_FEATURES + PX_FEATURES}
 NAMES = {**FEATURE_NAMES, "ret1_l1": "前 1 日漲跌%", "ret1_l2": "前 2 日漲跌%", "gap_open": "今日開盤跳空%", "range_pct": "今日振幅%",
          "clv": "收盤在當日區間位置", "up5": "近 5 日上漲天數", NIGHT_FEATURE: "前晚夜盤台指期%",
          "kospi_r0": "KOSPI 今日%", "nikkei_r0": "日經今日%", "hsi_r0": "恆生今日%",
          "mtx_retail_ratio": "小台散戶多空比", "mtx_retail_chg5": "小台散戶多空比 5 日變化", "mtx_foreign_net_z": "小台外資淨部位 z",
          "txo_f_call_z": "選擇權外資買權淨 z", "txo_f_put_z": "選擇權外資賣權淨 z", "txo_f_cp_diff_z": "選擇權外資買減賣權 z", "txo_d_cp_diff_z": "選擇權自營買減賣權 z",
-         "tx_basis_pct": "台指期近月期現價差%", "tx_basis_chg1": "期現價差日變化", "tx_oi_chg1_z": "台指期 OI 日變化 z", "tx_vol_z": "台指期成交量 z"}
+         "tx_basis_pct": "台指期近月期現價差%", "tx_basis_chg1": "期現價差日變化", "tx_oi_chg1_z": "台指期 OI 日變化 z", "tx_vol_z": "台指期成交量 z",
+         "streak": "連漲/連跌天數 (帶號)", "range_ratio": "今日振幅/20 日均振幅", "body": "K 棒實體%", "upper_wick": "上影線%", "lower_wick": "下影線%",
+         "gap_filled": "今日跳空已回補", "ret1_x_clv": "漲跌×收盤位置", "kospi_rel0": "台股相對韓股同日強弱", "new_hi20": "創 20 日新高", "new_lo20": "創 20 日新低"}
 LGB_PARAMS = dict(M.PARAMS, n_estimators=120, min_child_samples=150)
 RIDGE_ALPHA = 30.0
 TIER = 0.30          # 前/後 30% 才叫方向 (一般)
@@ -82,7 +90,7 @@ def build_matrix(scored: pd.DataFrame, night: pd.DataFrame | None = None) -> pd.
         d = _add_extra_features(d)
     except Exception as e:  # noqa: BLE001
         log.warning("extra features: %s", e)
-    for col in ST_FEATURES + ASIA_FEATURES + CHIP_FEATURES:
+    for col in ST_FEATURES + ASIA_FEATURES + CHIP_FEATURES + PX_FEATURES:
         if col not in d:
             d[col] = np.nan
     return d
@@ -104,6 +112,30 @@ def _asof_return(dates: pd.Series, sym: str) -> pd.Series:
     return pd.Series(out, index=dates.index, dtype=float)
 
 
+def _add_price_pattern_features(d: pd.DataFrame) -> pd.DataFrame:
+    """價格型態特徵 (PX_FEATURES)：全部只用 D 日收盤前資訊；kospi_rel0 用台股收盤後已知的韓股同日收盤。
+
+    只依賴 OHLC 與 build_matrix 已算好的 ret1/gap_open/range_pct/clv/hi20/lo20，不需任何網路資料；
+    kospi_r0 缺值 (Yahoo 快取未更新) 時 kospi_rel0 為 NaN → LGB 原生處理、Ridge 以訓練中位數補值。
+    """
+    c, o = d["close"].astype(float), d["open"].astype(float)
+    h, l = d["high"].astype(float), d["low"].astype(float)
+    prev = c.shift(1)
+    r1 = d["ret1"].astype(float)
+    sg = np.sign(r1)
+    d["streak"] = (sg.groupby((sg != sg.shift()).cumsum()).cumcount() + 1) * sg          # 連漲 +n / 連跌 -n
+    d["range_ratio"] = d["range_pct"] / d["range_pct"].rolling(20).mean()
+    d["body"] = (c - o) / prev * 100
+    d["upper_wick"] = (h - np.maximum(c, o)) / prev * 100
+    d["lower_wick"] = (np.minimum(c, o) - l) / prev * 100
+    d["gap_filled"] = (((d["gap_open"] > 0) & (l <= prev)) | ((d["gap_open"] < 0) & (h >= prev))).astype(int)
+    d["ret1_x_clv"] = r1 * d["clv"]
+    d["new_hi20"] = (c >= d["hi20"]).astype(int)   # hi20 含今日 → 收盤即知
+    d["new_lo20"] = (c <= d["lo20"]).astype(int)
+    d["kospi_rel0"] = (d["kospi_r0"].astype(float) - r1) if "kospi_r0" in d else np.nan
+    return d
+
+
 def _add_extra_features(d: pd.DataFrame) -> pd.DataFrame:
     dates = d["date"].astype(str)
     c = d["close"].astype(float)
@@ -112,6 +144,11 @@ def _add_extra_features(d: pd.DataFrame) -> pd.DataFrame:
             d[col] = _asof_return(dates, sym)
         except Exception as e:  # noqa: BLE001
             log.debug("%s: %s", col, e)
+    # 價格型態 (放在 FinMind 籌碼抓取之前：不依賴網路，籌碼資料失敗時仍可算出)
+    try:
+        d = _add_price_pattern_features(d)
+    except Exception as e:  # noqa: BLE001
+        log.warning("price pattern features: %s", e)
     by = lambda s: pd.Series([s.get(x, np.nan) for x in dates], index=d.index, dtype=float)  # noqa: E731
     # 小台 MTX：散戶淨部位 = -(三大法人淨部位)，除以近月全部 OI
     mtx = finmind.fetch("TaiwanFuturesInstitutionalInvestors", "MTX", "2018-01-01")
@@ -373,12 +410,33 @@ def forecast(scored: pd.DataFrame, snapshot: dict | None = None) -> dict:
             call, call_hit = "偏空", t["dn_hit"]
             if t.get("strong_lo") is not None and pred <= t["strong_lo"] and (t.get("dn_hit_strong") or 0) >= t["dn_hit"]:
                 strength, call_hit = "強", t["dn_hit_strong"]
+        caveat = _honesty_note(h, variant, snap.get("phase"))
         out[h] = {"pred_std": round(pred, 3), "p_up": cal["p_up"], "hist_mean": cal["hist_mean"], "q20": cal["q20"], "q80": cal["q80"], "bin": cal["bin"],
                   "base_hit": cal["base_hit"], "call": call, "call_strength": strength, "call_hit": round(call_hit, 3) if call_hit is not None else None,
                   "tier_up_hit": t.get("up_hit"), "tier_dn_hit": t.get("dn_hit"), "call_cov": t.get("call_cov"),
                   "variant": variant, "model": b["chosen"], "rank_ic": rep.get("rank_ic"), "drivers": drivers,
-                  "note": f"短線模型 v2 ({variant == 'night' and '含夜盤' or '不含夜盤'}‧{b['chosen']}‧OOS IC {rep.get('rank_ic')}‧叫牌命中 {t.get('call_hit')} 覆蓋 {t.get('call_cov')})"}
+                  "caveat": caveat,
+                  "note": f"短線模型 v2 ({variant == 'night' and '含夜盤' or '不含夜盤'}‧{b['chosen']}‧OOS IC {rep.get('rank_ic')}‧叫牌命中 {t.get('call_hit')} 覆蓋 {t.get('call_cov')})"
+                          + (f"‧{caveat}" if caveat else "")}
     return out
+
+
+def _honesty_note(h: int, variant: str, phase: str | None = None) -> str:
+    """叫牌可信度的誠實提醒 (v2.2 驗證者要求)：
+    - 1 日不含夜盤：OOS 命中僅約 56% (滾動門檻 0.563；基準 55%)，避免使用者高估盤後 1 日叫牌把握。
+    - 1 日含夜盤：81% 為收盤到收盤，主要來自隔夜跳空 (夜盤 05:00 收盤後才可知)；隔日開盤進場的方向命中約 67%。
+    - 盤中 (phase=open) 以未收盤 K 棒與韓股盤中值計算 → 暫定。
+    """
+    parts: list[str] = []
+    if h == 1 and variant == "base":
+        parts.append("OOS 命中約 56% (基準 55%)")
+    elif h == 1 and variant == "night":
+        parts.append("81% 為收盤到收盤,主要來自隔夜跳空;開盤進場約 67%")
+    elif variant == "night":
+        parts.append("命中為收盤到收盤,含隔夜跳空")
+    if phase == "open":
+        parts.append("盤中以未收盤 K 棒計算,屬暫定")
+    return "；".join(parts)
 
 
 def load_metrics() -> dict | None:
