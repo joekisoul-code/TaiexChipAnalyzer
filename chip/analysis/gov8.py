@@ -6,9 +6,10 @@ HiStock 只給近半年 → 全市場序列另存 SQLite 累積，並與已發�
 
 輸出 build()：
 - market   全市場：今日/5/20/60 日累計 (億)、連買賣天數、5 日 z、今日在歷史的百分位、60 日與指數日漲跌相關 (負 = 逆勢護盤性格)、
-           行為模式 (逆勢護盤/順勢加碼/高檔調節/順勢減碼/中性)、事件統計 (護盤/調節/極端買賣 之後 5/10/20 日報酬 vs 基準)
+           行為模式 (逆勢護盤/順勢加碼/高檔調節/順勢減碼/中性)、事件統計 (護盤/調節/極端買賣/跌日買/漲日賣/連買賣≥5 之後 1/2/5/10/20 日報酬 vs 基準)、
+           護盤力道 -100..100 (單日 z + 5 日 z + 連續天數 + 模式)、存量 (自起點累計) 與存量位置、60 日行為統計 (買超天數比/跌買率/漲賣率/平均規模)、近 12 週週別統計
 - history  逐日序列 (畫圖用)
-- ranking  今日買超/賣超前 15 檔：金額 (億)、主買/主賣行庫、連續上榜天數、上榜期間累計；各行庫今日合計 (誰在主導)
+- ranking  今日買超/賣超前 15 檔：金額 (億)、主買/主賣行庫、連續上榜天數、上榜期間累計；各行庫今日合計 (誰在主導)、各行庫近 5 日趨勢 (bank5，由每日快照累加)
 - watchlist 追蹤清單個股：近 20 日逐日張數、5/20/60 日累計、各行庫 20 日張數、20 日成本與現價差
 - alerts   文字警示
 """
@@ -80,7 +81,9 @@ def _event_stats(h: pd.DataFrame, mask: pd.Series) -> dict | None:
     if n == 0:
         return None
     out = {"n": n}
-    for k in (5, 10, 20):
+    for k in (1, 2, 5, 10, 20):
+        if f"fwd{k}" not in g:
+            continue
         v = g[f"fwd{k}"].dropna()
         out[f"fwd{k}"] = round(float(v.mean()), 2) if len(v) else None
         out[f"win{k}"] = round(float((v > 0).mean() * 100), 1) if len(v) else None
@@ -100,16 +103,20 @@ def market_view(hist: pd.DataFrame, scored: pd.DataFrame | None) -> tuple[dict, 
     h["ret1"] = c.pct_change() * 100
     h["ret5"] = c.pct_change(5) * 100
     h["ret20"] = c.pct_change(20) * 100
-    for k in (5, 10, 20):
+    for k in (1, 2, 5, 10, 20):
         h[f"fwd{k}"] = (c.shift(-k) / c - 1) * 100
     g = h["gov8_net"].astype(float)
     h["cum5"] = g.rolling(5, min_periods=1).sum()
     h["cum20"] = g.rolling(20, min_periods=1).sum()
     h["cum60"] = g.rolling(60, min_periods=1).sum()
+    h["cum120"] = g.rolling(120, min_periods=1).sum()
     h["ma5"] = g.rolling(5, min_periods=1).mean()
+    h["ma20"] = g.rolling(20, min_periods=1).mean()
+    h["inv"] = g.cumsum()                      # 存量：自歷史起點累計 (官股淨部位變化)
     h["streak"] = streak(g)
     h["z5"] = zscore(h["cum5"], 60)
     h["z1"] = zscore(g, 60)
+    h["z20"] = zscore(h["cum20"], 120)
     last = h.iloc[-1]
     st = int(last["streak"])
     ret5 = float(last["ret5"]) if pd.notna(last["ret5"]) else 0.0
@@ -140,9 +147,13 @@ def market_view(hist: pd.DataFrame, scored: pd.DataFrame | None) -> tuple[dict, 
         f"極端賣超 (單日 < {q10:.0f} 億, p10)": _event_stats(h, g <= q10),
         "5 日累計 z > 1.5": _event_stats(h, h["z5"] > 1.5),
         "5 日累計 z < -1.5": _event_stats(h, h["z5"] < -1.5),
+        "跌日買超 (指數跌 >1% 且官股買 >50 億)": _event_stats(h, (h["ret1"] < -1) & (g > 50)),
+        "漲日賣超 (指數漲 >1% 且官股賣 >50 億)": _event_stats(h, (h["ret1"] > 1) & (g < -50)),
+        "連買 ≥5 日": _event_stats(h, h["streak"] >= 5),
+        "連賣 ≥5 日": _event_stats(h, h["streak"] <= -5),
     }
     base = {}
-    for k in (5, 10, 20):
+    for k in (1, 2, 5, 10, 20):
         v = h[f"fwd{k}"].dropna()
         base[f"fwd{k}"] = round(float(v.mean()), 2) if len(v) else None
         base[f"win{k}"] = round(float((v > 0).mean() * 100), 1) if len(v) else None
@@ -154,8 +165,48 @@ def market_view(hist: pd.DataFrame, scored: pd.DataFrame | None) -> tuple[dict, 
                    + ("，樣本少僅供參考" if p["n"] < 15 else "") + ")")
     else:
         verdict = "護盤事件樣本不足，持續累積中"
+    # 60 日行為統計：買超天數比、平均買/賣規模、跌買率 (指數跌日官股買超的比例)、漲賣率
+    t60 = h.tail(60)
+    g60 = t60["gov8_net"].astype(float)
+    r60 = t60["ret1"]
+    down, up = t60[r60 < 0], t60[r60 > 0]
+    behav = {
+        "buy_days_pct": round(float((g60 > 0).mean() * 100), 0),
+        "avg_buy": round(float(g60[g60 > 0].mean()), 1) if (g60 > 0).any() else None,
+        "avg_sell": round(float(g60[g60 < 0].mean()), 1) if (g60 < 0).any() else None,
+        "dip_buy_rate": round(float((down["gov8_net"] > 0).mean() * 100), 0) if len(down) else None,
+        "rally_sell_rate": round(float((up["gov8_net"] < 0).mean() * 100), 0) if len(up) else None,
+        "dip_days": int(len(down)), "up_days": int(len(up)),
+        "net_on_down": round(float(down["gov8_net"].sum()), 0) if len(down) else None,
+        "net_on_up": round(float(up["gov8_net"].sum()), 0) if len(up) else None,
+    }
+    # 護盤力道 -100..100：單日 z、5 日 z、連續天數、行為模式 綜合
+    z1v = float(last["z1"]) if pd.notna(last["z1"]) else 0.0
+    z5v = float(last["z5"]) if pd.notna(last["z5"]) else 0.0
+    mode_pts = {"逆勢護盤": 25, "順勢加碼": 15, "小幅買超": 5, "中性": 0, "小幅賣超": -5, "高檔調節": -15, "順勢減碼": -25}[mode]
+    power = max(-100, min(100, 30 * max(-2, min(2, z1v)) / 2 + 30 * max(-2, min(2, z5v)) / 2 + 20 * max(-5, min(5, st)) / 5 + mode_pts))
+    power_text = ("強力護盤" if power >= 60 else "積極買進" if power >= 30 else "小幅偏買" if power >= 10 else
+                  "強力出貨" if power <= -60 else "明顯賣出" if power <= -30 else "小幅偏賣" if power <= -10 else "觀望中性")
+    # 存量位置：目前累計淨部位在歷史區間的位置 (100% = 歷史最高持有)
+    inv = h["inv"].astype(float)
+    inv_rng = float(inv.max() - inv.min())
+    inv_pos = round(float((inv.iloc[-1] - inv.min()) / inv_rng * 100), 0) if inv_rng > 0 else None
+    # 週別統計 (近 12 週)：官股週淨買賣 vs 指數週漲跌
+    weekly = []
+    try:
+        wk = h.copy()
+        wk["wk"] = pd.to_datetime(wk["date"]).dt.to_period("W").astype(str)
+        for _k, grp in list(wk.groupby("wk"))[-12:]:
+            cl = grp["close"].astype(float).dropna()
+            weekly.append({"week": str(grp["date"].iloc[0])[:10], "net": round(float(grp["gov8_net"].sum()), 0), "days": int(len(grp)),
+                           "ret": round(float(cl.iloc[-1] / cl.iloc[0] - 1) * 100, 2) if len(cl) >= 2 else None})
+    except Exception as e:  # noqa: BLE001
+        log.debug("gov8 weekly: %s", e)
     view = {
         "date": str(last["date"]), "net": round(net, 1), "cum5": round(cum5, 1), "cum20": round(float(last["cum20"]), 1), "cum60": round(float(last["cum60"]), 1),
+        "cum120": round(float(last["cum120"]), 1), "z20": round(float(last["z20"]), 2) if pd.notna(last["z20"]) else None,
+        "ma20": round(float(last["ma20"]), 1), "inv": round(float(inv.iloc[-1]), 0), "inv_pos": inv_pos, "inv_max": round(float(inv.max()), 0), "inv_min": round(float(inv.min()), 0),
+        "behav": behav, "power": round(float(power), 0), "power_text": power_text, "weekly": weekly,
         "streak": st, "z5": round(float(last["z5"]), 2) if pd.notna(last["z5"]) else None, "z1": round(float(last["z1"]), 2) if pd.notna(last["z1"]) else None,
         "percentile": round(pct, 0), "corr60": round(corr60, 2) if corr60 is not None else None,
         "corr_text": ("逆勢操作 (跌買漲賣) 性格明顯" if corr60 is not None and corr60 < -0.2 else "偏順勢 (漲買跌賣)" if corr60 is not None and corr60 > 0.2 else "與漲跌無明顯關係") if corr60 is not None else "",
@@ -206,7 +257,8 @@ def ranking() -> dict:
     # 每日快照 → 連續上榜天數 / 上榜期間累計
     try:
         store.save_snapshot(date, "gov8_rank", {"buy": [{"code": r["code"], "total": r["total"]} for r in out["buy"]],
-                                                "sell": [{"code": r["code"], "total": r["total"]} for r in out["sell"]]})
+                                                "sell": [{"code": r["code"], "total": r["total"]} for r in out["sell"]],
+                                                "banks": {b["bank"]: b["net"] for b in out["banks"]}})
         snaps = store.load_snapshots("gov8_rank", 10)   # 最新在前
     except Exception as e:  # noqa: BLE001
         log.debug("gov8 snapshots: %s", e)
@@ -222,6 +274,16 @@ def ranking() -> dict:
                 days += 1
                 cum += float(hit["total"])
             r["days_on"], r["cum_on"] = days, round(cum, 2)
+    # 各行庫近 5 日趨勢 (從每日快照的行庫合計累加)：誰在持續買、誰在持續賣
+    bank5 = {b: {"net5": 0.0, "pos": 0, "n": 0} for b in BANKS}
+    for _, payload in snaps[:5]:
+        bk = payload.get("banks") or {}
+        for b in BANKS:
+            if b in bk:
+                bank5[b]["net5"] += float(bk[b]); bank5[b]["n"] += 1
+                if float(bk[b]) > 0:
+                    bank5[b]["pos"] += 1
+    out["bank5"] = sorted([{"bank": b, "net5": round(v["net5"], 2), "pos_days": v["pos"], "n": v["n"]} for b, v in bank5.items() if v["n"]], key=lambda x: -x["net5"])
     return out
 
 
@@ -271,6 +333,8 @@ def alerts(view: dict, rank: dict, wl: dict) -> list[str]:
             al.append(f"八大行庫單日{'買超' if view['net'] > 0 else '賣超'} {abs(view['net']):.0f} 億，為 60 日 {view['z1']:+.1f} 個標準差 (歷史百分位 {view['percentile']:.0f}%)")
         if abs(view["streak"]) >= 5:
             al.append(f"八大行庫連{'買' if view['streak'] > 0 else '賣'} {abs(view['streak'])} 日")
+        if abs(view.get("power") or 0) >= 60:
+            al.append(f"八大行庫護盤力道 {view['power']:+.0f} ({view['power_text']})")
     for side, txt in (("buy", "買超"), ("sell", "賣超")):
         for r in rank.get(side, [])[:15]:
             if r.get("days_on", 0) >= 3:
@@ -292,7 +356,7 @@ def build(scored: pd.DataFrame | None = None, watch_res: dict | None = None, pre
         log.warning("gov8 ranking: %s", e)
         rank = prev.get("ranking") or {"date": "", "buy": [], "sell": [], "banks": []}
     wl = watchlist(watch_res) if watch_res is not None else (prev.get("watchlist") or {})
-    cols = [c for c in ("date", "gov8_net", "close", "ret1", "cum5", "cum20", "streak", "z5") if c in h]
+    cols = [c for c in ("date", "gov8_net", "close", "ret1", "cum5", "cum20", "ma20", "inv", "streak", "z5") if c in h]
     return {
         "generated": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M:%S"),
         "market": view,
