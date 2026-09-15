@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="台股籌碼">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="icon" href="icon-192.png">
+<link rel="stylesheet" href="style.css">
+<title>台股籌碼分析</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>window.API_MODE = "static";</script>
+</head>
+<body>
+<header>
+  <div><h1>📊 台股籌碼分析</h1><div class="sub" id="hdr-sub">連線中…</div></div>
+  <button class="btn" id="btn-refresh">更新</button>
+</header>
+<main>
+  <section class="page active" id="page-live">
+    <div class="grid" id="live-cards"></div>
+    <div class="section"><h2>盤勢即時分 <span id="rt-score" class="big"></span></h2><div id="rt-combined" class="note"></div><div id="rt-parts"></div></div>
+    <div class="section"><h2>加權指數分時</h2><div class="chart tall"><canvas id="chart-intraday"></canvas></div></div>
+    <div class="section"><h2>權值股廣度 / 國際盤</h2><div id="rt-breadth"></div><div id="rt-global"></div></div>
+    <div class="section"><h2>今日警示</h2><ul class="list" id="rt-alerts"></ul></div>
+  </section>
+  <section class="page" id="page-market">
+    <div class="section"><h2>大盤判讀</h2><div id="mk-head"></div><div id="mk-reasons"></div></div>
+    <div class="section"><h2>買點／賣點訊號</h2><div id="mk-signals"></div><div class="chart"><canvas id="chart-signals"></canvas></div></div>
+    <div class="section"><h2>進場檢查表</h2><div id="mk-check"></div></div>
+    <div class="section"><h2>因子明細</h2><div id="mk-factors"></div></div>
+  </section>
+  <section class="page" id="page-forecast">
+    <div class="section"><h2>隔天／後天／第三個交易日</h2><div class="grid" id="fc-days"></div><div class="note" id="fc-summary"></div></div>
+    <div class="section"><h2>當日每小時</h2><div class="note" id="fc-hourly-note"></div><div class="scroll"><table id="fc-hourly"></table></div></div>
+    <div class="section"><h2>5 / 10 / 20 日</h2><div class="grid" id="fc-mid"></div></div>
+  </section>
+  <section class="page" id="page-watch">
+    <div class="note" id="wl-updated"></div>
+    <div id="wl-list"></div>
+  </section>
+  <section class="page" id="page-global">
+    <div class="section"><h2>跨市場結論</h2><ul class="list" id="gl-summary"></ul></div>
+    <div class="section"><h2>近 60 日與台股的連動</h2><div class="scroll"><table id="gl-rolling"></table></div></div>
+  </section>
+</main>
+<nav class="tabs">
+  <button data-page="live" class="active"><span class="ico">⚡</span>即時</button>
+  <button data-page="market"><span class="ico">🎯</span>判讀</button>
+  <button data-page="forecast"><span class="ico">🔮</span>預測</button>
+  <button data-page="watch"><span class="ico">📋</span>追蹤</button>
+  <button data-page="global"><span class="ico">🌏</span>國際</button>
+</nav>
+<script src="app.js"></script>
+<script>if (window.API_MODE === "static") { document.querySelectorAll('script[src^="/static/"],link[href^="/static/"]').forEach(() => {}); }</script>
+</body>
+</html>
