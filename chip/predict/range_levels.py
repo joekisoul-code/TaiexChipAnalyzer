@@ -40,16 +40,24 @@ _CACHE: dict = {}
 # ------------------------------------------------------------------ sigma / targets
 def sigma_series(frame: pd.DataFrame) -> pd.Series:
     """sigma_t (%) = 0.5 × (ATR14/close% + EWMA(0.94) 日報酬波動%)；只用到 t 日收盤前資訊。frame 需有 open/high/low/close (依日期排序)。"""
-    c, h, l = frame["close"].astype(float), frame["high"].astype(float), frame["low"].astype(float)
+    c = pd.to_numeric(frame["close"], errors="coerce").astype(float).ffill()
     pc = c.shift(1)
+    # 2026-09-22：雲端 (Actions) 的 scored 最新幾列 high/low 可能缺值 (某些價格來源只有收盤) → 以 max/min(收盤, 前收, 開盤) 補，
+    # 否則 ATR14 會整段變 NaN，路徑型買賣點水準就不會輸出 (實際發生：09-14~09-21 線上 forecast.json 都沒有 buy_at)。
+    o = pd.to_numeric(frame["open"], errors="coerce").astype(float) if "open" in frame else c
+    hi_fb, lo_fb = pd.concat([c, pc, o], axis=1).max(axis=1), pd.concat([c, pc, o], axis=1).min(axis=1)
+    h = pd.to_numeric(frame["high"], errors="coerce").astype(float) if "high" in frame else hi_fb
+    l = pd.to_numeric(frame["low"], errors="coerce").astype(float) if "low" in frame else lo_fb
+    h, l = h.fillna(hi_fb), l.fillna(lo_fb)
     tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
-    atr = tr.rolling(ATR_N).mean() / c * 100
-    r = (c.pct_change() * 100).fillna(0.0).values
+    atr = tr.rolling(ATR_N, min_periods=max(5, ATR_N // 2)).mean() / c * 100
+    r = np.nan_to_num((c.pct_change() * 100).values, nan=0.0, posinf=0.0, neginf=0.0)
     v2 = np.zeros(len(r))
     v2[0] = float(np.var(r[: min(60, len(r))])) if len(r) > 1 else 1.0
     for i in range(1, len(r)):
         v2[i] = EWMA_LAMBDA * v2[i - 1] + (1 - EWMA_LAMBDA) * r[i] ** 2
-    return 0.5 * (atr + pd.Series(np.sqrt(v2), index=frame.index))
+    ew = pd.Series(np.sqrt(v2), index=frame.index)
+    return (0.5 * (atr + ew)).fillna(ew)   # ATR 仍缺時退回 EWMA-only
 
 
 def path_targets(frame: pd.DataFrame) -> pd.DataFrame:
