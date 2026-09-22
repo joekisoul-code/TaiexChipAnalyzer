@@ -126,7 +126,7 @@ def night_gap_beta() -> tuple[float, float, int]:
     return _GAP_CACHE[key]
 
 
-def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, signals_res: dict | None, scored: pd.DataFrame | None = None) -> dict:
+def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, signals_res: dict | None, scored: pd.DataFrame | None = None, learn_summary: dict | None = None) -> dict:
     if not fc or fc.get("error") or not fc.get("next_days"):
         return fc
     fc = dict(fc)
@@ -169,7 +169,14 @@ def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, sign
     if scored is not None:
         try:
             from . import range_levels as RLV
-            rn = RLV.attach_to_next_days(nd, scored, snap, base_px, live=live)
+            sf = 1.0
+            if learn_summary:
+                try:
+                    from . import learn as LRN
+                    sf = LRN.touch_factor(learn_summary, 1)
+                except Exception:  # noqa: BLE001
+                    sf = 1.0
+            rn = RLV.attach_to_next_days(nd, scored, snap, base_px, live=live, sigma_factor=sf)
             if rn:
                 notes.append(rn)
         except Exception as e:  # noqa: BLE001

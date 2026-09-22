@@ -276,7 +276,7 @@ def _night_final(snap: dict, nd: list[dict], scored: pd.DataFrame) -> tuple[floa
     return float(tn["change_pct"]), None
 
 
-def attach_to_next_days(nd: list[dict], scored: pd.DataFrame, snapshot: dict | None, base_px: float, live: bool = False,
+def attach_to_next_days(nd: list[dict], scored: pd.DataFrame, snapshot: dict | None, base_px: float, live: bool = False, sigma_factor: float = 1.0,
                         path: Path | str | None = DEFAULT_PATH) -> str | None:
     """把路徑型水準寫入 next_days (就地修改)。回傳給 short_term_notes 的一句說明；未擬合乘數時回 None。
 
@@ -292,8 +292,15 @@ def attach_to_next_days(nd: list[dict], scored: pd.DataFrame, snapshot: dict | N
     night, why = (None, "盤中以現價推估") if live else _night_final(snap, nd, scored)
     approx = live or (snap.get("phase") == "night" and night is None)     # 夜盤進行中 (無 final 旗標) 屬近似
     fr = scored.tail(400)
+    sf = float(sigma_factor) if sigma_factor and np.isfinite(sigma_factor) else 1.0    # 線上自學：近期觸及率校準 (learn.touch_factor)
     for x in nd:
         r = range_levels(fr, x["n"], night_ret=night, base_px=base_px, path=path)
+        if abs(sf - 1.0) > 1e-6:   # 依乘數放寬/收窄四個水準 (相對基準價的距離)
+            bp = float(base_px)
+            for k_ in ("buy_at", "sell_at", "stop", "target", "level_lo", "level_hi"):
+                if r.get(k_) is not None:
+                    r[k_] = round(bp + (float(r[k_]) - bp) * sf)
+            r["note"] = (r.get("note") or "") + f"；自學乘數 ×{sf:.2f}"
         x["close_q_lo"], x["close_q_hi"] = x.get("level_lo"), x.get("level_hi")       # 保留舊值 (收盤報酬分位) 供除錯
         x["level_lo"], x["level_hi"] = r["level_lo"], r["level_hi"]                    # 既有鍵 → 路徑型 20%/80%
         x["buy_at"], x["sell_at"], x["stop"], x["target"] = r["buy_at"], r["sell_at"], r["stop"], r["target"]

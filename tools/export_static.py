@@ -103,11 +103,40 @@ def main() -> None:
         hr = intraday.forecast(scored, snap)
     except Exception as e:  # noqa: BLE001
         hr = {"error": str(e)}
-    try:   # 近五日精修：夜盤跳空 β、隔天用小時模型、5 日規則覆蓋
-        fc = market_forecast.refine_short_term(fc, hr if not hr.get("error") else None, snap, sg if "error" not in sg else None, scored)
+    # 線上自學 (2026-09-22)：先拉回已發布的預測帳本，用今天的資料對帳 → 近期命中率/校準/買賣點乘數，再套到本次預測
+    from chip.predict import learn, stock_forecast
+    from chip.sources import finmind
+    learn_prev = learn.published()
+    learn_summary = {"market": learn_prev.get("market") or {}, "stocks": learn_prev.get("stocks") or {}}
+    try:   # 近五日精修：夜盤跳空 β、隔天用小時模型、5 日規則覆蓋 (+ 自學的買賣點水準乘數)
+        fc = market_forecast.refine_short_term(fc, hr if not hr.get("error") else None, snap, sg if "error" not in sg else None, scored, learn_summary)
     except Exception as e:  # noqa: BLE001
         print("  refine_short_term failed:", e)
-    dump("forecast", {"updated": time.strftime("%Y-%m-%d %H:%M:%S"), "forecast": fc, "hourly": hr})
+    # 追蹤清單個股 ML 預測 (5/10/20 日相對大盤)：full 與 fast 都算 (每檔 <1 秒，走快取)，供 watchlist.json / 自學帳本
+    stock_fc, stock_frames = {}, {}
+    for sid in chips.WATCHLIST:
+        try:
+            sf = stock_forecast.forecast(sid)
+            if sf and not sf.get("error"):
+                stock_fc[sid] = sf
+                pf = finmind.stock_price(sid, "2024-01-01"); stock_frames[sid] = pf[[c for c in ("date", "close", "high", "low") if c in pf]]
+        except Exception as e:  # noqa: BLE001
+            print(f"  stock_forecast {sid} failed:", e)
+    try:
+        learn_out = learn.run(fc, snap, scored, stock_fc, stock_frames, prev=learn_prev)
+        fc = learn.adjust_forecast(fc, learn_out)
+        for sid, sf in stock_fc.items():   # 個股預測也帶近期命中
+            st = (learn_out.get("stocks") or {}).get(sid) or {}
+            for h, r in (sf.get("horizons") or {}).items():
+                g = (st.get("by_h") or {}).get(str(h)) or {}
+                r["recent_hit"], r["recent_n"] = g.get("hit_ewm"), g.get("n_calls")
+                if (g.get("adjust") or {}).get("degrade"):
+                    r["degraded"] = True
+        dump("learn", learn_out)
+        print(f"  learn: ledger {learn_out['n_ledger']} (+{learn_out['n_new']} new, {learn_out['n_evaluated_now']} evaluated now)")
+    except Exception as e:  # noqa: BLE001
+        print("  learn failed:", e)
+    dump("forecast", {"updated": time.strftime("%Y-%m-%d %H:%M:%S"), "forecast": fc, "hourly": hr, "stocks": stock_fc})
     res = None
     if not args.fast:
         res = chips.assess_watchlist(chips.WATCHLIST, use_wantgoo=use_wg)
@@ -117,6 +146,7 @@ def main() -> None:
                 slim[sid] = a
                 continue
             slim[sid] = {k: a.get(k) for k in ("stock_id", "name", "price", "date", "notes", "score", "label", "holders", "broker_date", "quote")}
+            slim[sid]["forecast"] = stock_fc.get(sid)   # 個股 ML 預測 (5/10/20 日相對大盤) + 近期命中
             slim[sid]["costs"] = a["costs"]
             p = a.get("profile60") or {}
             slim[sid]["profile"] = {k: p.get(k) for k in ("poc", "va_lo", "va_hi", "above_pct", "below_pct", "last")}
