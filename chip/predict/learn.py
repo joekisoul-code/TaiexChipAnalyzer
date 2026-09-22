@@ -102,6 +102,21 @@ def records_from_forecast(fc: dict, snap: dict | None) -> list[dict]:
     return rows
 
 
+def records_from_hourly(hr: dict, snap: dict | None) -> list[dict]:
+    """盤中每次發布把小時模型「現在 → 13:30 收盤」的即時叫牌記下 (kind='hr')，收盤後對帳 → 即時修正的真實命中率。"""
+    if not hr or hr.get("error") or not hr.get("live"):
+        return []
+    t = (hr.get("targets") or {}).get("13:30")
+    if not t or t.get("p_up") is None:
+        return []
+    p = _num(t.get("p_up")); bh = _num(t.get("base_hit")) or 0.5
+    call = "偏多" if p >= bh + 0.03 else "偏空" if p <= bh - 0.03 else "中性"
+    mark = str(hr.get("mark") or "")
+    return [{"kind": "hr", "sid": "TAIEX", "as_of": str(hr.get("day")), "target": str(hr.get("day")), "h": 0, "mode": "live:" + mark, "phase": "open", "live": False,
+             "base": _num(hr.get("price")), "p_up": p, "base_hit": bh, "call": call, "strength": "", "call_hit": None, "variant": "hourly", "mark": mark,
+             "level": _num(t.get("level")), "buy_at": None, "sell_at": None, "stop": None, "target_px": None, "range_mode": None, "trend7": None, "realized": None}]
+
+
 def records_from_stock(sid: str, sf: dict) -> list[dict]:
     if not sf or sf.get("error"):
         return []
@@ -143,6 +158,15 @@ def evaluate(rows: list[dict], frames: dict[str, pd.DataFrame], market_close: di
             continue
         i0 = dates.index(as_of)
         h = int(r.get("h") or 0)
+        if h == 0 and r.get("kind") == "hr":   # 小時模型：當日收盤 vs 記帳時的現價 (呼叫端保證 scored 已含當日收盤)
+            t_date = as_of
+            base = float(r.get("base") or px[as_of]["close"])
+            y = (px[t_date]["close"] / base - 1) * 100
+            call = r.get("call") or "中性"
+            r["realized"] = {"date": t_date, "ret": round(y, 3), "rel": None, "up": bool(y > 0), "hit": None if call == "中性" else bool((y > 0) if call == "偏多" else (y < 0)),
+                             "brier": round((float(r["p_up"]) - (1.0 if y > 0 else 0.0)) ** 2, 4)}
+            done += 1
+            continue
         if h <= 0:
             continue
         t_date = str(r.get("target") or "")[:10]
@@ -267,6 +291,22 @@ def summarize(rows: list[dict]) -> dict:
             if xs:
                 st[s] = {"n": len(xs), "mean5": round(float(np.mean(xs)), 2), "pneg": round(float(np.mean([x < 0 for x in xs])), 2)}
         out["market"]["trend7"] = st
+    # 小時模型即時叫牌 (盤中 → 13:30)：依時間點統計
+    hr_rows = [r for r in rows if r.get("kind") == "hr"]
+    if hr_rows:
+        out["market"]["hourly"] = {"all": _group_stats(hr_rows), "by_mark": {mk_: _group_stats([r for r in hr_rows if r.get("mark") == mk_]) for mk_ in sorted({r.get("mark") or "" for r in hr_rows}) if mk_}}
+    # 水準偏誤 (即時修正)：近期「預估收盤 vs 實際收盤」的帶號誤差 (相對基準價 %)，指數衰減；下次預測依此微調水準
+    lb = {}
+    for h in (1, 2, 3):
+        rs = [r for r in mk if r.get("h") == h and r.get("realized") and r.get("level") and r.get("base")]
+        errs = [((r["realized"]["ret"] / 100 + 1) * r["base"] - r["level"]) / r["base"] * 100 for r in rs]
+        if len(errs) >= 10:
+            lam = 0.5 ** (1 / 20); w = np.array([lam ** k for k in range(len(errs))][::-1])
+            bias = float(np.dot(w, np.array(errs)) / w.sum()); mae = float(np.mean(np.abs(errs[-60:])))
+            k = min(1.0, (len(errs) - 10) / 40)   # 10 筆開始、50 筆全信
+            side = "低" if bias > 0 else "高"
+            lb[str(h)] = {"n": len(errs), "bias": round(bias, 3), "mae": round(mae, 3), "adj": round(bias * k * 0.5, 3), "note": f"近期預估收盤平均偏{side} {abs(bias):.2f}%，下次水準修正 {bias * k * 0.5:+.2f}%"}
+    out["market"]["level_bias"] = lb
     rec = [r for r in mk if r.get("h") in (1, 2, 3, 5) and r.get("call") != "中性"][-40:]
     out["market"]["recent"] = [{"as_of": r["as_of"], "h": r["h"], "target": r.get("target") or (r["realized"] or {}).get("date"), "call": r["call"] + (r.get("strength") or ""),
                                 "p_up": r["p_up"], "ret": (r["realized"] or {}).get("ret"), "hit": (r["realized"] or {}).get("hit"), "variant": r.get("variant")} for r in rec][::-1]
@@ -307,6 +347,17 @@ def adjust_forecast(fc: dict, summary: dict) -> dict:
     for h, r in (fc.get("horizons") or {}).items():
         if isinstance(r, dict):
             apply(r, int(h))
+    lb = (summary.get("market") or {}).get("level_bias") or {}
+    for x in fc.get("next_days") or []:
+        b = lb.get(str(x.get("n")))
+        if b and b.get("adj") and _num(x.get("level")) and _num(fc.get("close")):
+            base_px = _num((fc.get("intraday") or {}).get("price")) or _num(fc.get("close"))
+            x["level_model"] = x["level"]
+            x["level"] = round(x["level"] + base_px * b["adj"] / 100)
+            x["level_adj_pct"] = b["adj"]; x["level_bias_note"] = b["note"]
+    hr = (summary.get("market") or {}).get("hourly") or {}
+    if hr:
+        fc["hourly_learn"] = {"all": {k: hr["all"].get(k) for k in ("n_calls", "hit_ewm", "hit20", "hit_all", "base_hit", "brier")}, "by_mark": {m: {k: v.get(k) for k in ("n_calls", "hit_ewm", "hit_all")} for m, v in (hr.get("by_mark") or {}).items()}}
     tt = (summary.get("market") or {}).get("touch") or {}
     fc["learn"] = {"touch_sigma_factor": {h: v.get("sigma_factor") for h, v in tt.items()}, "note": "依近期對帳自適應：p_up_adj=近期 Platt 校準、call_degraded=近期失準改中性"}
     return fc
@@ -321,10 +372,10 @@ def touch_factor(summary: dict, h: int) -> float:
 
 # ------------------------------------------------------------------ 主流程
 def run(fc: dict, snap: dict | None, scored: pd.DataFrame, stock_forecasts: dict[str, dict] | None = None, stock_frames: dict[str, pd.DataFrame] | None = None,
-        prev: dict | None = None) -> dict:
+        prev: dict | None = None, hourly: dict | None = None) -> dict:
     prev = prev if prev is not None else published()
     rows = list(prev.get("ledger") or [])
-    new = records_from_forecast(fc, snap)
+    new = records_from_forecast(fc, snap) + records_from_hourly(hourly, snap)
     for sid, sf in (stock_forecasts or {}).items():
         new += records_from_stock(sid, sf)
     rows = _merge(rows, new)

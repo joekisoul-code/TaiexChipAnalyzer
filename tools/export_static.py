@@ -137,7 +137,7 @@ def main() -> None:
         except Exception as e:  # noqa: BLE001
             print(f"  stock_forecast {sid} failed:", e)
     try:
-        learn_out = learn.run(fc, snap, scored, stock_fc, stock_frames, prev=learn_prev)
+        learn_out = learn.run(fc, snap, scored, stock_fc, stock_frames, prev=learn_prev, hourly=hr if not hr.get("error") else None)
         fc = learn.adjust_forecast(fc, learn_out)
         for sid, sf in stock_fc.items():   # 個股預測也帶近期命中
             st = (learn_out.get("stocks") or {}).get(sid) or {}
