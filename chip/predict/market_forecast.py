@@ -188,7 +188,32 @@ def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, sign
                     x["conf_note"] = f"信心{tier}：模型{'強' if x.get('call_strength') else ''}叫牌" + ("、夜盤同向" if night_v is not None and ((night_v > 0) == (x['call'] == '偏多')) else "") + (f"、規律{'同向' if (rs > 0) == (x['call'] == '偏多') and rs != 0 else '不反向' if rs == 0 else '反向'}" ) + (f"；OOS 命中 {st_['hit']:.0%} (覆蓋 {st_['cov']:.0%}，逐年最低 {st_['yr_min']:.0%})" if st_.get("hit") else "")
         except Exception as e:  # noqa: BLE001
             log.warning("confidence: %s", e)
-        calls = "、".join(f"{x['label']} {x.get('call')}{x.get('call_strength') or ''} ({(x.get('call_hit') or 0):.0%})" for x in nd if x.get("call")) + (f"、5 日 {st[5]['call']}{st[5].get('call_strength') or ''} ({(st[5].get('call_hit') or 0):.0%})" if 5 in st else "")
+        calls = "、".join(f"{x['label']} {x.get('call')}{x.get('call_strength') or ''} ({(x.get('call_hit') or 0):.0%})" for x in nd if x.get("call"))
+    # 聰明錢 v2 覆蓋 (2026-09-22)：5/10/20 日視野依聰明錢確認/否決 (見 crossmkt.SMART_TIERS)
+    try:
+        from . import crossmkt as XM
+        pat_deep = fc.get("deep") or {}
+        s2 = ((pat_deep.get("today") or {}).get("smart2"))
+        if s2 is None and scored is not None:
+            try:
+                from . import short_term as _ST
+                s2 = float(XM.add_features(_ST.build_matrix(scored.tail(400).reset_index(drop=True), None))["smart2"].iloc[-1])
+            except Exception:  # noqa: BLE001
+                s2 = None
+        for h in (5, 10, 20):
+            r = hz.get(h) or hz.get(str(h))
+            if not r:
+                continue
+            call0 = r.get("call") or ("偏多" if (r.get("p_up") or 0) >= (r.get("base_hit") or 0.5) + 0.03 else "偏空" if (r.get("p_up") or 0) <= (r.get("base_hit") or 0.5) - 0.03 else "中性")
+            ov = XM.smart_overlay(h, call0, s2)
+            if ov:
+                r["call_model"] = call0
+                r.update(ov)
+                r["smart2"] = round(float(s2), 2)
+        if s2 is not None:
+            notes.append(f"聰明錢 v2 {s2:+.2f}：5/10/20 日叫牌依聰明錢確認或否決 (" + "、".join(f"{h} 日 {(hz.get(h) or hz.get(str(h)) or {}).get('call_smart', '—')}" for h in (5, 10, 20)) + ")")
+    except Exception as e:  # noqa: BLE001
+        log.warning("smart overlay: %s", e) + (f"、5 日 {st[5]['call']}{st[5].get('call_strength') or ''} ({(st[5].get('call_hit') or 0):.0%})" if 5 in st else "")
         notes.append(f"短線模型 v2 ({'含夜盤' if st[min(st)]['variant'] == 'night' else '不含夜盤'})：叫牌 {calls}；括號為該檔位樣本外命中率")
     # 0b) 路徑型買賣點 (拉回買 buy_at / 反彈賣 sell_at / 停損 stop / 目標 target；level_lo/level_hi 覆寫為 20%/80% 路徑分位)
     #     夜盤模式只在夜盤結束且日期對齊時套用 (range_levels._night_final)，因此下方跳空與小時模型都不得再改 level_lo/level_hi

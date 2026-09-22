@@ -13,7 +13,7 @@ MARKET_FEATURES = [
     # 外資/投信/自營 現貨
     "foreign_z1", "foreign_z5", "foreign_z20", "trust_z5", "trust_z20", "dealer_z1", "foreign_streak", "trust_streak",
     # 外資期貨
-    "fut_foreign_pct", "fut_foreign_chg1_z", "fut_foreign_chg5_z", "foreign_consistency",
+    "fut_foreign_pct", "fut_foreign_chg1_z", "fut_foreign_chg5_z", "foreign_consistency", "fut_chg10_z", "smart_core",
     # 融資融券
     "margin_pct20", "margin_div20", "margin_chg5_pct", "short_chg5_z", "short_ratio",
     # 價量
@@ -117,6 +117,9 @@ def market_matrix(scored: pd.DataFrame) -> pd.DataFrame:
     d["fut_foreign_chg5_z"] = zscore(d["fut_foreign_chg5"], 60)
     d["margin_chg5_pct"] = d["margin_amt"].pct_change(5) * 100
     d["short_chg5_z"] = zscore(d["short_chg5"], 60)
+    # 聰明錢核心 (2026-09-22)：外資期貨 5 日 z − 融資 5 日 z + 投信 20 日 z − 外資現貨 20 日 z (反指標)；外資期貨 10 日增減 z
+    d["fut_chg10_z"] = zscore(d["fut_foreign_net_oi"].diff(10), 250) if "fut_foreign_net_oi" in d else np.nan
+    d["smart_core"] = d["fut_foreign_chg5_z"] - zscore(d["margin_chg5_pct"], 250) + d["trust_z20"] - d["foreign_z20"]
     d["ret60"] = c.pct_change(60) * 100
     d["bias5"] = (c / d["ma5"] - 1) * 100
     d["bias60"] = (c / d["ma60"] - 1) * 100
