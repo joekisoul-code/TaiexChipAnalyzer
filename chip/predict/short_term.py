@@ -51,9 +51,12 @@ CHIP_FEATURES = ["mtx_retail_ratio", "mtx_retail_chg5", "mtx_foreign_net_z", "tx
 #   2/3 日與夜盤變體在 ±1pp 雜訊內無差異 (由 _pick 自動保留原特徵集；h2 base 可能無害地翻選 +px|ridge 0.601 vs 0.602)。
 #   注意：增益來自 ~300 個邊際檔位日的更替，屬「小但方向一致」的改善；2025~26 未見增益。盤中以未收盤 K 棒計算時屬暫定值。
 PX_FEATURES = ["streak", "range_ratio", "body", "upper_wick", "lower_wick", "gap_filled", "ret1_x_clv", "kospi_rel0", "new_hi20", "new_lo20"]
+# v2.3 跨市場/主力特徵 (2026-09-22 深化研究)：台股 5 日相對 KOSPI/S&P (落後 >3% 歷史補漲 64%，13 年 77%)、聰明錢−散戶差 (5~20 日 IC 0.045~0.049，8~9/9 年)、恆生 5 日
+XM_FEATURES = ["rel_kospi5", "rel_sp5", "smart_spread", "hsi_r5"]
 FEATURE_SETS = {"short": ST_FEATURES, "+asia": ST_FEATURES + ASIA_FEATURES, "+asia+chip": ST_FEATURES + ASIA_FEATURES + CHIP_FEATURES,
-                "+asia+chip+px": ST_FEATURES + ASIA_FEATURES + CHIP_FEATURES + PX_FEATURES}
-NAMES = {**FEATURE_NAMES, "ret1_l1": "前 1 日漲跌%", "ret1_l2": "前 2 日漲跌%", "gap_open": "今日開盤跳空%", "range_pct": "今日振幅%",
+                "+asia+chip+px": ST_FEATURES + ASIA_FEATURES + CHIP_FEATURES + PX_FEATURES,
+                "+asia+chip+px+xm": ST_FEATURES + ASIA_FEATURES + CHIP_FEATURES + PX_FEATURES + XM_FEATURES}
+NAMES = {**FEATURE_NAMES, "rel_kospi5": "台股 5 日相對 KOSPI", "rel_sp5": "台股 5 日相對 S&P", "smart_spread": "聰明錢−散戶差", "hsi_r5": "恆生 5 日", "ret1_l1": "前 1 日漲跌%", "ret1_l2": "前 2 日漲跌%", "gap_open": "今日開盤跳空%", "range_pct": "今日振幅%",
          "clv": "收盤在當日區間位置", "up5": "近 5 日上漲天數", NIGHT_FEATURE: "前晚夜盤台指期%",
          "kospi_r0": "KOSPI 今日%", "nikkei_r0": "日經今日%", "hsi_r0": "恆生今日%",
          "mtx_retail_ratio": "小台散戶多空比", "mtx_retail_chg5": "小台散戶多空比 5 日變化", "mtx_foreign_net_z": "小台外資淨部位 z",
@@ -90,7 +93,7 @@ def build_matrix(scored: pd.DataFrame, night: pd.DataFrame | None = None) -> pd.
         d = _add_extra_features(d)
     except Exception as e:  # noqa: BLE001
         log.warning("extra features: %s", e)
-    for col in ST_FEATURES + ASIA_FEATURES + CHIP_FEATURES + PX_FEATURES:
+    for col in ST_FEATURES + ASIA_FEATURES + CHIP_FEATURES + PX_FEATURES + XM_FEATURES:
         if col not in d:
             d[col] = np.nan
     return d
@@ -149,6 +152,11 @@ def _add_extra_features(d: pd.DataFrame) -> pd.DataFrame:
         d = _add_price_pattern_features(d)
     except Exception as e:  # noqa: BLE001
         log.warning("price pattern features: %s", e)
+    try:   # v2.3 跨市場/主力特徵 (XM_FEATURES)
+        from . import crossmkt as _XM
+        d = _XM.add_features(d)
+    except Exception as e:  # noqa: BLE001
+        log.warning("crossmkt features: %s", e)
     by = lambda s: pd.Series([s.get(x, np.nan) for x in dates], index=d.index, dtype=float)  # noqa: E731
     # 小台 MTX：散戶淨部位 = -(三大法人淨部位)，除以近月全部 OI
     mtx = finmind.fetch("TaiwanFuturesInstitutionalInvestors", "MTX", "2018-01-01")

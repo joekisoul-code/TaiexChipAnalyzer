@@ -112,6 +112,8 @@ def main() -> None:
         pm = _st.build_matrix(backtest.load_long("2010-01-01"), None)
         pat = patterns.build(pm, write=True)
         fc["patterns"] = patterns.for_forecast(pat)
+        from chip.predict import crossmkt
+        fc["deep"] = crossmkt.build(pm)   # 跨市場關係 × 主力籌碼：今日讀數 + 有效條件 + 領先落後表
         print(f"  patterns: {pat['n_valid']}/{pat['n_rules']} valid, today {len([a for a in pat['today'] if a['valid']])} valid active")
     except Exception as e:  # noqa: BLE001
         print("  patterns failed:", e)
