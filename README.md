@@ -60,6 +60,13 @@ v2.1 樣本外：含夜盤 1 日叫牌命中 81.5% (**強叫牌 = 前後 15%：�
 輸出併入 `forecast.json` 的 `next_days[]`/`horizons[5]`：`call`(偏多/偏空/中性)、`call_hit`(該檔位 OOS 命中率)、`call_cov`、`variant`、`source`；
 盤中 (live) 不用此模組。夜盤變體 IC 高的原因是夜盤本身反映了隔日開盤跳空，屬「已知資訊」，並非預知盤中走勢。
 
+## 線上自學 (`chip/predict/learn.py`，2026-09-22)
+
+- 每次 `export_static` 把當次預測記進帳本 (`data/learn.json`，Pages 累積)：大盤隔天/後天/第三天與 5/10/20 日的叫牌、p_up、買賣點水準、trend7；追蹤清單個股 5/10/20 日相對大盤 (`stock_forecast`，同時併入 `forecast.stocks` / `watchlist.stocks[].forecast`)。盤中 (live) 紀錄另標，不進統計。
+- 目標日收盤後對帳：方向命中、報酬 (個股為相對大盤)、買點/賣點/停損/目標是否被觸及、Brier。統計：近期命中 (指數衰減、半衰期 30 次)、近 20/60 次、全部、模型長期 call_hit、基準。
+- 自適應 (只用已對帳紀錄)：近期命中低於模型長期 5pt 以上 (n≥20) → 該視野 `call_degraded` 改中性 (原判存 `call_model`)；`p_up_adj` = 近期 Platt 校準 (20→80 筆逐步信任)；買賣點水準乘數 = sqrt(近 60 次觸及率/20%) 限 0.85~1.35 (`range_levels.attach_to_next_days(sigma_factor)`)。
+- 帳本一旦記下不改 (盤後正式版可覆蓋盤中近似版)，所以命中率是誠實的前瞻紀錄；`python cli.py` 無需額外指令，排程自動累積。
+
 ## 未來 1~3 日高低點 (`chip/predict/range_levels.py`，2026-09-13)
 
 - App 顯示的「拉回買 / 反彈賣」水準改為**盤中路徑分位**：pathLow_k = min(low[t+1..t+k])/close−1、pathHigh_k 同理，以 σ = ½(ATR14/close% + EWMA(λ=0.94) 日波動%) 縮放，乘數為 2010~ 歷史經驗分位 (存 `data/models/range_levels.json`，`cli.py train` 重擬)。已知夜盤台指期漲跌 (夜盤結束且日期對齊時) 再加 β×夜盤% (β≈0.87~1.0)，隔天水準 pinball 再降 28~31%。
