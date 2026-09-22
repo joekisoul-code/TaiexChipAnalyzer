@@ -178,14 +178,22 @@ def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, sign
                 pass
             tn0 = snap.get("tx_night") or {}
             night_v = float(tn0["change_pct"]) if tn0.get("change_pct") is not None and snap.get("phase") in ("night", "closed", "pre") else None
+            hsi_v = kospi_v = None
+            try:
+                from . import short_term as _ST2
+                _row = _ST2.build_matrix(scored.tail(60).reset_index(drop=True), None).iloc[-1]
+                hsi_v = float(_row["hsi_r0"]) if "hsi_r0" in _row and _row["hsi_r0"] == _row["hsi_r0"] else None
+                kospi_v = float(_row["kospi_r0"]) if "kospi_r0" in _row and _row["kospi_r0"] == _row["kospi_r0"] else None
+            except Exception:  # noqa: BLE001
+                pass
             for x in nd:
                 if not x.get("call"):
                     continue
-                tier = CF.label(x["call"], x.get("call_strength") or "", x.get("variant") or "base", night_v, rs, bull)
+                tier = CF.label(x["call"], x.get("call_strength") or "", x.get("variant") or "base", night_v, rs, bull, hsi_v, kospi_v)
                 if tier:
                     st_ = CF.stats_for(int(x["n"]), x.get("variant") or "base", tier) or {}
                     x["conf_tier"], x["conf_hit"], x["conf_cov"], x["conf_yr_min"] = tier, st_.get("hit"), st_.get("cov"), st_.get("yr_min")
-                    x["conf_note"] = f"信心{tier}：模型{'強' if x.get('call_strength') else ''}叫牌" + ("、夜盤同向" if night_v is not None and ((night_v > 0) == (x['call'] == '偏多')) else "") + (f"、規律{'同向' if (rs > 0) == (x['call'] == '偏多') and rs != 0 else '不反向' if rs == 0 else '反向'}" ) + (f"；OOS 命中 {st_['hit']:.0%} (覆蓋 {st_['cov']:.0%}，逐年最低 {st_['yr_min']:.0%})" if st_.get("hit") else "")
+                    x["conf_note"] = f"信心{tier}：模型{'強' if x.get('call_strength') else ''}叫牌" + ("、夜盤同向" if night_v is not None and ((night_v > 0) == (x['call'] == '偏多')) else "") + (f"、規律{'同向' if (rs > 0) == (x['call'] == '偏多') and rs != 0 else '不反向' if rs == 0 else '反向'}" ) + ((f"、恆生{'同向' if (hsi_v > 0) == (x['call'] == '偏多') else '反向'}/KOSPI{'同向' if (kospi_v > 0) == (x['call'] == '偏多') else '反向'}") if hsi_v is not None and kospi_v is not None else "") + (f"；OOS 命中 {st_['hit']:.0%} (覆蓋 {st_['cov']:.0%}，逐年最低 {st_['yr_min']:.0%})" if st_.get("hit") else "")
         except Exception as e:  # noqa: BLE001
             log.warning("confidence: %s", e)
         calls = "、".join(f"{x['label']} {x.get('call')}{x.get('call_strength') or ''} ({(x.get('call_hit') or 0):.0%})" for x in nd if x.get("call"))
