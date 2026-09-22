@@ -10,6 +10,7 @@
   python cli.py global            國際市場 (美日韓股、VIX、原油、黃金、比特幣、匯率) × 台股歷史研究
   python cli.py chips [代碼...]    追蹤清單籌碼分布 (成本、分價量、大戶、券商均價)
   python cli.py signals           大盤買點/賣點規則驗證與目前狀態
+  python cli.py patterns          歷史漲跌規律庫 (66 條逐年驗證) + 相似走勢驗證
   python cli.py short [--train]   前五日預測模組 v2：樣本外叫牌命中率報告 + 目前 1/2/3/5 日叫牌
   python cli.py gov8 [代碼...]     八大行庫監測：全市場進出/行為模式/事件統計/排行 (連續上榜)/追蹤清單各行庫張數
   python cli.py train [--stock]   訓練 LightGBM 走勢預測模型 (大盤；--stock 加個股) 並輸出樣本外指標
@@ -169,6 +170,21 @@ def cmd_train(args):
         print("\n═══ 訓練個股模型 (權值股 40 檔 2018~，目標=相對大盤超額報酬，walk-forward 自 2021) ═══")
         for h, m in stock_forecast.train().items():
             _print_metrics(h, m)
+
+
+def cmd_patterns(args):
+    """歷史漲跌規律庫：66 條規律逐年驗證 + 相似走勢 (k-NN) 驗證，寫 data/models/patterns.json。"""
+    from chip.analysis import backtest
+    from chip.predict import patterns, short_term
+    pat = patterns.build(short_term.build_matrix(backtest.load_long("2010-01-01"), None), write=True)
+    print(f"規律 {pat['n_rules']} 條，通過驗證 {pat['n_valid']} 條 (條件：{pat['criteria']})")
+    for r in pat["rules"]:
+        if r["valid_any"]:
+            for h, x in r["h"].items():
+                if x["valid"]:
+                    print(f"  {r['name']:<32} {h} 日 {x['direction']} 上漲率 {x['up']:.0%} (基準 {x['base_up']:.0%}) 超額 {x['excess']:+.2f}% t={x['t']} 逐年一致 {x['consist']:.0%} ({x['years']} 年) n={x['n']}")
+    print("相似走勢 (k-NN) 驗證：", {h: (v["ic"], v["ic_years_pos"], v["valid"]) for h, v in pat["knn_eval"].items()})
+    print("今日符合：", [(a["name"], "✓" if a["valid"] else "✗") for a in pat["today"]])
 
 
 def cmd_forecast(args):
@@ -416,6 +432,7 @@ def main():
     c.add_argument("ids", nargs="*", help="股票代碼，預設追蹤清單 2330 00631L 00685L 00981A 00988A")
     c.set_defaults(fn=cmd_chips)
     sub.add_parser("signals").set_defaults(fn=cmd_signals)
+    sub.add_parser("patterns").set_defaults(fn=cmd_patterns)
     st_ = sub.add_parser("short")
     st_.add_argument("--train", action="store_true", help="重新訓練前五日模組 (約數分鐘)")
     st_.set_defaults(fn=cmd_short)

@@ -103,6 +103,15 @@ def main() -> None:
         hr = intraday.forecast(scored, snap)
     except Exception as e:  # noqa: BLE001
         hr = {"error": str(e)}
+    # 歷史漲跌規律 (2026-09-22)：66 條規律逐年驗證 + 相似走勢；今日符合的規律加註到 forecast
+    try:
+        from chip.predict import patterns, short_term as _st
+        pm = _st.build_matrix(backtest.load_long("2010-01-01"), None)
+        pat = patterns.build(pm, write=True)
+        fc["patterns"] = patterns.for_forecast(pat)
+        print(f"  patterns: {pat['n_valid']}/{pat['n_rules']} valid, today {len([a for a in pat['today'] if a['valid']])} valid active")
+    except Exception as e:  # noqa: BLE001
+        print("  patterns failed:", e)
     # 線上自學 (2026-09-22)：先拉回已發布的預測帳本，用今天的資料對帳 → 近期命中率/校準/買賣點乘數，再套到本次預測
     from chip.predict import learn, stock_forecast
     from chip.sources import finmind
