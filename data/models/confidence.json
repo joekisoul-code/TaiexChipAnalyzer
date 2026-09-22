@@ -1,0 +1,180 @@
+{
+ "trained_at": "2026-09-22 10:57:46",
+ "night_min": 0.5,
+ "tiers": {
+  "1_base": {
+   "n_oos": 2611,
+   "base_up": 0.556,
+   "model": "+asia+chip+px|ens",
+   "高": {
+    "n": 594,
+    "cov": 0.227,
+    "hit": 0.608,
+    "yr_min": 0.5,
+    "yr_med": 0.6,
+    "years": 11
+   },
+   "中": {
+    "n": 451,
+    "cov": 0.173,
+    "hit": 0.552,
+    "yr_min": 0.412,
+    "yr_med": 0.553,
+    "years": 11
+   },
+   "低": {
+    "n": 649,
+    "cov": 0.249,
+    "hit": 0.527,
+    "yr_min": 0.415,
+    "yr_med": 0.5,
+    "years": 11
+   }
+  },
+  "2_base": {
+   "n_oos": 2610,
+   "base_up": 0.565,
+   "model": "+asia|ridge",
+   "高": {
+    "n": 513,
+    "cov": 0.197,
+    "hit": 0.598,
+    "yr_min": 0.477,
+    "yr_med": 0.607,
+    "years": 11
+   },
+   "中": {
+    "n": 477,
+    "cov": 0.183,
+    "hit": 0.577,
+    "yr_min": 0.457,
+    "yr_med": 0.583,
+    "years": 11
+   },
+   "低": {
+    "n": 528,
+    "cov": 0.202,
+    "hit": 0.534,
+    "yr_min": 0.437,
+    "yr_med": 0.54,
+    "years": 11
+   }
+  },
+  "3_base": {
+   "n_oos": 2609,
+   "base_up": 0.575,
+   "model": "+asia+chip|ens",
+   "高": {
+    "n": 501,
+    "cov": 0.192,
+    "hit": 0.595,
+    "yr_min": 0.441,
+    "yr_med": 0.614,
+    "years": 11
+   },
+   "中": {
+    "n": 460,
+    "cov": 0.176,
+    "hit": 0.548,
+    "yr_min": 0.395,
+    "yr_med": 0.536,
+    "years": 11
+   },
+   "低": {
+    "n": 665,
+    "cov": 0.255,
+    "hit": 0.529,
+    "yr_min": 0.463,
+    "yr_med": 0.535,
+    "years": 11
+   }
+  },
+  "1_night": {
+   "n_oos": 1143,
+   "base_up": 0.554,
+   "model": "+asia|ens",
+   "高": {
+    "n": 339,
+    "cov": 0.297,
+    "hit": 0.897,
+    "yr_min": 0.889,
+    "yr_med": 0.894,
+    "years": 5
+   },
+   "中": {
+    "n": 321,
+    "cov": 0.281,
+    "hit": 0.798,
+    "yr_min": 0.725,
+    "yr_med": 0.803,
+    "years": 5
+   },
+   "低": {
+    "n": 3,
+    "cov": 0.003,
+    "hit": 1.0,
+    "yr_min": null,
+    "yr_med": null,
+    "years": 0
+   }
+  },
+  "2_night": {
+   "n_oos": 1142,
+   "base_up": 0.56,
+   "model": "+asia+chip|ens",
+   "高": {
+    "n": 322,
+    "cov": 0.282,
+    "hit": 0.807,
+    "yr_min": 0.794,
+    "yr_med": 0.811,
+    "years": 5
+   },
+   "中": {
+    "n": 350,
+    "cov": 0.306,
+    "hit": 0.686,
+    "yr_min": 0.623,
+    "yr_med": 0.704,
+    "years": 5
+   },
+   "低": {
+    "n": 8,
+    "cov": 0.007,
+    "hit": 0.875,
+    "yr_min": null,
+    "yr_med": null,
+    "years": 0
+   }
+  },
+  "3_night": {
+   "n_oos": 1141,
+   "base_up": 0.564,
+   "model": "+asia+chip|ens",
+   "高": {
+    "n": 315,
+    "cov": 0.276,
+    "hit": 0.752,
+    "yr_min": 0.72,
+    "yr_med": 0.744,
+    "years": 5
+   },
+   "中": {
+    "n": 350,
+    "cov": 0.307,
+    "hit": 0.606,
+    "yr_min": 0.563,
+    "yr_med": 0.583,
+    "years": 5
+   },
+   "低": {
+    "n": 29,
+    "cov": 0.025,
+    "hit": 0.586,
+    "yr_min": 0.5,
+    "yr_med": 0.568,
+    "years": 2
+   }
+  }
+ }
+}

@@ -78,6 +78,9 @@ def main() -> None:
             trend7.train(verbose=True)
             print("  range_levels:")
             range_levels.fit_multipliers(backtest.load_long(), short_term._night_hist(), verbose=True)
+            from chip.predict import confidence, patterns as _pt
+            _pat = _pt.build(short_term.build_matrix(backtest.load_long("2010-01-01"), None), write=True)
+            confidence.train(short_term.build_matrix(backtest.load_long("2010-01-01"), short_term._night_hist()), _pat, write=True, verbose=True)
         except Exception as e:  # noqa: BLE001
             print("  trend7/range_levels train failed:", e)
     scored, A, meta = market.run(use_wantgoo=use_wg)

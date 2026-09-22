@@ -184,6 +184,9 @@ def cmd_patterns(args):
                 if x["valid"]:
                     print(f"  {r['name']:<32} {h} 日 {x['direction']} 上漲率 {x['up']:.0%} (基準 {x['base_up']:.0%}) 超額 {x['excess']:+.2f}% t={x['t']} 逐年一致 {x['consist']:.0%} ({x['years']} 年) n={x['n']}")
     print("相似走勢 (k-NN) 驗證：", {h: (v["ic"], v["ic_years_pos"], v["valid"]) for h, v in pat["knn_eval"].items()})
+    from chip.predict import confidence
+    print("信心分層 (走動式 OOS)：")
+    confidence.train(short_term.build_matrix(backtest.load_long("2010-01-01"), short_term._night_hist()), pat, write=True, verbose=True)
     print("今日符合：", [(a["name"], "✓" if a["valid"] else "✗") for a in pat["today"]])
 
 

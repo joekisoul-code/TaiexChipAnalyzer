@@ -162,6 +162,32 @@ def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, sign
             hz[5].update({k: r[k] for k in ("p_up", "hist_mean", "q20", "q80", "bin", "base_hit", "call", "call_strength", "call_hit", "tier_up_hit", "tier_dn_hit", "call_cov", "variant", "drivers")})
             hz[5]["source"] = r["note"]
             hz[5]["caveat"] = r.get("caveat") or ""
+        # 信心分層 (2026-09-22)：模型 × 夜盤 × 規律 × 季線 共識 → 高/中/低，附走動式 OOS 命中
+        try:
+            from . import confidence as CF, patterns as PT
+            pat = PT.load() or {}
+            rs = 0.0
+            for a in pat.get("today") or []:
+                v = (a.get("h") or {}).get("1")
+                if a.get("valid") and v and v.get("valid"):
+                    rs += 1 if v["direction"] == "偏多" else -1
+            bull = None
+            try:
+                bull = bool(float(scored["close"].iloc[-1]) >= float(scored["ma60"].iloc[-1]))
+            except Exception:  # noqa: BLE001
+                pass
+            tn0 = snap.get("tx_night") or {}
+            night_v = float(tn0["change_pct"]) if tn0.get("change_pct") is not None and snap.get("phase") in ("night", "closed", "pre") else None
+            for x in nd:
+                if not x.get("call"):
+                    continue
+                tier = CF.label(x["call"], x.get("call_strength") or "", x.get("variant") or "base", night_v, rs, bull)
+                if tier:
+                    st_ = CF.stats_for(int(x["n"]), x.get("variant") or "base", tier) or {}
+                    x["conf_tier"], x["conf_hit"], x["conf_cov"], x["conf_yr_min"] = tier, st_.get("hit"), st_.get("cov"), st_.get("yr_min")
+                    x["conf_note"] = f"信心{tier}：模型{'強' if x.get('call_strength') else ''}叫牌" + ("、夜盤同向" if night_v is not None and ((night_v > 0) == (x['call'] == '偏多')) else "") + (f"、規律{'同向' if (rs > 0) == (x['call'] == '偏多') and rs != 0 else '不反向' if rs == 0 else '反向'}" ) + (f"；OOS 命中 {st_['hit']:.0%} (覆蓋 {st_['cov']:.0%}，逐年最低 {st_['yr_min']:.0%})" if st_.get("hit") else "")
+        except Exception as e:  # noqa: BLE001
+            log.warning("confidence: %s", e)
         calls = "、".join(f"{x['label']} {x.get('call')}{x.get('call_strength') or ''} ({(x.get('call_hit') or 0):.0%})" for x in nd if x.get("call")) + (f"、5 日 {st[5]['call']}{st[5].get('call_strength') or ''} ({(st[5].get('call_hit') or 0):.0%})" if 5 in st else "")
         notes.append(f"短線模型 v2 ({'含夜盤' if st[min(st)]['variant'] == 'night' else '不含夜盤'})：叫牌 {calls}；括號為該檔位樣本外命中率")
     # 0b) 路徑型買賣點 (拉回買 buy_at / 反彈賣 sell_at / 停損 stop / 目標 target；level_lo/level_hi 覆寫為 20%/80% 路徑分位)
