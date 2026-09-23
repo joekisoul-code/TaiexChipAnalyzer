@@ -85,6 +85,8 @@ def main() -> None:
             _vd.train(short_term.build_matrix(backtest.load_long("2010-01-01"), short_term._night_hist()), _pat, write=True, verbose=True)
             from chip.predict import logic as _lg   # 漲跌邏輯：決策規則走動式驗證 (2026-09-23)
             _lg.train(short_term.build_matrix(backtest.load_long("2010-01-01"), short_term._night_hist()), write=True, verbose=True)
+            from chip.predict import pullback as _pb   # 回落進場點：條件式分位模型 + 支撐止跌率 + 最低點時段 (2026-09-23)
+            _pb.train(backtest.load_long("2010-01-01"), write=True, verbose=True)
         except Exception as e:  # noqa: BLE001
             print("  trend7/range_levels train failed:", e)
     scored, A, meta = market.run(use_wantgoo=use_wg)
@@ -130,6 +132,21 @@ def main() -> None:
         fc = market_forecast.refine_short_term(fc, hr if not hr.get("error") else None, snap, sg if "error" not in sg else None, scored, learn_summary)
     except Exception as e:  # noqa: BLE001
         print("  refine_short_term failed:", e)
+    try:   # 回落進場點 (2026-09-23)：模型 (走動式驗證優於 sigma 乘數的視野) 取代 buy_at/stop，原值保留為 buy_at_sigma/stop_sigma；支撐清單與最低點時段給前端
+        from chip.predict import pullback
+        _bp = (fc.get("intraday") or {}).get("price") or fc.get("close")
+        pb = pullback.build(scored, _bp)
+        if pb:
+            for x in fc.get("next_days") or []:
+                r = (pb.get("k") or {}).get(str(x.get("n")))
+                if r and r.get("use_model") and x.get("buy_at") and (x.get("range_mode") or "").startswith("base"):   # 夜盤模式的 buy_at 已含跳空 β，不覆蓋
+                    x["buy_at_sigma"], x["stop_sigma"] = x["buy_at"], x.get("stop")
+                    x["buy_at"], x["stop"], x["buy_src"] = r["buy_model"], min(r["stop_model"], r["buy_model"]), "model"
+                    if x.get("level_lo") == x["buy_at_sigma"]:
+                        x["level_lo"] = x["buy_at"]
+            fc["pullback"] = pb
+    except Exception as e:  # noqa: BLE001
+        print("  pullback failed:", e)
     # 追蹤清單個股 ML 預測 (5/10/20 日相對大盤)：full 與 fast 都算 (每檔 <1 秒，走快取)，供 watchlist.json / 自學帳本
     stock_fc, stock_frames = {}, {}
     for sid in chips.WATCHLIST:
