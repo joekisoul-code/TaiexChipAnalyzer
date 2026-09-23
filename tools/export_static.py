@@ -139,11 +139,18 @@ def main() -> None:
     try:   # 回落進場點 (2026-09-23)：模型 (走動式驗證優於 sigma 乘數的視野) 取代 buy_at/stop，原值保留為 buy_at_sigma/stop_sigma；支撐清單與最低點時段給前端
         from chip.predict import pullback
         _bp = (fc.get("intraday") or {}).get("price") or fc.get("close")
-        pb = pullback.build(scored, _bp)
+        try:
+            from chip.predict import range_levels as _RL
+            _nv, _ = _RL._night_final(snap, fc.get("next_days") or [], scored)
+        except Exception:  # noqa: BLE001
+            _nv = None
+        pb = pullback.build(scored, _bp, night_ret=_nv)
         if pb:
             for x in fc.get("next_days") or []:
                 r = (pb.get("k") or {}).get(str(x.get("n")))
-                if r and r.get("use_model") and x.get("buy_at") and (x.get("range_mode") or "").startswith("base"):   # 夜盤模式的 buy_at 已含跳空 β，不覆蓋
+                _mode = (x.get("range_mode") or "")
+                _ok = (r or {}).get("use_model") and x.get("buy_at") and ((_mode.startswith("base") and r.get("variant") == "base") or (_mode.startswith("night") and r.get("variant") == "night"))   # 變體要與 range_levels 模式一致
+                if _ok:
                     x["buy_at_sigma"], x["stop_sigma"] = x["buy_at"], x.get("stop")
                     x["buy_at"], x["stop"], x["buy_src"] = r["buy_model"], min(r["stop_model"], r["buy_model"]), "model"
                     if x.get("level_lo") == x["buy_at_sigma"]:

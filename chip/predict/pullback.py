@@ -7,6 +7,10 @@
 2. 支撐止跌統計：價格回落到 5 日線 / 月線 / 季線 / 昨日低點 / 20 日低點 附近時，歷史上多常在那裡止跌 (hold) 並反彈；
    → 今日現價下方 3% 內的支撐清單，附「止跌率」與「止跌後 3 日平均反彈」。
 3. 最低點時段：小時 K (Yahoo ^TWII 60m 730d) 統計當日最低價落在哪個時段，分「開低 / 開高」→ 拉回買點的時間窗。
+4. 含夜盤變體 (2026-09-23 強化)：特徵 + 前晚夜盤台指期，訓練集含 2010~ (夜盤缺值由 LGB 處理)，2021~ 逐年走動式 vs range_levels 夜盤公式：
+   pinball k1 0.304 vs 0.365 (改善 16%)、k2 0.421 vs 0.459 (8%)、k3 0.514 vs 0.545 (6%)，觸及率 20~22%。夜盤收後 buy_at/stop 改用此模型。
+5. 盤中低點判斷 (小時 K 查表)：時間點 × 開盤跳空 (開低/平盤/開高) × 開盤後已回檔 (≥0.5σ / <0.5σ) → 「今日低點已出現」機率、最終低點 (相對現價) 兩成/五成分位。
+   10:00 整體 58%、11:00 70%、12:00 77%、13:00 86%；開低且已回檔 ≥0.5σ 的日子在 10:00 只有 48%、最終低點 q20 −1.3%。
 """
 from __future__ import annotations
 
@@ -89,6 +93,43 @@ def _support_stats(m: pd.DataFrame) -> dict:
     return out
 
 
+HL_MARKS = ("10:00", "11:00", "12:00", "13:00")
+
+
+def _hour_low_table(m: pd.DataFrame) -> dict:
+    """盤中低點判斷查表：時間點 × 跳空 (dn/flat/up) × 開盤後已回檔 (deep = 累積低點距開盤 ≤ -0.5σ) → 低點已出現機率、最終低點 (相對該時點價) q20/q50。"""
+    try:
+        from ..sources import yahoo
+        marks = yahoo.daily_marks("730d")
+    except Exception as e:  # noqa: BLE001
+        log.warning("hour_low_table: %s", e)
+        return {}
+    sig = dict(zip(m["date"], m["sigma_range"]))
+    rows = []
+    for d_, rec in sorted(marks.items()):
+        if not rec.get("prev_close") or "13:30" not in rec or "13:30" not in (rec.get("lo") or {}) or d_ not in sig:
+            continue
+        fin_low, op, pc, s = rec["lo"]["13:30"], rec["open"], rec["prev_close"], sig[d_]
+        if not (s and s > 0):
+            continue
+        for mk in HL_MARKS:
+            if mk not in rec or mk not in rec["lo"]:
+                continue
+            px, lo = rec[mk], rec["lo"][mk]
+            gap = (op / pc - 1) * 100
+            rows.append({"mark": mk, "g": "dn" if gap < -0.15 else "up" if gap > 0.15 else "flat", "deep": ((lo / op - 1) * 100 / s) <= -0.5, "done": lo <= fin_low * 1.0003, "fin": (fin_low / px - 1) * 100})
+    if not rows:
+        return {}
+    h = pd.DataFrame(rows)
+    out = {"n_days": int(len(h) / max(1, h["mark"].nunique())), "cells": {}, "marks": {}}
+    for mk, g in h.groupby("mark"):
+        out["marks"][mk] = {"n": int(len(g)), "p_done": round(float(g["done"].mean()), 3), "fin_q20": round(float(g["fin"].quantile(0.2)), 2), "fin_q50": round(float(g["fin"].median()), 2)}
+        for (gg, dp), g3 in g.groupby(["g", "deep"]):
+            if len(g3) >= 20:
+                out["cells"][f"{mk}|{gg}|{'deep' if dp else 'shallow'}"] = {"n": int(len(g3)), "p_done": round(float(g3["done"].mean()), 3), "fin_q20": round(float(g3["fin"].quantile(0.2)), 2), "fin_q50": round(float(g3["fin"].median()), 2)}
+    return out
+
+
 def _hour_of_low() -> dict:
     """當日最低價落在哪個小時 K (Yahoo 60m，約 2 年)；分開低 / 開高。"""
     try:
@@ -167,6 +208,42 @@ def train(scored: pd.DataFrame, write: bool = True, verbose: bool = True) -> dic
         if verbose:
             mo, sg_ = res.get("model", {}), res.get("sigma", {})
             print(f"  pullback k{k}: pinball20 模型 {mo.get('pinball20')} vs sigma {sg_.get('pinball20')} (改善 {res.get('improve_pinball')})；觸及率 模型 {mo.get('touch20')} (年 {mo.get('touch20_yr_min')}~{mo.get('touch20_yr_max')}) vs sigma {sg_.get('touch20')}；最低點誤差 {mo.get('mae_low')} vs {sg_.get('mae_low')}%；use_model={res.get('use_model')}")
+    # 含夜盤變體：feats + night_chg_pct (訓練含無夜盤年份，缺值交給 LGB)，2021~ 逐年走動式 vs range_levels 夜盤公式
+    try:
+        from . import short_term as ST
+        nh = ST._night_hist()
+        mn = m.drop(columns=[c for c in m.columns if c == "night_chg_pct"]).merge(nh[["date", "night_chg_pct"]], on="date", how="left")
+        mn = mn[(mn["night_chg_pct"].isna()) | (mn["night_chg_pct"].abs() <= 8)]
+        featsN = feats + ["night_chg_pct"]
+        out["night"] = {"features": featsN, "k": {}}
+        for k in KS:
+            d = mn.dropna(subset=[f"yLow{k}", "sigma_range"]); d = d[d["sigma_range"] > 0].reset_index(drop=True)
+            te_all = d["night_chg_pct"].notna() & (d["year"] >= 2021)
+            pb = pd.Series(np.nan, index=d.index); ps = pd.Series(np.nan, index=d.index)
+            for yv in sorted(d.loc[te_all, "year"].unique()):
+                tr, te = d["year"] < yv, te_all & (d["year"] == yv)
+                pb[te] = _qpred(_qfit(d.loc[tr, featsN], d.loc[tr, f"yLow{k}"], Q_BUY), d.loc[te, featsN]); ps[te] = _qpred(_qfit(d.loc[tr, featsN], d.loc[tr, f"yLow{k}"], Q_STOP), d.loc[te, featsN])
+            ev = pb.notna(); yy, sg, nv = d.loc[ev, f"yLow{k}"].values, d.loc[ev, "sigma_range"].values, d.loc[ev, "night_chg_pct"].values
+            nm = (mult.get("night") or {}).get(str(k)) or {}
+            base = ((nm.get("beta_low", 0) * nv + nm.get("low20", np.nan) * sg) / sg) if nm else np.full(len(yy), np.nan)
+            r_ = {"n_oos": int(ev.sum())}
+            for name, q in (("model", pb[ev].values), ("formula", base)):
+                if np.isnan(q).all():
+                    continue
+                touch = yy <= q; byy = pd.DataFrame({"t": touch, "y": d.loc[ev, "year"].values}).groupby("y")["t"].mean()
+                r_[name] = {"pinball20": round(_pinball(yy * sg, q * sg, Q_BUY), 4), "touch20": round(float(touch.mean()), 3), "touch20_yr_min": round(float(byy.min()), 3), "touch20_yr_max": round(float(byy.max()), 3), "mae_low": round(float(np.mean(np.abs(yy - q) * sg)), 3)}
+            if "model" in r_ and "formula" in r_:
+                r_["improve_pinball"] = round(1 - r_["model"]["pinball20"] / r_["formula"]["pinball20"], 3)
+                r_["use_model"] = bool(r_["improve_pinball"] >= 0.03 and 0.15 <= r_["model"]["touch20"] <= 0.27)
+            out["night"]["k"][str(k)] = r_
+            if write:
+                M.save(f"pullback_k{k}_night", {"buy": _qfit(d[featsN], d[f"yLow{k}"], Q_BUY), "stop": _qfit(d[featsN], d[f"yLow{k}"], Q_STOP), "features": featsN, "trained_at": out["trained_at"]})
+            if verbose:
+                mo, fo = r_.get("model", {}), r_.get("formula", {})
+                print(f"  pullback(夜盤) k{k}: pinball 模型 {mo.get('pinball20')} vs 夜盤公式 {fo.get('pinball20')} (改善 {r_.get('improve_pinball')})；觸及 {mo.get('touch20')} vs {fo.get('touch20')}；誤差 {mo.get('mae_low')} vs {fo.get('mae_low')}%；use_model={r_.get('use_model')}")
+    except Exception as e:  # noqa: BLE001
+        log.warning("pullback night variant: %s", e)
+    out["hour_low_table"] = _hour_low_table(m)
     if verbose:
         for key, s in out["supports"].items():
             print(f"  支撐 {s['name']}: 回測 {s['n_tested']} 次 止跌率 {s['hold_rate']} (多頭 {s.get('hold_bull')} / 空頭 {s.get('hold_bear')}，年最低 {s['hold_yr_min']})，止跌後 3 日 {s['bounce3_after_hold']}%，跌破後 3 日 {s['break3_after_fail']}%")
@@ -176,23 +253,33 @@ def train(scored: pd.DataFrame, write: bool = True, verbose: bool = True) -> dic
     return out
 
 
-def build(scored: pd.DataFrame, base_px: float | None = None) -> dict | None:
-    """今日：模型買點/停損 (k=1..3)、下方支撐清單 (含止跌率)、最低點時段。"""
+def build(scored: pd.DataFrame, base_px: float | None = None, night_ret: float | None = None) -> dict | None:
+    """今日：模型買點/停損 (k=1..3；night_ret 給定且夜盤模型存在 → 含夜盤變體)、下方支撐清單 (含止跌率)、最低點時段、盤中低點查表。"""
     st = M.load_json("pullback")
     if not st:
         return None
     m, feats = _frame(scored)
-    row = m.iloc[[-1]]
+    row = m.iloc[[-1]].copy()
     close = float(row["close"].iloc[0]); px0 = float(base_px or close); sg = float(row["sigma_range"].iloc[0])
-    out = {"date": str(row["date"].iloc[0]), "sigma": round(sg, 3), "k": {}, "supports": [], "hour_of_low": st.get("hour_of_low") or {}}
+    use_night = night_ret is not None and np.isfinite(float(night_ret)) and bool((st.get("night") or {}).get("k"))
+    out = {"date": str(row["date"].iloc[0]), "sigma": round(sg, 3), "variant": "night" if use_night else "base", "night_ret": round(float(night_ret), 2) if use_night else None,
+           "k": {}, "supports": [], "hour_of_low": st.get("hour_of_low") or {}, "hour_low_table": st.get("hour_low_table") or {}}
+    if use_night:
+        row["night_chg_pct"] = float(np.clip(float(night_ret), -8, 8))
     for k in KS:
-        b = M.load(f"pullback_k{k}"); r = (st.get("k") or {}).get(str(k)) or {}
+        if use_night:
+            b = M.load(f"pullback_k{k}_night"); r = ((st.get("night") or {}).get("k") or {}).get(str(k)) or {}
+            if not b:
+                b = M.load(f"pullback_k{k}"); r = (st.get("k") or {}).get(str(k)) or {}
+        else:
+            b = M.load(f"pullback_k{k}"); r = (st.get("k") or {}).get(str(k)) or {}
         if not b:
             continue
         q20 = float(_qpred(b["buy"], row[b["features"]])[0]) * sg; q10 = float(_qpred(b["stop"], row[b["features"]])[0]) * sg
         q10 = min(q10, q20)
         out["k"][str(k)] = {"buy_model": int(round(px0 * (1 + q20 / 100))), "stop_model": int(round(px0 * (1 + q10 / 100))), "low20_pct": round(q20, 2), "low10_pct": round(q10, 2),
-                            "use_model": bool(r.get("use_model")), "oos": {kk: r.get(kk) for kk in ("improve_pinball",)} | {"model": r.get("model"), "sigma": r.get("sigma")}}
+                            "use_model": bool(r.get("use_model")), "variant": "night" if (use_night and "night_chg_pct" in (b.get("features") or [])) else "base",
+                            "oos": {kk: r.get(kk) for kk in ("improve_pinball",)} | {"model": r.get("model"), "sigma": r.get("sigma") or r.get("formula")}}
     for key, name in SUPPORTS.items():
         s = float(row[key].iloc[0]) if key in row and pd.notna(row[key].iloc[0]) else None
         if s is None or not (s < px0 and s > px0 * 0.95):
