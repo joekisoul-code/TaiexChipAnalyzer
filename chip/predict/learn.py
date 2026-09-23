@@ -328,6 +328,16 @@ def adjust_forecast(fc: dict, summary: dict) -> dict:
         g = byh.get(str(h))
         if not g:
             return
+        # 2026-09-23：依變體對帳。帳本多為不含夜盤 (15:40 正式版)，含夜盤叫牌 (歷史 85%) 不能被不含夜盤的失準降級；
+        # 同變體對帳 ≥ MIN_N_ADJ 才用其校準/降級，否則只顯示近期命中並註明變體。
+        v = x.get("variant") or ""
+        gv = (g.get("by_variant") or {}).get(v) or {}
+        if v and gv.get("n_calls", 0) >= MIN_N_ADJ:
+            g = gv
+        elif v and v not in ("base", "daily", "") and v not in (g.get("by_variant") or {}):
+            x["recent_hit"] = g.get("hit_ewm"); x["recent_n"] = g.get("n_calls")
+            x["learn_note"] = f"近期對帳為不含夜盤紀錄 (命中 {g['hit_ewm']:.0%}，n={g['n_calls']})，不套用到含夜盤叫牌" if g.get("n_calls") else ""
+            return
         adj = g.get("adjust") or {}
         p = _num(x.get("p_up"))
         if p is not None and adj.get("platt"):
