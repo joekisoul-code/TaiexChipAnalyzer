@@ -380,6 +380,13 @@ def backfill(scored: pd.DataFrame, days: int = BACKFILL_DAYS) -> list[dict]:
     已存在的真實紀錄優先 (_merge 保留先前)；只回填 kind=mkt h=1/2/3/5。"""
     try:
         from . import model as M, short_term as ST
+        try:   # 雲端 market.run 的 scored 只有近幾年 → 用長歷史重建，才有 ≥400 列可訓練 (實際發生：Actions 回填 0 筆)
+            from ..analysis import backtest as _bt
+            long = _bt.load_long("2010-01-01")
+            if len(long) > len(scored):
+                scored = long
+        except Exception as e:  # noqa: BLE001
+            log.warning("backfill load_long: %s", e)
         mat = ST.build_matrix(scored, None)
         year = int(str(mat["date"].iloc[-1])[:4])
         rows = []
@@ -420,9 +427,10 @@ def backfill(scored: pd.DataFrame, days: int = BACKFILL_DAYS) -> list[dict]:
                              "base": base_px, "p_up": cal["p_up"], "base_hit": cal["base_hit"], "call": call, "strength": strength, "call_hit": round(float(call_hit), 3) if call_hit is not None else None,
                              "variant": "base", "level": round(base_px * (1 + (cal["hist_mean"] or 0) / 100)) if h <= 3 else None, "buy_at": None, "sell_at": None, "stop": None, "target_px": None,
                              "range_mode": None, "trend7": None, "realized": None, "backfill": True})
+        print(f"  learn backfill: {len(rows)} rows")
         return rows
     except Exception as e:  # noqa: BLE001
-        log.warning("backfill: %s", e)
+        print(f"  learn backfill failed: {e}")
         return []
 
 
