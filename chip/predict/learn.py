@@ -117,6 +117,20 @@ def records_from_hourly(hr: dict, snap: dict | None) -> list[dict]:
              "level": _num(t.get("level")), "buy_at": None, "sell_at": None, "stop": None, "target_px": None, "range_mode": None, "trend7": None, "realized": None}]
 
 
+def records_from_precheck(fc: dict) -> list[dict]:
+    """跳空預判 (kind='gap')：記下發布當下的估計跳空與歷史守住率，目標日開盤/收盤後對帳 (方向、幅度誤差、是否守住)。盤中用實際開盤的不記 (無預測成分)。"""
+    P = (fc or {}).get("precheck") or {}
+    g = P.get("gap") or {}
+    if not g or g.get("est") is None or g.get("live") or not (fc.get("next_days") or []):
+        return []
+    src = str(g.get("source") or "")
+    mode = "prov" if "暫定" in src else "final"
+    st = g.get("stats") or {}
+    return [{"kind": "gap", "sid": "TAIEX", "as_of": str(fc.get("date")), "target": str(fc["next_days"][0].get("date")), "h": 1, "mode": mode, "phase": "closed", "live": False,
+             "base": _num(fc.get("close")), "p_up": _num(st.get("p_hold")), "base_hit": None, "call": "偏多" if g["est"] > 0.15 else "偏空" if g["est"] < -0.15 else "中性", "strength": "", "call_hit": None,
+             "variant": mode, "level": None, "est_gap": round(float(g["est"]), 3), "bucket": g.get("bucket"), "p_hold": st.get("p_hold"), "p_fill": st.get("p_fill"), "realized": None}]
+
+
 def records_from_stock(sid: str, sf: dict) -> list[dict]:
     if not sf or sf.get("error"):
         return []
@@ -136,7 +150,8 @@ def _price_map(frame: pd.DataFrame) -> tuple[list[str], dict]:
     d["date"] = d["date"].astype(str).str[:10]
     dates = d["date"].tolist()
     px = {r.date: {"close": float(r.close), "high": float(r.high) if "high" in d and pd.notna(r.high) else float(r.close),
-                   "low": float(r.low) if "low" in d and pd.notna(r.low) else float(r.close)} for r in d.itertuples()}
+                   "low": float(r.low) if "low" in d and pd.notna(r.low) else float(r.close),
+                   "open": float(r.open) if "open" in d and pd.notna(r.open) else float(r.close)} for r in d.itertuples()}
     return dates, px
 
 
@@ -158,6 +173,20 @@ def evaluate(rows: list[dict], frames: dict[str, pd.DataFrame], market_close: di
             continue
         i0 = dates.index(as_of)
         h = int(r.get("h") or 0)
+        if r.get("kind") == "gap":   # 跳空預判：目標日開盤 vs 前收 (實際跳空)、收盤是否守住跳空方向
+            t_date = str(r.get("target") or "")[:10]
+            if t_date not in px or i0 + 1 >= len(dates) or dates[i0 + 1] != t_date:
+                continue
+            base = float(r.get("base") or px[as_of]["close"])
+            ag = (px[t_date]["open"] / base - 1) * 100; cr = (px[t_date]["close"] / base - 1) * 100
+            est = float(r.get("est_gap") or 0)
+            dir_pred = 1 if est > 0.15 else -1 if est < -0.15 else 0
+            hold = (cr > 0) if dir_pred > 0 else (cr < 0) if dir_pred < 0 else None
+            filled = (px[t_date]["low"] <= base) if ag > 0 else (px[t_date]["high"] >= base) if ag < 0 else None
+            r["realized"] = {"date": t_date, "gap": round(ag, 3), "ret": round(cr, 3), "err": round(ag - est, 3), "dir_hit": (None if dir_pred == 0 else bool(np.sign(ag) == dir_pred)),
+                             "hold": hold, "filled": filled, "up": bool(cr > 0), "hit": hold}
+            done += 1
+            continue
         if h == 0 and r.get("kind") == "hr":   # 小時模型：當日收盤 vs 記帳時的現價 (呼叫端保證 scored 已含當日收盤)
             t_date = as_of
             base = float(r.get("base") or px[as_of]["close"])
@@ -292,6 +321,14 @@ def summarize(rows: list[dict]) -> dict:
                 st[s] = {"n": len(xs), "mean5": round(float(np.mean(xs)), 2), "pneg": round(float(np.mean([x < 0 for x in xs])), 2)}
         out["market"]["trend7"] = st
     # 小時模型即時叫牌 (盤中 → 13:30)：依時間點統計
+    gp = [r for r in rows if r.get("kind") == "gap" and r.get("realized")]
+    if gp:
+        fin = [r for r in gp if r.get("mode") == "final"] or gp
+        dh = [r["realized"]["dir_hit"] for r in fin if r["realized"].get("dir_hit") is not None]
+        hh = [r["realized"]["hold"] for r in fin if r["realized"].get("hold") is not None]
+        out["market"]["gap"] = {"n": len(fin), "mode": "final" if any(r.get("mode") == "final" for r in gp) else "prov", "dir_hit": round(float(np.mean(dh)), 3) if dh else None, "n_dir": len(dh),
+                                "hold_hit": round(float(np.mean(hh)), 3) if hh else None, "p_hold_avg": round(float(np.mean([r.get("p_hold") or 0 for r in fin if r["realized"].get("hold") is not None])), 3) if hh else None,
+                                "mae": round(float(np.mean([abs(r["realized"]["err"]) for r in fin])), 3), "recent": [{"as_of": r["as_of"], "est": r.get("est_gap"), "gap": r["realized"]["gap"], "ret": r["realized"]["ret"], "hold": r["realized"].get("hold")} for r in fin[-10:]][::-1]}
     hr_rows = [r for r in rows if r.get("kind") == "hr"]
     if hr_rows:
         out["market"]["hourly"] = {"all": _group_stats(hr_rows), "by_mark": {mk_: _group_stats([r for r in hr_rows if r.get("mark") == mk_]) for mk_ in sorted({r.get("mark") or "" for r in hr_rows}) if mk_}}
@@ -365,6 +402,8 @@ def adjust_forecast(fc: dict, summary: dict) -> dict:
             x["level_model"] = x["level"]
             x["level"] = round(x["level"] + base_px * b["adj"] / 100)
             x["level_adj_pct"] = b["adj"]; x["level_bias_note"] = b["note"]
+    if (summary.get("market") or {}).get("gap"):
+        fc["gap_learn"] = summary["market"]["gap"]
     hr = (summary.get("market") or {}).get("hourly") or {}
     if hr:
         fc["hourly_learn"] = {"all": {k: hr["all"].get(k) for k in ("n_calls", "hit_ewm", "hit20", "hit_all", "base_hit", "brier")}, "by_mark": {m: {k: v.get(k) for k in ("n_calls", "hit_ewm", "hit_all")} for m, v in (hr.get("by_mark") or {}).items()}}
@@ -448,7 +487,7 @@ def run(fc: dict, snap: dict | None, scored: pd.DataFrame, stock_forecasts: dict
         prev: dict | None = None, hourly: dict | None = None) -> dict:
     prev = prev if prev is not None else published()
     rows = list(prev.get("ledger") or [])
-    new = records_from_forecast(fc, snap) + records_from_hourly(hourly, snap)
+    new = records_from_forecast(fc, snap) + records_from_hourly(hourly, snap) + records_from_precheck(fc)
     for sid, sf in (stock_forecasts or {}).items():
         new += records_from_stock(sid, sf)
     rows = _merge(rows, new)

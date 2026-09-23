@@ -151,6 +151,11 @@ def main() -> None:
             fc["pullback"] = pb
     except Exception as e:  # noqa: BLE001
         print("  pullback failed:", e)
+    try:   # 預判邏輯 (2026-09-23)：明日開盤跳空預判 (實際開盤 / 夜盤 β) + 目標日日曆效應
+        from chip.predict import precheck
+        fc["precheck"] = precheck.build(scored, snap, fc)
+    except Exception as e:  # noqa: BLE001
+        print("  precheck failed:", e)
     # 追蹤清單個股 ML 預測 (5/10/20 日相對大盤)：full 與 fast 都算 (每檔 <1 秒，走快取)，供 watchlist.json / 自學帳本
     stock_fc, stock_frames = {}, {}
     for sid in chips.WATCHLIST:
@@ -181,11 +186,6 @@ def main() -> None:
         fc["logic"] = logic.build(_st2.build_matrix(backtest.load_long("2010-01-01"), _st2._night_hist()), night_final=(_nd0.get("variant") == "night"))
     except Exception as e:  # noqa: BLE001
         print("  logic failed:", e)
-    try:   # 預判邏輯 (2026-09-23)：明日開盤跳空預判 (實際開盤 / 夜盤 β) + 目標日日曆效應
-        from chip.predict import precheck
-        fc["precheck"] = precheck.build(scored, snap, fc)
-    except Exception as e:  # noqa: BLE001
-        print("  precheck failed:", e)
     try:   # 判斷總結 (2026-09-23)：模型叫牌 + 6 票獨立訊號的共識 → 一句可執行判斷 (含同狀況 OOS 命中率)
         from chip.predict import verdict
         fc["verdict"] = verdict.build(fc, hr if not hr.get("error") else None, snap, scored, learn_summary)
