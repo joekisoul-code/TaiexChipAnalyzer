@@ -8,6 +8,10 @@
 規則：模型無叫牌 → 中性 (顯示其他票的多空比)；有叫牌 → 淨票 ≥ 3 → 「高共識」、≤ -3 → 「分歧，觀望」(歷史上此時叫牌反而低於 50%)、其餘 「一般」。
 研究結果 (不含夜盤 1 日，n=1696，全部 56.2%)：淨票 3/4/5 → 58.6/66.7/68.2%；-3/-4 → 46.7/42.1%；含夜盤 1 日全部 85%，各淨票 79~89% 無單調關係。
 單票：規律庫同向 60.9% vs 反向 46.6% 最有用；恆生/KOSPI 同日 58 vs 52；月線趨勢 59 vs 53；聰明錢 v2 57 vs 57 (1 日無用，留作 5 日)。
+第三輪 (2026-09-24 vote_study)：
+- 加權票 (走動式線性機率) 命中 54.7% 不如等權淨票 55.5% → 維持等權。
+- 模型未叫牌日 (n=917)：5 票淨多 ≥4 → 隔天上漲 70.5% (n=61，年最低 45%)、+3 → 59.4%；淨空票對下跌無預測力 (−2 → 上漲 52%)。
+  → 未叫牌時只在「淨多 ≥4」給「偏多‧訊號共識」(call_action=偏多)，+3 只加註；空方共識不叫牌。3 日視野同型態更穩 (+2~+5 → 63~68%)。
 """
 from __future__ import annotations
 
@@ -67,6 +71,7 @@ def train(matrix: pd.DataFrame, pat: dict, write: bool = True, verbose: bool = T
                 lo, hi = prev.quantile(ST.TIER), prev.quantile(1 - ST.TIER)
                 m = o["year"] == y
                 o.loc[m & (o["pred"] >= hi), "call"] = 1; o.loc[m & (o["pred"] <= lo), "call"] = -1
+            o0 = o
             o = o[(o["year"] >= yrs[2]) & (o["call"] != 0)].copy()
             vs = VOTES if variant == "night" else [v for v in VOTES if v != "night"]
             sg = o[vs].apply(np.sign).fillna(0)
@@ -80,6 +85,16 @@ def train(matrix: pd.DataFrame, pat: dict, write: bool = True, verbose: bool = T
                 g = o[msk]
                 yr = [gg["hit"].mean() for _, gg in g.groupby("year") if len(gg) >= 5]
                 res["bucket"][name] = {"n": int(len(g)), "hit": round(float(g["hit"].mean()), 3) if len(g) else None, "cov": round(len(g) / len(o), 3), "yr_min": round(float(min(yr)), 3) if yr else None}
+            # 未叫牌日：其他票的淨多票 (多 − 空) → 上漲率 (只有 base 變體有意義；night 變體叫牌覆蓋高)
+            nc = o0[(o0["year"] >= yrs[2]) & (o0["call"] == 0)].copy()
+            if len(nc):
+                sgn = nc[vs].apply(np.sign).fillna(0)
+                nc["net_abs"] = sgn.sum(axis=1); nc["up"] = (nc["actual"] > 0).astype(float)
+                res["nocall"] = {"n": int(len(nc)), "base_up": round(float(nc["up"].mean()), 3), "by_net": {}}
+                for k_, g in nc.groupby("net_abs"):
+                    if len(g) >= 30:
+                        yr = [gg["up"].mean() for _, gg in g.groupby("year") if len(gg) >= 5]
+                        res["nocall"]["by_net"][str(int(k_))] = {"n": int(len(g)), "up": round(float(g["up"].mean()), 3), "yr_min": round(float(min(yr)), 3) if yr else None}
             out["tiers"][f"{h}_{variant}"] = res
             if verbose:
                 print(f"  verdict h{h} {variant:<5} all {res['hit_all']}  " + "  ".join(f"{b} {v['hit']} (覆蓋 {v['cov']}, 年最低 {v['yr_min']})" for b, v in res["bucket"].items()))
@@ -192,13 +207,21 @@ def build(fc: dict, hourly: dict | None, snap: dict | None, scored: pd.DataFrame
     bucket = "高共識" if net >= HIGH_NET else "分歧" if net <= LOW_NET else "一般"
     oos = (tiers.get("bucket") or {}).get(bucket) or {}
     conf_hit = x.get("conf_hit")
+    call_action = call
     if cs == 0:
         verdict = "中性"
         head = f"模型未叫牌 (上漲率 {float(x.get('p_up') or 0):.0%}，基準 {float(x.get('base_hit') or 0.5):.0%})；其他訊號 多 {bull} / 空 {bear}"
-        if bull - bear >= 3:
-            head += " → 訊號偏多但模型無優勢，不追高"
+        net_abs = bull - bear
+        nc = ((st.get("tiers") or {}).get("1_base") or {}).get("nocall") or {}
+        ncs = (nc.get("by_net") or {}).get(str(net_abs)) or {}
+        if net_abs >= 4 and (ncs.get("up") or 0) >= 0.62:   # 第三輪研究：未叫牌日 淨多 ≥4 → 70% (n=61)
+            verdict, call_action = "偏多‧訊號共識", "偏多"
+            oos = {"n": ncs.get("n"), "hit": ncs.get("up"), "cov": None, "yr_min": ncs.get("yr_min")}
+            head += f" → 模型無叫牌但 {len(votes)} 票中淨多 {net_abs}：歷史同狀況隔天上漲 {ncs['up']:.0%} (n={ncs['n']}，年最低 {ncs.get('yr_min') or 0:.0%})，給偏多"
+        elif net_abs >= 3 and ncs.get("up"):
+            head += f" → 訊號偏多 (歷史同狀況上漲 {ncs['up']:.0%}，n={ncs['n']})，略偏多但不足以叫牌、不追高"
         elif bear - bull >= 3:
-            head += " → 訊號偏空但模型無優勢，不追空"
+            head += " → 訊號偏空，但研究顯示空方共識對下跌無預測力，不放空"
     else:
         verdict = f"{call}{'‧高共識' if bucket == '高共識' else '‧分歧' if bucket == '分歧' else ''}"
         head = f"模型{call}{x.get('call_strength') or ''}，其他 {len(votes)} 票同向 {agree}、反向 {disagree} (淨 {net:+d}) → {bucket}"
@@ -210,6 +233,8 @@ def build(fc: dict, hourly: dict | None, snap: dict | None, scored: pd.DataFrame
     gate = g.get("state") if g.get("available") else None
     act = []
     ba, sa, stp, tg = x.get("buy_at"), x.get("sell_at"), x.get("stop"), x.get("target")
+    if call_action == "偏多" and cs == 0:
+        cs = 1   # 訊號共識偏多：行動比照偏多 (下方買點邏輯)
     if cs > 0:
         if gate == "down":
             act.append("7 日閘門偏下：不推薦買點，偏多僅短打或觀望")
@@ -236,6 +261,6 @@ def build(fc: dict, hourly: dict | None, snap: dict | None, scored: pd.DataFrame
             act.append(f"盤中小時模型與日模型相反 ({e['note']})：以盤中為準縮小部位")
         if e["key"] == "rtscore" and e["s"] and cs and e["s"] != cs:
             act.append("盤中即時評分與叫牌相反：等盤中訊號轉向再動作")
-    return {"date": today, "target": x.get("date"), "verdict": verdict, "call": call, "net": net, "agree": agree, "disagree": disagree, "bull": bull, "bear": bear,
+    return {"date": today, "target": x.get("date"), "verdict": verdict, "call": call, "call_action": call_action, "net": net, "agree": agree, "disagree": disagree, "bull": bull, "bear": bear,
             "bucket": bucket if cs else None, "oos": (oos or None) if cs else None, "votes": votes, "extra": extra, "head": head, "action": "；".join(act) or "照常依買賣點操作",
             "text": f"判斷總結：{verdict}。{head}。{'；'.join(act) if act else ''}".rstrip("。") + "。"}
