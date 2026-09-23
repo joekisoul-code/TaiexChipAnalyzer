@@ -371,6 +371,61 @@ def touch_factor(summary: dict, h: int) -> float:
 
 
 # ------------------------------------------------------------------ 主流程
+BACKFILL_DAYS = 160
+
+
+def backfill(scored: pd.DataFrame, days: int = BACKFILL_DAYS) -> list[dict]:
+    """帳本回填 (2026-09-23)：用「今年之前資料訓練」的短線模型 (不含夜盤變體，與 15:40 正式版同) 對今年最近 days 個交易日做樣本外預測，
+    以與 records_from_forecast 相同欄位記入帳本 (backfill=True、mode=close)，讓 Platt 校準 / 失準降級 / 水準偏誤 立刻有 ≥20 筆對帳，不必等數週。
+    已存在的真實紀錄優先 (_merge 保留先前)；只回填 kind=mkt h=1/2/3/5。"""
+    try:
+        from . import model as M, short_term as ST
+        mat = ST.build_matrix(scored, None)
+        year = int(str(mat["date"].iloc[-1])[:4])
+        rows = []
+        for h in (1, 2, 3, 5):
+            b = M.load(f"st_h{h}_base")
+            if not b:
+                continue
+            sname, mk = b["chosen"].split("|")
+            feats = list(ST.FEATURE_SETS[sname])
+            outs = []
+            if mk in ("lgb", "ens"):
+                outs.append(ST._wf(mat, feats, f"fwd{h}", h, year, lambda: ST.LgbModel()))
+            if mk in ("ridge", "ens"):
+                outs.append(ST._wf(mat, feats, f"fwd{h}", h, year, lambda: ST.RidgeModel()))
+            if not outs or any(x.empty for x in outs):
+                continue
+            o = outs[0] if len(outs) == 1 else ST._combine(outs[0], outs[1])
+            o = o.tail(days)
+            rep, t = b["report"], b["report"]["tiers"]
+            dates = mat["date"].astype(str).tolist(); closes = mat["close"].astype(float).tolist()
+            idx = {d_: i for i, d_ in enumerate(dates)}
+            for r in o.itertuples():
+                i = idx.get(str(r.date))
+                if i is None or i + h >= len(dates):
+                    continue
+                pred = float(r.pred); cal = M.apply_calibration(rep["calibration"], pred)
+                call, call_hit, strength = "中性", t.get("mid_up"), ""
+                if t.get("up_on") and pred >= t["edge_hi"]:
+                    call, call_hit = "偏多", t["up_hit"]
+                    if t.get("strong_hi") is not None and pred >= t["strong_hi"] and (t.get("up_hit_strong") or 0) >= t["up_hit"]:
+                        strength, call_hit = "強", t["up_hit_strong"]
+                elif t.get("dn_on") and pred <= t["edge_lo"]:
+                    call, call_hit = "偏空", t["dn_hit"]
+                    if t.get("strong_lo") is not None and pred <= t["strong_lo"] and (t.get("dn_hit_strong") or 0) >= t["dn_hit"]:
+                        strength, call_hit = "強", t["dn_hit_strong"]
+                base_px = closes[i]
+                rows.append({"kind": "mkt", "sid": "TAIEX", "as_of": dates[i], "target": dates[i + h] if h <= 3 else None, "h": h, "mode": "close", "phase": "closed", "live": False,
+                             "base": base_px, "p_up": cal["p_up"], "base_hit": cal["base_hit"], "call": call, "strength": strength, "call_hit": round(float(call_hit), 3) if call_hit is not None else None,
+                             "variant": "base", "level": round(base_px * (1 + (cal["hist_mean"] or 0) / 100)) if h <= 3 else None, "buy_at": None, "sell_at": None, "stop": None, "target_px": None,
+                             "range_mode": None, "trend7": None, "realized": None, "backfill": True})
+        return rows
+    except Exception as e:  # noqa: BLE001
+        log.warning("backfill: %s", e)
+        return []
+
+
 def run(fc: dict, snap: dict | None, scored: pd.DataFrame, stock_forecasts: dict[str, dict] | None = None, stock_frames: dict[str, pd.DataFrame] | None = None,
         prev: dict | None = None, hourly: dict | None = None) -> dict:
     prev = prev if prev is not None else published()
@@ -379,6 +434,11 @@ def run(fc: dict, snap: dict | None, scored: pd.DataFrame, stock_forecasts: dict
     for sid, sf in (stock_forecasts or {}).items():
         new += records_from_stock(sid, sf)
     rows = _merge(rows, new)
+    n_eval_mkt = sum(1 for r in rows if r.get("kind") == "mkt" and r.get("h") == 1 and r.get("realized"))
+    if n_eval_mkt < MIN_N_ADJ and not any(r.get("backfill") for r in rows):   # 首次：回填今年樣本外預測，讓自學層立刻啟動
+        bf = backfill(scored)
+        rows = _merge(rows, bf)
+        log.info("ledger backfill: %d rows", len(bf))
     frames = {"TAIEX": scored, **(stock_frames or {})}
     mclose = {str(r.date)[:10]: float(r.close) for r in scored.dropna(subset=["close"]).itertuples()}
     n_eval = evaluate(rows, frames, mclose)
@@ -387,7 +447,7 @@ def run(fc: dict, snap: dict | None, scored: pd.DataFrame, stock_forecasts: dict
         store.save_snapshot(dt.datetime.now(config.TZ).strftime("%Y-%m-%d"), "pred_ledger", {"n": len(rows), "rows": rows[-400:]})
     except Exception as e:  # noqa: BLE001
         log.debug("ledger snapshot: %s", e)
-    return {"generated": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M:%S"), "n_ledger": len(rows), "n_new": len(new), "n_evaluated_now": n_eval,
+    return {"generated": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M:%S"), "n_ledger": len(rows), "n_new": len(new), "n_evaluated_now": n_eval, "n_backfill": sum(1 for r in rows if r.get("backfill")),
             "market": summ["market"], "stocks": summ["stocks"], "ledger": rows,
             "method": {"half_life": HALF_LIFE, "min_n_adj": MIN_N_ADJ, "degrade_gap": DEGRADE_GAP, "touch_target": TOUCH_TARGET,
                        "desc": "帳本只記發布當下的預測，目標日收盤後對帳；近期命中以指數衰減加權 (半衰期 30 次)；p_up 以近期 Platt 校準 (樣本 20→80 筆逐步信任)；"
