@@ -81,6 +81,8 @@ def main() -> None:
             from chip.predict import confidence, patterns as _pt
             _pat = _pt.build(short_term.build_matrix(backtest.load_long("2010-01-01"), None), write=True)
             confidence.train(short_term.build_matrix(backtest.load_long("2010-01-01"), short_term._night_hist()), _pat, write=True, verbose=True)
+            from chip.predict import verdict as _vd   # 判斷總結：共識票數 → OOS 命中率 (2026-09-23)
+            _vd.train(short_term.build_matrix(backtest.load_long("2010-01-01"), short_term._night_hist()), _pat, write=True, verbose=True)
         except Exception as e:  # noqa: BLE001
             print("  trend7/range_levels train failed:", e)
     scored, A, meta = market.run(use_wantgoo=use_wg)
@@ -150,6 +152,11 @@ def main() -> None:
         print(f"  learn: ledger {learn_out['n_ledger']} (+{learn_out['n_new']} new, {learn_out['n_evaluated_now']} evaluated now)")
     except Exception as e:  # noqa: BLE001
         print("  learn failed:", e)
+    try:   # 判斷總結 (2026-09-23)：模型叫牌 + 6 票獨立訊號的共識 → 一句可執行判斷 (含同狀況 OOS 命中率)
+        from chip.predict import verdict
+        fc["verdict"] = verdict.build(fc, hr if not hr.get("error") else None, snap, scored, learn_summary)
+    except Exception as e:  # noqa: BLE001
+        print("  verdict failed:", e)
     dump("forecast", {"updated": time.strftime("%Y-%m-%d %H:%M:%S"), "forecast": fc, "hourly": hr, "stocks": stock_fc})
     res = None
     if not args.fast:
