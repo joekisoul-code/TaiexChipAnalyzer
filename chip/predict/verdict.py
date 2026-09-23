@@ -221,5 +221,5 @@ def build(fc: dict, hourly: dict | None, snap: dict | None, scored: pd.DataFrame
         if e["key"] == "rtscore" and e["s"] and cs and e["s"] != cs:
             act.append("盤中即時評分與叫牌相反：等盤中訊號轉向再動作")
     return {"date": today, "target": x.get("date"), "verdict": verdict, "call": call, "net": net, "agree": agree, "disagree": disagree, "bull": bull, "bear": bear,
-            "bucket": bucket if cs else None, "oos": oos or None, "votes": votes, "extra": extra, "head": head, "action": "；".join(act) or "照常依買賣點操作",
+            "bucket": bucket if cs else None, "oos": (oos or None) if cs else None, "votes": votes, "extra": extra, "head": head, "action": "；".join(act) or "照常依買賣點操作",
             "text": f"判斷總結：{verdict}。{head}。{'；'.join(act) if act else ''}".rstrip("。") + "。"}
