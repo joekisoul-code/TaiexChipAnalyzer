@@ -87,6 +87,8 @@ def main() -> None:
             _lg.train(short_term.build_matrix(backtest.load_long("2010-01-01"), short_term._night_hist()), write=True, verbose=True)
             from chip.predict import pullback as _pb   # 回落進場點：條件式分位模型 + 支撐止跌率 + 最低點時段 (2026-09-23)
             _pb.train(backtest.load_long("2010-01-01"), write=True, verbose=True)
+            from chip.predict import stock_pullback as _sp   # 個股回落模型 (pooled) + 止跌機率 + 前端查表 (2026-09-23)
+            _sp.train(write=True, verbose=True)
         except Exception as e:  # noqa: BLE001
             print("  trend7/range_levels train failed:", e)
     scored, A, meta = market.run(use_wantgoo=use_wg)
@@ -201,7 +203,21 @@ def main() -> None:
             fl = a.get("flows")
             if fl is not None and hasattr(fl, "tail"):   # 近 60 日各路資金 (主力/籌碼集中度 有玩股網時才有)
                 slim[sid]["flows_tail"] = fl.tail(60)[[c for c in ("date", "close", "foreign", "trust", "dealer", "main", "skp5", "skp20", "gov8", "margin_chg") if c in fl]]
-        dump("watchlist", {"updated": time.strftime("%Y-%m-%d %H:%M:%S"), "stocks": slim})
+        # 個股回落模型 (2026-09-23)：追蹤清單每檔的模型買點/停損/止跌機率/支撐；離線查表給前端套用到任何股票
+        _pb_tbl = None
+        try:
+            from chip.predict import stock_pullback as _sp2
+            for sid in list(slim.keys()):
+                try:
+                    r = _sp2.build(sid)
+                    if r:
+                        slim[sid]["pullback"] = r
+                except Exception as e:  # noqa: BLE001
+                    print(f"  stock_pullback {sid} failed:", e)
+            _pb_tbl = _sp2.client_table()
+        except Exception as e:  # noqa: BLE001
+            print("  stock_pullback failed:", e)
+        dump("watchlist", {"updated": time.strftime("%Y-%m-%d %H:%M:%S"), "stocks": slim, "pullback_table": _pb_tbl})
         dump("global", {"global": global_study.load_report(), "cross": cross_market.load_report()})
     else:
         # fast 模式不重算追蹤清單/國際研究；Pages 部署是整站覆蓋 (force_orphan)，若不把上次發布的檔案帶回來，
