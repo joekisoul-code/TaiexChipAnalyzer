@@ -334,7 +334,7 @@ def adjust_forecast(fc: dict, summary: dict) -> dict:
         gv = (g.get("by_variant") or {}).get(v) or {}
         if v and gv.get("n_calls", 0) >= MIN_N_ADJ:
             g = gv
-        elif v and v not in ("base", "daily", "") and v not in (g.get("by_variant") or {}):
+        elif v and v not in ("base", "daily", ""):   # 同變體對帳不足 (含 n_calls=0)
             x["recent_hit"] = g.get("hit_ewm"); x["recent_n"] = g.get("n_calls")
             x["learn_note"] = f"近期對帳為不含夜盤紀錄 (命中 {g['hit_ewm']:.0%}，n={g['n_calls']})，不套用到含夜盤叫牌" if g.get("n_calls") else ""
             return
