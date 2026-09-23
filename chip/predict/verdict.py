@@ -174,6 +174,14 @@ def build(fc: dict, hourly: dict | None, snap: dict | None, scored: pd.DataFrame
         extra.append({"key": "logic", "name": "漲跌邏輯 (決策規則)", "dir": _dir(ls), "s": ls,
                       "note": f"{r_.get('text')} → {r_.get('dir')} (歷史 {r_.get('n')} 次上漲率 {float(r_.get('up_rate') or 0):.0%}；最近 8 次上漲 {float(L1.get('recent_up') or 0):.0%})"
                               + (f"；此變體樣本外命中 {o_['hit']:.0%} vs 基準 {o_['base']:.0%}" + ("，無優勢僅供觀察" if edge < 0.03 else "") if o_.get("hit") else "")})
+    gp = (fc.get("precheck") or {}).get("gap") or {}
+    if gp.get("stats"):
+        s_ = gp["stats"]; est = float(gp.get("est") or 0)
+        gs = 1 if (est > 0.15 and s_.get("p_hold", 0) >= 0.6) else -1 if (est < -0.15 and s_.get("p_hold", 0) >= 0.6) else 0
+        extra.append({"key": "gap", "name": "開盤跳空預判", "dir": _dir(gs), "s": gs, "note": f"預估跳空 {est:+.2f}% ({gp.get('source')})：{gp.get('bucket')}‧回補 {s_['p_fill']:.0%}‧守住 {s_['p_hold']:.0%}‧收盤上漲率 {s_['p_up_close']:.0%} (n={s_['n']})"})
+    for c_ in (fc.get("precheck") or {}).get("calendar") or []:
+        if c_.get("valid"):
+            extra.append({"key": "cal_" + c_["key"], "name": "日曆效應", "dir": c_["dir"][-1] if c_["dir"] in ("偏多", "偏空") else "—", "s": 1 if c_["dir"] == "偏多" else -1 if c_["dir"] == "偏空" else 0, "note": c_.get("text")})
     sc = snap.get("score") or {}
     if sc.get("score") is not None and snap.get("phase") == "day":
         ss = _sgn(float(sc["score"]) - 0) if abs(float(sc["score"])) >= 15 else 0
