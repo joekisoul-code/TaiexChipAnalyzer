@@ -170,6 +170,10 @@ forecast.json `precheck`：`gap` (明日開盤跳空預判) 與 `calendar` (目�
 
 ## 線上自學 (`chip/predict/learn.py`，2026-09-22)
 
+> 2026-09-24 更新：帳本依變體記錄 (`mode=close` 不含夜盤 15:40 版、`mode=night` 含夜盤版)，兩者各自首次回填今年 160 日樣本外預測 (`backfill(variant)`)；
+> 校準/降級只用同變體 ≥20 筆對帳。回填結果：不含夜盤 隔天 51~53%、2 日 58%、3 日 66%；含夜盤 隔天 81~84%、2 日 76~79%、3 日 68%。
+> 研究：2026 年不含夜盤高共識 (淨票 ≥3) 叫牌 62% vs 一般 50%，但 2025 年 52% vs 54% 無差異 → 暫不依共識分級決定降級。
+
 - 每次 `export_static` 把當次預測記進帳本 (`data/learn.json`，Pages 累積)：大盤隔天/後天/第三天與 5/10/20 日的叫牌、p_up、買賣點水準、trend7；追蹤清單個股 5/10/20 日相對大盤 (`stock_forecast`，同時併入 `forecast.stocks` / `watchlist.stocks[].forecast`)。盤中 (live) 紀錄另標，不進統計。
 - 目標日收盤後對帳：方向命中、報酬 (個股為相對大盤)、買點/賣點/停損/目標是否被觸及、Brier。統計：近期命中 (指數衰減、半衰期 30 次)、近 20/60 次、全部、模型長期 call_hit、基準。
 - 自適應 (只用已對帳紀錄)：近期命中低於模型長期 5pt 以上 (n≥20) → 該視野 `call_degraded` 改中性 (原判存 `call_model`)；`p_up_adj` = 近期 Platt 校準 (20→80 筆逐步信任)；買賣點水準乘數 = sqrt(近 60 次觸及率/20%) 限 0.85~1.35 (`range_levels.attach_to_next_days(sigma_factor)`)。

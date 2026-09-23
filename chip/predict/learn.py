@@ -26,7 +26,7 @@ from ..http import session
 
 log = logging.getLogger(__name__)
 PAGES_URL = os.getenv("CHIP_PAGES_URL", "https://joekisoul-code.github.io/TaiexChipAnalyzer/")
-MAX_LEDGER = 3000
+MAX_LEDGER = 4000
 RECENT_N = (20, 60)
 HALF_LIFE = 30          # 近期命中率的指數衰減半衰期 (以叫牌次數計)
 MIN_N_ADJ = 20          # 至少 20 筆已對帳才做調整
@@ -86,7 +86,7 @@ def records_from_forecast(fc: dict, snap: dict | None) -> list[dict]:
     mode = "live" if live else ((snap or {}).get("phase") or "closed")
     rows = []
     for x in fc.get("next_days") or []:
-        rows.append({"kind": "mkt", "sid": "TAIEX", "as_of": as_of, "target": str(x.get("date")), "h": int(x.get("n") or 0), "mode": "live" if live else "close",
+        rows.append({"kind": "mkt", "sid": "TAIEX", "as_of": as_of, "target": str(x.get("date")), "h": int(x.get("n") or 0), "mode": "live" if live else ("night" if x.get("variant") == "night" else "close"),
                      "phase": mode, "live": live, "base": base, "p_up": _num(x.get("p_up")), "base_hit": _num(x.get("base_hit")), "call": x.get("call") or "中性",
                      "strength": x.get("call_strength") or "", "call_hit": _num(x.get("call_hit")), "variant": x.get("variant"), "level": _num(x.get("level")),
                      "buy_at": _num(x.get("buy_at")), "sell_at": _num(x.get("sell_at")), "stop": _num(x.get("stop")), "target_px": _num(x.get("target")),
@@ -423,7 +423,7 @@ def touch_factor(summary: dict, h: int) -> float:
 BACKFILL_DAYS = 160
 
 
-def backfill(scored: pd.DataFrame, days: int = BACKFILL_DAYS) -> list[dict]:
+def backfill(scored: pd.DataFrame, days: int = BACKFILL_DAYS, variant: str = "base") -> list[dict]:
     """帳本回填 (2026-09-23)：用「今年之前資料訓練」的短線模型 (不含夜盤變體，與 15:40 正式版同) 對今年最近 days 個交易日做樣本外預測，
     以與 records_from_forecast 相同欄位記入帳本 (backfill=True、mode=close)，讓 Platt 校準 / 失準降級 / 水準偏誤 立刻有 ≥20 筆對帳，不必等數週。
     已存在的真實紀錄優先 (_merge 保留先前)；只回填 kind=mkt h=1/2/3/5。"""
@@ -436,15 +436,18 @@ def backfill(scored: pd.DataFrame, days: int = BACKFILL_DAYS) -> list[dict]:
                 scored = long
         except Exception as e:  # noqa: BLE001
             log.warning("backfill load_long: %s", e)
-        mat = ST.build_matrix(scored, None)
+        night = ST._night_hist() if variant == "night" else None
+        mat = ST.build_matrix(scored, night)
+        if variant == "night":
+            mat = mat.dropna(subset=[ST.NIGHT_FEATURE]).reset_index(drop=True)   # 只有有完整夜盤的交易日
         year = int(str(mat["date"].iloc[-1])[:4])
         rows = []
         for h in (1, 2, 3, 5):
-            b = M.load(f"st_h{h}_base")
+            b = M.load(f"st_h{h}_{variant}")
             if not b:
                 continue
             sname, mk = b["chosen"].split("|")
-            feats = list(ST.FEATURE_SETS[sname])
+            feats = list(ST.FEATURE_SETS[sname]) + ([ST.NIGHT_FEATURE] if variant == "night" else [])
             outs = []
             if mk in ("lgb", "ens"):
                 outs.append(ST._wf(mat, feats, f"fwd{h}", h, year, lambda: ST.LgbModel()))
@@ -472,11 +475,11 @@ def backfill(scored: pd.DataFrame, days: int = BACKFILL_DAYS) -> list[dict]:
                     if t.get("strong_lo") is not None and pred <= t["strong_lo"] and (t.get("dn_hit_strong") or 0) >= t["dn_hit"]:
                         strength, call_hit = "強", t["dn_hit_strong"]
                 base_px = closes[i]
-                rows.append({"kind": "mkt", "sid": "TAIEX", "as_of": dates[i], "target": dates[i + h] if h <= 3 else None, "h": h, "mode": "close", "phase": "closed", "live": False,
+                rows.append({"kind": "mkt", "sid": "TAIEX", "as_of": dates[i], "target": dates[i + h] if h <= 3 else None, "h": h, "mode": "night" if variant == "night" else "close", "phase": "closed", "live": False,
                              "base": base_px, "p_up": cal["p_up"], "base_hit": cal["base_hit"], "call": call, "strength": strength, "call_hit": round(float(call_hit), 3) if call_hit is not None else None,
-                             "variant": "base", "level": round(base_px * (1 + (cal["hist_mean"] or 0) / 100)) if h <= 3 else None, "buy_at": None, "sell_at": None, "stop": None, "target_px": None,
+                             "variant": variant, "level": round(base_px * (1 + (cal["hist_mean"] or 0) / 100)) if h <= 3 else None, "buy_at": None, "sell_at": None, "stop": None, "target_px": None,
                              "range_mode": None, "trend7": None, "realized": None, "backfill": True})
-        print(f"  learn backfill: {len(rows)} rows")
+        print(f"  learn backfill ({variant}): {len(rows)} rows")
         return rows
     except Exception as e:  # noqa: BLE001
         print(f"  learn backfill failed: {e}")
@@ -491,11 +494,11 @@ def run(fc: dict, snap: dict | None, scored: pd.DataFrame, stock_forecasts: dict
     for sid, sf in (stock_forecasts or {}).items():
         new += records_from_stock(sid, sf)
     rows = _merge(rows, new)
-    n_eval_mkt = sum(1 for r in rows if r.get("kind") == "mkt" and r.get("h") == 1 and r.get("realized"))
-    if n_eval_mkt < MIN_N_ADJ and not any(r.get("backfill") for r in rows):   # 首次：回填今年樣本外預測，讓自學層立刻啟動
-        bf = backfill(scored)
-        rows = _merge(rows, bf)
-        log.info("ledger backfill: %d rows", len(bf))
+    for variant in ("base", "night"):   # 首次：各變體回填今年樣本外預測，讓自學層立刻啟動 (含夜盤 = 早上看到的叫牌)
+        n_eval_v = sum(1 for r in rows if r.get("kind") == "mkt" and r.get("h") == 1 and r.get("realized") and (r.get("variant") or "base") == variant)
+        if n_eval_v < MIN_N_ADJ and not any(r.get("backfill") and (r.get("variant") or "base") == variant for r in rows):
+            bf = backfill(scored, variant=variant)
+            rows = _merge(rows, bf)
     frames = {"TAIEX": scored, **(stock_frames or {})}
     mclose = {str(r.date)[:10]: float(r.close) for r in scored.dropna(subset=["close"]).itertuples()}
     n_eval = evaluate(rows, frames, mclose)
