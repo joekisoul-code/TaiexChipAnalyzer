@@ -83,6 +83,8 @@ def main() -> None:
             confidence.train(short_term.build_matrix(backtest.load_long("2010-01-01"), short_term._night_hist()), _pat, write=True, verbose=True)
             from chip.predict import verdict as _vd   # 判斷總結：共識票數 → OOS 命中率 (2026-09-23)
             _vd.train(short_term.build_matrix(backtest.load_long("2010-01-01"), short_term._night_hist()), _pat, write=True, verbose=True)
+            from chip.predict import logic as _lg   # 漲跌邏輯：決策規則走動式驗證 (2026-09-23)
+            _lg.train(short_term.build_matrix(backtest.load_long("2010-01-01"), short_term._night_hist()), write=True, verbose=True)
         except Exception as e:  # noqa: BLE001
             print("  trend7/range_levels train failed:", e)
     scored, A, meta = market.run(use_wantgoo=use_wg)
@@ -152,6 +154,12 @@ def main() -> None:
         print(f"  learn: ledger {learn_out['n_ledger']} (+{learn_out['n_new']} new, {learn_out['n_evaluated_now']} evaluated now)")
     except Exception as e:  # noqa: BLE001
         print("  learn failed:", e)
+    try:   # 漲跌邏輯 (2026-09-23)：歷史學出的決策規則 → 今日適用規則 + 最近 8 次實例 + 該變體走動式 OOS
+        from chip.predict import logic, short_term as _st2
+        _nd0 = (fc.get("next_days") or [{}])[0]
+        fc["logic"] = logic.build(_st2.build_matrix(backtest.load_long("2010-01-01"), _st2._night_hist()), night_final=(_nd0.get("variant") == "night"))
+    except Exception as e:  # noqa: BLE001
+        print("  logic failed:", e)
     try:   # 判斷總結 (2026-09-23)：模型叫牌 + 6 票獨立訊號的共識 → 一句可執行判斷 (含同狀況 OOS 命中率)
         from chip.predict import verdict
         fc["verdict"] = verdict.build(fc, hr if not hr.get("error") else None, snap, scored, learn_summary)

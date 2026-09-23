@@ -166,6 +166,14 @@ def build(fc: dict, hourly: dict | None, snap: dict | None, scored: pd.DataFrame
         p, bh = float(t13["p_up"]), float(t13.get("base_hit") or 0.5)
         hs = 1 if p >= bh + 0.03 else -1 if p <= bh - 0.03 else 0
         extra.append({"key": "hourly", "name": f"盤中小時模型 {hr.get('mark')}→13:30", "dir": _dir(hs), "s": hs, "note": f"預估收盤 {float(t13.get('level') or 0):,.0f}、上漲率 {p:.0%} (基準 {bh:.0%})"})
+    L1 = ((fc.get("logic") or {}).get("h") or {}).get("1") or {}
+    if L1.get("rule"):
+        r_, o_ = L1["rule"], L1.get("oos") or {}
+        ls = 1 if r_.get("dir") == "偏多" else -1 if r_.get("dir") == "偏空" else 0
+        edge = (o_.get("hit") or 0) - (o_.get("base") or 0)
+        extra.append({"key": "logic", "name": "漲跌邏輯 (決策規則)", "dir": _dir(ls), "s": ls,
+                      "note": f"{r_.get('text')} → {r_.get('dir')} (歷史 {r_.get('n')} 次上漲率 {float(r_.get('up_rate') or 0):.0%}；最近 8 次上漲 {float(L1.get('recent_up') or 0):.0%})"
+                              + (f"；此變體樣本外命中 {o_['hit']:.0%} vs 基準 {o_['base']:.0%}" + ("，無優勢僅供觀察" if edge < 0.03 else "") if o_.get("hit") else "")})
     sc = snap.get("score") or {}
     if sc.get("score") is not None and snap.get("phase") == "day":
         ss = _sgn(float(sc["score"]) - 0) if abs(float(sc["score"])) >= 15 else 0
