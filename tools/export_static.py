@@ -218,6 +218,14 @@ def main() -> None:
                     r5["five_strength"], r5["five_hit"] = "強", fv["strong"]["hit"]
     except Exception as e:  # noqa: BLE001
         print("  five_day failed:", e)
+    try:   # 晚間美期叫牌 (2026-09-24)：13:00 ES 基準價 + 每小時命中表；App 以即時 ES 價計算 (21:00 ~ 隔日 08:45)
+        from chip.predict import es_evening
+        if isinstance(fc, dict) and not fc.get("error"):
+            ev = es_evening.build(str(fc.get("date") or "")[:10])
+            if ev:
+                fc["es_eve"] = ev
+    except Exception as e:  # noqa: BLE001
+        print("  es_evening failed:", e)
     try:   # 預測邏輯總表 (2026-09-24)：今日各有效資訊讀數所在檔位 → 各視野多空票
         from chip.predict import infomap, short_term as _st3
         fc["infomap"] = infomap.build(backtest.load_long("2010-01-01"), _st3._night_hist())
