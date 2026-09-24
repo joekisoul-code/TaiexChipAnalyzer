@@ -10,6 +10,7 @@ A 級強化 (2026-09-24 第二輪，scratch tr_a/tr_b/tr_c.py)：高分 (≥ 前
   → 分級：A = 高分 ∧ 大盤在月線下；B+ = 高分 ∧ 大盤在月線上；B = 其餘。
   強勢市場另訓專屬模型/加條件：2024 年都跌到 23~34%，無穩定優勢，不採用。
   出場 (tr_g.py)：A 級持有 21 交易日 +7.5% (勝率 67%) 遠勝 +6% 停利 (+1.7%) 或移動停利 (+3.2%) → 建議持有滿 30 天。
+  進場 (tr_h.py)：推薦當天收盤 +7.5% > 隔天開盤 +6.8% > 掛低 1~3% 等回檔 (+4.3~4.6%，錯過最強的股票) → 當天就進場。
 主要特徵：20 日波動 (高 → 易達 +6%)、距 20 日低點 (遠 → 好)、20/60 日漲幅 (跌多 → 好，均值回歸)、距 60 日高點 (深 → 好)。
 前端 (learning.js treasureModel) 用 dump 的樹直接算分；特徵由 Yahoo 6 個月日 K + 今日快照在前端計算。
 """
@@ -188,7 +189,8 @@ def train(panel: pd.DataFrame | None = None, write: bool = True, verbose: bool =
     th_final = float(np.quantile(fm.predict_proba(ly[FEATS])[:, 1], 0.9))
     imp = fm.booster_.feature_importance("gain"); imp = imp / imp.sum()
     out = {"trained_at": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M:%S"), "features": FEATS, "init": float(fm.booster_.dump_model().get("average_output", 0) or 0),
-           "trees": _dump_trees(fm.booster_), "th_A": round(th_final, 4), "gate": {"m_bias20_lt": GATE_MBIAS, "note": "A 級需大盤在月線下；大盤在月線上的高分股標 B+"}, "exit": {"note": "出場研究 (scratch tr_g.py，2022~ 走動式 A 級 n=330)：持有 21 交易日平均 +7.5%、勝率 67%、最差年 +5.1%；+6% 停利/−8% 停損只剩 +1.7%，+10%/−8% +2.5%，+6% 後移動停利 +3.2% → 建議持有滿 30 天，不提早停利；B 級持有 21 日 +3.3%、最差年 −1.6%", "A_hold": 7.48, "A_tp6": 1.68, "A_trail": 3.24}, "n_rows": int(len(D)), "n_stocks": int(D["code"].nunique()),
+           "trees": _dump_trees(fm.booster_), "th_A": round(th_final, 4), "gate": {"m_bias20_lt": GATE_MBIAS, "note": "A 級需大盤在月線下；大盤在月線上的高分股標 B+"}, "exit": {"note": "出場研究 (scratch tr_g.py，2022~ 走動式 A 級 n=330)：持有 21 交易日平均 +7.5%、勝率 67%、最差年 +5.1%；+6% 停利/−8% 停損只剩 +1.7%，+10%/−8% +2.5%，+6% 後移動停利 +3.2% → 建議持有滿 30 天，不提早停利；B 級持有 21 日 +3.3%、最差年 −1.6%", "A_hold": 7.48, "A_tp6": 1.68, "A_trail": 3.24},
+           "entry": {"note": "進場研究 (scratch tr_h.py，A 級 n=330，出場固定第 21 交易日)：推薦當天收盤 +7.5%；隔天開盤 +6.8%；掛低 1/2/3% 等 3 天成交率 69/57/45%、整體 +4.6/+4.4/+4.3% (沒成交的那批若當天買平均 +9~14%) → 推薦當天就進場，不要等回檔", "A_close": 7.48, "A_open": 6.84, "A_lim1": 4.55, "A_lim2": 4.41, "fill_lim2": 0.57}, "n_rows": int(len(D)), "n_stocks": int(D["code"].nunique()),
            "universe": sorted(D["code"].unique().tolist()), "importance": sorted(({"f": f, "w": round(float(w), 3)} for f, w in zip(FEATS, imp)), key=lambda z: -z["w"])[:10],
            "oos": res, "def": {"H": H, "target": TGT, "stop": STOP, "rel": REL}}
     # 自檢：JSON 樹與 LightGBM 預測一致
