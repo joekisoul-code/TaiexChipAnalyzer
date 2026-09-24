@@ -491,6 +491,44 @@ def _turning(scored: pd.DataFrame) -> str | None:
     return None
 
 
+RALLY_LOOKBACK, RALLY_BREAK_N, RALLY_MIN_SIGNALS = 10, 3, 2
+
+
+def bottom_count(scored: pd.DataFrame) -> pd.Series:
+    """每日底部訊號數 (assess 的 7 項可向量化訊號；不含需因子標籤的「賣壓高潮」)。"""
+    g = lambda c: scored[c] if c in scored else pd.Series(np.nan, index=scored.index)
+    conds = [(g("gov8_streak") >= 3) & (g("ret5") < 0), g("margin_pct20") < -5, g("maint_ratio") < 160, g("pcr_oi") >= 115,
+             g("bias20") < -6, g("foreign_streak") <= -5, (g("margin_pct20") < -4) & (g("ret20") < -3)]
+    return sum(c.fillna(False).astype(int) for c in conds)
+
+
+def rally_confirm(scored: pd.DataFrame) -> dict:
+    """起漲確認 (2026-09-24 研究，2012~ 大盤)：近 10 日曾有 ≥2 個底部訊號，且今日收盤突破前 3 日最高價。
+    同一波只算首次 (近 20 日未確認過)：21 次/12 年，10 日後上漲 67%、平均 +1.56% (全體 60% / +0.58%)，20 日 71% / +2.10%；
+    對照「訊號出現首日就買」10 日只 48% / −0.29% (常接刀)。突破窗 2/3/5 日 × 回看 5/10/15 日 9 種組合 10 日均皆 +1.2~+2.0%。"""
+    if len(scored) < RALLY_BREAK_N + 2:
+        return {}
+    cnt = bottom_count(scored)
+    recent = int(cnt.tail(RALLY_LOOKBACK).max())
+    hi = pd.to_numeric(scored["high"], errors="coerce").astype(float)
+    close = float(scored["close"].iloc[-1])
+    prev_hi = float(hi.iloc[-RALLY_BREAK_N - 1:-1].max())
+    next_trigger = float(hi.tail(RALLY_BREAK_N).max())   # 明日要確認需收盤高於此
+    armed = recent >= RALLY_MIN_SIGNALS
+    confirmed = armed and np.isfinite(prev_hi) and close > prev_hi
+    first = confirmed and not any(   # 近 20 日已確認過 → 同一波不再重複
+        (bottom_count(scored.iloc[:j]).tail(RALLY_LOOKBACK).max() >= RALLY_MIN_SIGNALS) and float(scored["close"].iloc[j - 1]) > float(hi.iloc[j - 1 - RALLY_BREAK_N:j - 1].max())
+        for j in range(len(scored) - 20, len(scored)) if j - 1 - RALLY_BREAK_N >= 0)
+    out = {"armed": bool(armed), "signals_10d": recent, "confirmed": bool(confirmed), "first": bool(first),
+           "trigger": int(round(next_trigger)) if np.isfinite(next_trigger) else None,
+           "stats": {"n": 21, "up10": 0.667, "ret10": 1.56, "up20": 0.714, "ret20": 2.10, "first_day_up10": 0.478, "first_day_ret10": -0.29, "base_up10": 0.599, "base_ret10": 0.58}}
+    if confirmed:
+        out["text"] = "起漲確認：底部訊號後收盤突破前 3 日高 (歷史 10 日上漲 67%、平均 +1.6%)"
+    elif armed:
+        out["text"] = f"底部訊號區，先別接刀：收盤突破 {out['trigger']} (近 3 日高) 才算起漲 (訊號首日就買歷史 10 日上漲僅 48%)"
+    return out
+
+
 def assess(scored: pd.DataFrame) -> dict:
     """最新一日判讀。"""
     r = scored.iloc[-1]
@@ -567,6 +605,12 @@ def assess(scored: pd.DataFrame) -> dict:
         top_risk.append("外資期貨多單極端且乖離大 (追高風險)")
 
     turning = _turning(scored)
+    try:
+        rally = rally_confirm(scored)
+    except Exception:  # noqa: BLE001
+        rally = {}
+    if rally.get("confirmed"):
+        turning = rally["text"] + (f"；{turning}" if turning else "")
     stabilizing = r["ret1"] > 0 and mom > 5
     if state == "多頭":
         if smooth >= 20 and passed >= max(5, total - 2):
@@ -607,7 +651,7 @@ def assess(scored: pd.DataFrame) -> dict:
         "turning": turning, "action": action, "detail": detail, "position": level,
         "reasons_pos": reasons_pos, "reasons_neg": reasons_neg,
         "factors": factors, "checklist": checklist, "passed": passed, "total": total,
-        "bottom_signals": bottom, "top_risks": top_risk,
+        "bottom_signals": bottom, "top_risks": top_risk, "rally": rally,
     }
 
 
