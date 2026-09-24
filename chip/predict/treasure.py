@@ -224,6 +224,12 @@ def train(panel: pd.DataFrame | None = None, write: bool = True, verbose: bool =
     return out
 
 
+# 出場研究 (2026-09-24，候選池 80 前 3 名 n=1766，2022~ 走動式；收盤進場)：
+#   持有 20 天：勝率 56.7%、平均 +6.7%、中位 +2.8%、虧 >10% 20%
+#   漲 10% 後自最高收盤前高點回落 8% 出場，否則持有 20 天：勝率 63.8%、平均 +4.4%、虧 >10% 16%、逐年最低勝率 51% (啟動 10~15% × 回落 6~10% 皆勝率 61~66%，平原非尖點)
+#   停損 (−8~−10%) 一律變差 (勝率 46~49%，波動大常洗掉後再漲)；停利 +20% 無停損 59%、+4.7%
+SURGE_EXIT = {"trail_act": 10, "trail_drop": 8, "hold": 20, "win": 0.638, "avg": 4.37, "hold_win": 0.567, "hold_avg": 6.69,
+              "note": "漲 10% 後從最高點回落 8% 賣出，否則持有 20 天：勝率 64%、平均 +4.4%；抱滿 20 天平均較高 (+6.7%) 但勝率 57%。不建議設停損 (勝率降到 46~49%)，改用小部位控制風險"}
 SURGE_PARAMS = dict(n_estimators=250, learning_rate=0.03, num_leaves=15, min_child_samples=400, subsample=0.8, subsample_freq=1, colsample_bytree=0.8, verbose=-1)
 
 
@@ -260,7 +266,7 @@ def _train_surge(lgb, D: pd.DataFrame, E: pd.DataFrame) -> dict:
     ly = Ds[Ds["year"] >= int(Ds["year"].max()) - 1]
     th = float(np.quantile(fm.predict_proba(ly[SURGE_FEATS])[:, 1], 0.9))
     sm = {"features": SURGE_FEATS, "init": float(fm.booster_.dump_model().get("average_output", 0) or 0), "trees": _dump_trees(fm.booster_), "th_top10": round(th, 4),
-          "def": {"n": SURGE_N, "up": SURGE_UP, "dn": SURGE_DN, "topk": SURGE_TOPK, "pool": SURGE_POOL}, "oos": oos,
+          "def": {"n": SURGE_N, "up": SURGE_UP, "dn": SURGE_DN, "topk": SURGE_TOPK, "pool": SURGE_POOL}, "oos": oos, "exit": SURGE_EXIT,
           "note": "飆股 = 20 交易日內先漲 +20% 且未先跌破 −10%。每日掃描前 80 候選池前 3 名樣本外約 1/3 命中 (平常 16~22%)，平均 +5.8% 但中位只 +2%、兩成虧超過 10% → 高風險，小部位"}
     raw = np.array([_eval(sm, r) for r in Ds[SURGE_FEATS].tail(200).values]); ref = fm.predict_proba(Ds[SURGE_FEATS].tail(200))[:, 1]
     sm["selfcheck_maxdiff"] = round(float(np.max(np.abs(1 / (1 + np.exp(-raw)) - ref))), 6)
