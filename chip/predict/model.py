@@ -49,11 +49,15 @@ def walk_forward(df: pd.DataFrame, features: list[str], target: str, horizon: in
     d = df.dropna(subset=[target]).copy()
     d["year"] = d["date"].str[:4].astype(int)
     rows = []
+    dates = np.array(sorted(d["date"].unique()))
     for y in sorted(d["year"].unique()):
         if y < first_test_year:
             continue
         test = d[d["year"] == y]
-        train = d[d["year"] < y].iloc[:-horizon] if horizon else d[d["year"] < y]
+        # 2026-09-24：以「交易日」剔除測試年前 horizon 日 (舊 iloc[:-horizon] 以列計，面板資料一天數十列 → 只剔除不到 1 天，標籤跨入測試年)
+        i0 = int(np.searchsorted(dates, test["date"].min()))
+        cut = dates[max(0, i0 - horizon)] if horizon else test["date"].min()
+        train = d[d["date"] < cut]
         if len(train) < min_train or test.empty:
             continue
         models = fit_ensemble(train[features], train[target], params)

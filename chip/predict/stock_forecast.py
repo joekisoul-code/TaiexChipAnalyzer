@@ -19,6 +19,8 @@ log = logging.getLogger(__name__)
 START = "2018-01-01"
 HORIZONS = (5, 10, 20)
 FIRST_TEST_YEAR = 2021
+MIN_HIT = 0.52
+TIER_Q = 0.10   # 2026-09-24：叫牌 = OOS 預測前/後 10%。舊規則「5 分位命中 ≥ 基準+3pt」在 5/10/20 日從未叫多 (最高分位只 +2pt)
 STOCK_FEATURES = [
     "s_foreign_z1", "s_foreign_z5", "s_foreign_z20", "s_trust_z5", "s_trust_z20", "s_dealer_z5", "s_foreign_streak", "s_trust_streak",
     "s_concentration", "s_margin_pct20", "s_margin_div20", "s_short_ratio", "s_holding_chg20", "s_holding_chg60",
@@ -110,12 +112,29 @@ def build_panel(universe: list[str] | None = None) -> pd.DataFrame:
     return panel.sort_values(["date", "stock_id"]).reset_index(drop=True)
 
 
+def _tiers(oos: pd.DataFrame) -> dict:
+    """OOS 預測前/後 TIER_Q 的門檻與命中 (跑贏/落後大盤)；逐年最低一併記錄。"""
+    if oos.empty:
+        return {}
+    hi, lo = float(oos["pred"].quantile(1 - TIER_Q)), float(oos["pred"].quantile(TIER_Q))
+    up, dn = oos[oos["pred"] >= hi], oos[oos["pred"] <= lo]
+    base = float((oos["actual"] > 0).mean())
+    uy = up.groupby("year")["actual"].apply(lambda s: (s > 0).mean()); dy = dn.groupby("year")["actual"].apply(lambda s: (s < 0).mean())
+    t = {"hi": round(hi, 4), "lo": round(lo, 4), "base_up": round(base, 3),
+         "up_hit": round(float((up["actual"] > 0).mean()), 3), "up_mean": round(float(up["actual"].mean()), 2), "up_n": int(len(up)), "up_yr_min": round(float(uy.min()), 3),
+         "dn_hit": round(float((dn["actual"] < 0).mean()), 3), "dn_mean": round(float(dn["actual"].mean()), 2), "dn_n": int(len(dn)), "dn_yr_min": round(float(dy.min()), 3)}
+    t["up_on"] = bool(t["up_hit"] >= max(base + 0.03, MIN_HIT))   # 需同時高於基準 3pt 且 ≥52% (20 日跑贏 49.9% 雖高於基準 46.5%，顯示「跑贏 50%」無意義)
+    t["dn_on"] = bool(t["dn_hit"] >= max((1 - base) + 0.03, MIN_HIT))
+    return t
+
+
 def train(write: bool = True) -> dict:
     panel = build_panel()
     results = {}
     for h in HORIZONS:
         oos = M.walk_forward(panel, STOCK_FEATURES, f"xfwd{h}", h, FIRST_TEST_YEAR, min_train=3000)
         met = M.metrics(oos)
+        met["tiers"] = _tiers(oos)
         results[h] = met
         if write:
             d = panel.dropna(subset=[f"xfwd{h}"])
@@ -141,7 +160,14 @@ def forecast(stock_id: str) -> dict:
     for h, b in bundles.items():
         x = last[b["features"]].astype(float)
         pred = float(M.predict_ensemble(b["models"], x)[0])
-        out["horizons"][h] = {"pred": round(pred, 2), **M.apply_calibration(b["calibration"], pred), "drivers": M.explain(b["models"], x, STOCK_NAMES)}
+        t = (b.get("metrics") or {}).get("tiers") or {}
+        call, call_hit = "中性", None
+        if t.get("up_on") and pred >= t["hi"]:
+            call, call_hit = "偏多", t["up_hit"]
+        elif t.get("dn_on") and pred <= t["lo"]:
+            call, call_hit = "偏空", t["dn_hit"]
+        out["horizons"][h] = {"pred": round(pred, 2), **M.apply_calibration(b["calibration"], pred), "call": call, "call_hit": call_hit,
+                              "drivers": M.explain(b["models"], x, STOCK_NAMES)}
     out["metrics"] = {h: {k: v for k, v in b.get("metrics", {}).items() if k != "calibration"} for h, b in bundles.items()}
     out["in_universe"] = stock_id in bundles[10].get("universe", [])
     h10 = out["horizons"][10]

@@ -138,9 +138,9 @@ def records_from_stock(sid: str, sf: dict) -> list[dict]:
     rows = []
     for h, r in (sf.get("horizons") or {}).items():
         p = _num(r.get("p_up")); bh = _num(r.get("base_hit")) or 0.5
-        call = "偏多" if p is not None and p >= bh + 0.03 else "偏空" if p is not None and p <= bh - 0.03 else "中性"
+        call = r.get("call") or ("偏多" if p is not None and p >= bh + 0.03 else "偏空" if p is not None and p <= bh - 0.03 else "中性")   # 新版模型直接給前/後 10% 叫牌
         rows.append({"kind": "stk", "sid": str(sid), "as_of": str(sf.get("date")), "target": None, "h": int(h), "mode": "close", "phase": "closed", "live": False,
-                     "base": _num(sf.get("close")), "p_up": p, "base_hit": bh, "call": call, "strength": "", "call_hit": None, "variant": "stock", "level": None,
+                     "base": _num(sf.get("close")), "p_up": p, "base_hit": bh, "call": call, "strength": "", "call_hit": _num(r.get("call_hit")), "variant": "stock", "level": None,
                      "buy_at": None, "sell_at": None, "stop": None, "target_px": None, "range_mode": None, "trend7": None, "pred": _num(r.get("pred")), "realized": None})
     return rows
 
