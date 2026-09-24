@@ -130,10 +130,11 @@ def build(fc: dict, hourly: dict | None, snap: dict | None, scored: pd.DataFrame
     votes: list[dict] = []
     # --- 計票層 ---
     tn = snap.get("tx_night") or {}
-    night_v = float(tn["change_pct"]) if tn.get("change_pct") is not None and snap.get("phase") in ("night", "closed", "pre") else None
+    from .short_term import night_final as _nf
+    night_v = float(tn["change_pct"]) if _nf(snap) else None   # 2026-09-24：夜盤收盤後才計票
     if x.get("variant") == "night" or night_v is not None:
         s = _sgn(night_v) if night_v is not None and abs(night_v) >= 0.1 else 0
-        votes.append({"key": "night", "name": NAMES["night"], "dir": _dir(s), "s": s, "note": f"夜盤 {night_v:+.2f}%" if night_v is not None else "夜盤未開/無資料"})
+        votes.append({"key": "night", "name": NAMES["night"], "dir": _dir(s), "s": s, "note": f"夜盤 {night_v:+.2f}%" if night_v is not None else ("夜盤進行中 (05:00 收盤後才計票)" if tn.get("change_pct") is not None else "夜盤未開/無資料")})
     P = fc.get("patterns") or {}
     s = _sgn(P.get("score1")) if P.get("direction1") in ("偏多", "偏空") else 0
     votes.append({"key": "rule_score", "name": NAMES["rule_score"], "dir": _dir(s), "s": s, "note": (f"有效規律合計 {P.get('direction1')} {float(P.get('score1') or 0):+.2f}%" if s else "今日無有效規律方向")})

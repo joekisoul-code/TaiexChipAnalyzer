@@ -13,6 +13,11 @@ from ..sources import twse
 from .features import FEATURE_NAMES, MARKET_FEATURES, as_if_close, market_matrix
 
 log = logging.getLogger(__name__)
+
+
+def _ST_nf(snap):
+    from .short_term import night_final
+    return night_final(snap)
 HORIZONS = (1, 2, 3, 5, 10, 20)
 DAY_HORIZONS = (1, 2, 3)
 FIRST_TEST_YEAR = 2014
@@ -177,7 +182,7 @@ def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, sign
             except Exception:  # noqa: BLE001
                 pass
             tn0 = snap.get("tx_night") or {}
-            night_v = float(tn0["change_pct"]) if tn0.get("change_pct") is not None and snap.get("phase") in ("night", "closed", "pre") else None
+            night_v = float(tn0["change_pct"]) if _ST_nf(snap) else None   # 夜盤收盤後才用
             hsi_v = kospi_v = None
             try:
                 from . import short_term as _ST2
@@ -243,7 +248,7 @@ def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, sign
     # 1) 夜盤跳空
     tn = snap.get("tx_night")
     gap = None
-    if tn and tn.get("change_pct") is not None and not live and snap.get("phase") in ("night", "closed", "pre"):
+    if tn and tn.get("change_pct") is not None and not live and _ST_nf(snap):   # 2026-09-24：夜盤收盤後才套夜盤跳空
         beta, corr, n = night_gap_beta()
         gap = beta * float(tn["change_pct"]) / 100
         for x in nd:

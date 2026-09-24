@@ -83,6 +83,16 @@ def side_on(t: dict, side: str) -> bool:
 STRONG_EDGE = 0.03   # 2026-09-24：「強」叫牌需比一般檔位命中高 3pt 以上 (舊規則只要不低於；今年不含夜盤 2 日「強」多實帳 52.5% < 一般 67.7%)
 
 
+def night_final(snap: dict | None) -> bool:
+    """夜盤是否已收盤 (2026-09-24)：phase 'closed'/'pre' (05:00 之後) 或 tx_night 帶 final 旗標。
+    phase 'night' (15:00~05:00) 為進行中 → 半場漲跌不能套用以「完整夜盤」訓練/統計的模型與命中率 (晚間改看 es_evening 晚間美期叫牌)。"""
+    snap = snap or {}
+    tn = snap.get("tx_night") or {}
+    if tn.get("change_pct") is None:
+        return False
+    return snap.get("phase") in ("closed", "pre") or bool(tn.get("final") or tn.get("is_final"))
+
+
 def call_of(t: dict, pred: float) -> tuple[str, str, float | None]:
     """依檔位回傳 (叫牌, 強度, 該檔 OOS 命中)；forecast 與 learn.backfill 共用，規則只寫一處。"""
     if side_on(t, "up") and pred >= t["edge_hi"]:
@@ -426,7 +436,7 @@ def forecast(scored: pd.DataFrame, snapshot: dict | None = None) -> dict:
     """回傳 {h: {pred, p_up, hist_mean, q20, q80, call, call_hit, base_hit, variant, drivers}}；模型未訓練回 {}。"""
     snap = snapshot or {}
     tn = snap.get("tx_night") or {}
-    use_night = tn.get("change_pct") is not None and snap.get("phase") in ("night", "closed", "pre")
+    use_night = night_final(snap)   # 2026-09-24：夜盤進行中不用含夜盤模型 (舊版 phase 'night' 也用，21:45 發布時是半場數字)
     mat = build_matrix(scored.tail(400).reset_index(drop=True), None)   # 只需最後一列；400 列足夠算 60 日 z
     row = mat.iloc[[-1]].copy()
     if use_night:

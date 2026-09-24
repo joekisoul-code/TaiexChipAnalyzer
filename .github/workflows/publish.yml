@@ -6,6 +6,7 @@ on:
     - cron: "*/5 1-5 * * 1-5"      # 台北 09:00~13:59 每 5 分鐘 (UTC+8)：盤中快照 (fast)
     - cron: "40 7 * * 1-5"         # 台北 15:40：盤後法人/期貨公布後 完整重算
     - cron: "45 13 * * 1-5"        # 台北 21:45：融資融券/借券公布後 完整重算
+    - cron: "0 23 * * 0-4"         # 台北 07:00 (週一~五)：夜盤 05:00 收盤後 → 含夜盤模型才用完整夜盤 (fast)
     - cron: "0 22 * * 6"           # 週日 06:00：重訓模型 + 長歷史回測
   workflow_dispatch:
     inputs:
@@ -42,6 +43,7 @@ jobs:
           if [ -z "$MODE" ]; then
             case "${{ github.event.schedule }}" in
               "*/5 1-5 * * 1-5") MODE=fast ;;
+              "0 23 * * 0-4") MODE=fast ;;
               "0 22 * * 6") MODE=train ;;
               *) MODE=full ;;
             esac

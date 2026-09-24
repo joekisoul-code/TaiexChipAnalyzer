@@ -219,7 +219,8 @@ def forecast(scored: pd.DataFrame, snapshot: dict | None) -> dict:
         live = False
         day = twse.next_trading_days(last_date, 1)[0]
         rec, mark = {"prev_close": float(mat["close"].iloc[-1]), "open": None, "hi": {}, "lo": {}}, "pre"
-    night = ((snapshot or {}).get("tx_night") or {}).get("change_pct")
+    from .short_term import night_final as _nf
+    night = ((snapshot or {}).get("tx_night") or {}).get("change_pct") if _nf(snapshot) else None   # 2026-09-24：夜盤收盤後才用
     rows = mark_rows(day, rec, _daily_for_next(mat, day), night, live_mark=mark)
     if not rows:
         return {"error": "無法建立當前時間點特徵"}
