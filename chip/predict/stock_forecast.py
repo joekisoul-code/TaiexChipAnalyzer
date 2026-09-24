@@ -153,11 +153,35 @@ def _combo(panel: pd.DataFrame, oos: pd.DataFrame, h: int, tiers: dict) -> dict:
             "yr_min": round(float(by.min()), 3), "base_up": round(float((o["abs"] > 0).mean()), 3)}
 
 
+COMBO_STRONG_Q = 0.80   # 強：大盤前 20%
+
+
+def _combo_strong(panel: pd.DataFrame, oos: dict, tiers: dict) -> dict:
+    """股價偏漲‧強 (2026-09-24)：10 日與 5 日個股模型都在前 10% (跑贏大盤) + 大盤 10 日模型前 20% → 10 日股價上漲。
+    研究 (門檻只用先前年份，2022~)：70.0%、逐年 64~81%、平均 +7.5%、約每 5 個交易日有 1 天訊號；
+    同時測過的另 4 個條件 (5 日大盤、20 日個股、站上月線、外資買超) 都沒有更好 → 只採用「5/10 日一致」。"""
+    from .features import MARKET_FEATURES, market_matrix
+    mo = M.walk_forward(market_matrix(backtest.load_long("2010-01-01")), MARKET_FEATURES, "fwd10", 10, 2014).rename(columns={"pred": "mpred"})
+    m_hi = float(mo["mpred"].quantile(COMBO_STRONG_Q))
+    def keyed(h):
+        d = panel.dropna(subset=[f"xfwd{h}"]); d = d[d["date"].str[:4].astype(int) >= FIRST_TEST_YEAR]
+        return oos[h].assign(stock_id=d["stock_id"].values, abs=d[f"fwd{h}"].values)
+    o10, o5 = keyed(10), keyed(5)
+    o = o10.merge(o5[["date", "stock_id", "pred"]].rename(columns={"pred": "p5"}), on=["date", "stock_id"], how="left").merge(mo[["date", "mpred"]], on="date", how="left")
+    g = o[(o["pred"] >= tiers[10]["hi"]) & (o["p5"] >= tiers[5]["hi"]) & (o["mpred"] >= m_hi)]
+    if len(g) < 200:
+        return {}
+    by = (g["abs"] > 0).groupby(g["year"]).mean()
+    return {"m_hi": round(m_hi, 4), "hit": round(float((g["abs"] > 0).mean()), 3), "mean": round(float(g["abs"].mean()), 2), "n": int(len(g)),
+            "days": int(g["date"].nunique()), "yr_min": round(float(by.min()), 3), "yr_max": round(float(by.max()), 3)}
+
+
 def train(write: bool = True) -> dict:
     panel = build_panel()
-    results = {}
+    results, oos_all = {}, {}
     for h in HORIZONS:
         oos = M.walk_forward(panel, STOCK_FEATURES, f"xfwd{h}", h, FIRST_TEST_YEAR, min_train=3000)
+        oos_all[h] = oos
         met = M.metrics(oos)
         met["tiers"] = _tiers(oos)
         if h in COMBO_HS and met["tiers"].get("up_on"):
@@ -165,6 +189,11 @@ def train(write: bool = True) -> dict:
                 met["combo"] = _combo(panel, oos, h, met["tiers"])
             except Exception as e:  # noqa: BLE001
                 log.warning("combo h%s: %s", h, e)
+        if h == 10 and met.get("combo") and 5 in oos_all and results.get(5, {}).get("tiers", {}).get("up_on"):
+            try:
+                met["combo"]["strong"] = _combo_strong(panel, oos_all, {5: results[5]["tiers"], 10: met["tiers"]})
+            except Exception as e:  # noqa: BLE001
+                log.warning("combo strong: %s", e)
         results[h] = met
         if write:
             d = panel.dropna(subset=[f"xfwd{h}"])
@@ -217,6 +246,15 @@ def forecast(stock_id: str, market: dict | None = None) -> dict:
             out["horizons"][h]["abs_call"] = "股價偏漲" if ok else None
             out["horizons"][h]["abs_hit"] = cb["up_hit"] if ok else None
             out["horizons"][h]["abs_mean"] = cb["up_mean"] if ok else None
+    # 股價偏漲‧強：5 日與 10 日都叫跑贏大盤 + 大盤 10 日前 20%
+    try:
+        H5, H10 = out["horizons"].get(5) or {}, out["horizons"].get(10) or {}
+        sg = (((bundles[10].get("metrics") or {}).get("combo") or {}).get("strong")) or {}
+        mr = (market or {}).get(10) or (market or {}).get("10") or {}
+        if sg and H5.get("call") == "偏多" and H10.get("call") == "偏多" and mr.get("pred") is not None and float(mr["pred"]) >= sg["m_hi"]:
+            H10.update(abs_call="股價偏漲‧強", abs_hit=sg["hit"], abs_mean=sg["mean"], abs_strong=True)
+    except Exception as e:  # noqa: BLE001
+        log.warning("combo strong forecast: %s", e)
     out["metrics"] = {h: {k: v for k, v in b.get("metrics", {}).items() if k != "calibration"} for h, b in bundles.items()}
     out["in_universe"] = stock_id in bundles[10].get("universe", [])
     h10 = out["horizons"][10]

@@ -25,6 +25,7 @@ VOTE_F = {"g_us10y_r5": -1, "g_vix_term": 1, "composite_smooth": 1, "vola_ratio"
 NAMES = {"g_us10y_r5": "美 10 年債殖利率 5 日 (反向)", "g_vix_term": "VIX 期限結構", "composite_smooth": "籌碼綜合分", "vola_ratio": "波動/60 日均", "composite_chg5": "籌碼綜合 5 日變化", "g_dxy_r5": "美元指數 5 日", "model": "五日模型 (+asia+extra)"}
 EXTRA = ["g_vix_term", "g_us10y_r5", "g_dxy_r5", "vola_ratio", "composite_chg5", "g_curve_10y_3m", "g_vix_level", "fut_foreign_pct", "smart2", "g_copper_gold_r20", "g_usdtwd_r5", "foreign_z20", "gov8_20d"]
 FIRST_YEAR = 2014
+STRONG_NET = 4   # 2026-09-24：淨票 ≥+4 為「強」：走動式 by_net 合計 72% (n≈162)，逐年最低約 47% (年份樣本少、起伏大)
 BULL_NET, BEAR_NET = 2, -99   # 空方停用：淨票 ≤−4 走動式命中只 47% (n=74)，五日空單沒有穩定邏輯
 
 
@@ -139,4 +140,12 @@ def build(scored: pd.DataFrame, night=None) -> dict | None:
             + (f"；同淨票歷史五日上漲率 {bn['up']:.0%} (n={bn['n']}，年 {bn['yr_min']:.0%}~{bn['yr_max']:.0%})" if bn else "")
             + (f"；規則整體：{'偏多' if call == '偏多' else '偏空'}叫牌樣本外命中 {stt['hit']:.0%} (覆蓋 {stt['cov']:.0%}，逐年最低 {stt['yr_min']:.0%})" if call != "中性" and stt.get("hit") else (f"；基準五日上漲 {st['base_up']:.0%}" if call == "中性" else ""))
             + ("；研究顯示五日空方無穩定邏輯，不建議放空" if call != "偏空" and net < 0 else ""))
-    return {"date": str(row["date"])[:10], "call": call, "net": int(net), "votes": votes, "by_net": bn or None, "rule": stt, "base_up": st.get("base_up"), "latest_year": st.get("latest_year"), "text": text}
+    strength, strong = "", None
+    if call == "偏多" and net >= STRONG_NET:
+        rows_ = [v for k, v in (st.get("by_net") or {}).items() if int(k) >= STRONG_NET and v.get("n")]
+        n_ = sum(v["n"] for v in rows_)
+        if n_ >= 60:
+            strong = {"n": n_, "hit": round(sum(v["n"] * v["up"] for v in rows_) / n_, 3), "yr_min": min(v["yr_min"] for v in rows_ if v.get("yr_min") is not None)}
+            strength = "強"
+            text += f"；淨票 ≥+{STRONG_NET} 為強訊號：歷史五日上漲 {strong['hit']:.0%} (n={n_}，最差年份約 {strong['yr_min']:.0%})"
+    return {"date": str(row["date"])[:10], "call": call, "strength": strength, "strong": strong, "net": int(net), "votes": votes, "by_net": bn or None, "rule": stt, "base_up": st.get("base_up"), "latest_year": st.get("latest_year"), "text": text}

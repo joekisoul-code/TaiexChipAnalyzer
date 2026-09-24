@@ -214,6 +214,8 @@ def main() -> None:
                     r5["five_up"] = fv["by_net"].get("up")
                 if fv["call"] == "偏多" and (fv.get("rule") or {}).get("hit"):
                     r5["five_hit"] = fv["rule"]["hit"]
+                if fv.get("strength") == "強" and fv.get("strong"):
+                    r5["five_strength"], r5["five_hit"] = "強", fv["strong"]["hit"]
     except Exception as e:  # noqa: BLE001
         print("  five_day failed:", e)
     try:   # 預測邏輯總表 (2026-09-24)：今日各有效資訊讀數所在檔位 → 各視野多空票
