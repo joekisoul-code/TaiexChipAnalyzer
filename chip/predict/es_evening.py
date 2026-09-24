@@ -29,6 +29,9 @@ TABLE = {
     "04": {"0.5": {"hit": 0.824, "n": 262, "yr_min": 0.79}, "0.3": {"hit": 0.786, "n": 378, "yr_min": 0.77}},
 }
 BASE_UP = 0.569
+# 隔天開盤跳空 ≈ a + β × ES 漲跌 (同期資料最小平方；|預估| > 0.15% 時的方向命中、逐年最低)。
+# 對照：夜盤收盤後用完整夜盤 R² 0.52、方向 91% (07:00 發布會用)；晚上夜盤進行中改用這張表。
+GAP = {"21": {"beta": 0.533, "a": 0.091, "dir_hit": 0.716, "n": 296, "yr_min": 0.669, "r2": 0.106}, "22": {"beta": 0.49, "a": 0.094, "dir_hit": 0.733, "n": 329, "yr_min": 0.696, "r2": 0.131}, "23": {"beta": 0.514, "a": 0.098, "dir_hit": 0.764, "n": 365, "yr_min": 0.729, "r2": 0.173}, "00": {"beta": 0.554, "a": 0.093, "dir_hit": 0.791, "n": 373, "yr_min": 0.772, "r2": 0.233}, "01": {"beta": 0.495, "a": 0.086, "dir_hit": 0.796, "n": 368, "yr_min": 0.764, "r2": 0.278}, "02": {"beta": 0.52, "a": 0.083, "dir_hit": 0.809, "n": 377, "yr_min": 0.785, "r2": 0.312}, "03": {"beta": 0.472, "a": 0.079, "dir_hit": 0.803, "n": 360, "yr_min": 0.789, "r2": 0.307}, "04": {"beta": 0.486, "a": 0.079, "dir_hit": 0.827, "n": 370, "yr_min": 0.814, "r2": 0.351}}
 
 
 def _es_hourly(range_: str = "5d") -> pd.Series:
@@ -52,7 +55,7 @@ def build(date: str | None) -> dict | None:
         if b.empty:
             return None
         out = {"date": date, "sym": SYM, "base": round(float(b.iloc[-1]), 2), "base_ts": b.index[-1].strftime("%Y-%m-%d %H:%M"),
-               "table": TABLE, "base_up": BASE_UP, "start_hour": 21, "th_main": 0.5, "th_late": 0.3, "late_hour": 22,
+               "table": TABLE, "gap": GAP, "base_up": BASE_UP, "start_hour": 21, "th_main": 0.5, "th_late": 0.3, "late_hour": 22,
                "note": "收盤後美股 S&P 期貨相對當天 13:00 的漲跌；21:00 起 ≥0.5% (22:00 起 ≥0.3%) 叫隔天台股同方向，命中 71~83% (2024-05~2026-09，575 日)"}
         last = s[s.index > t0]
         if len(last):
