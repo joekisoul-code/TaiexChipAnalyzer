@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "fast | full | train"
+        description: "fast | full | train | research (挖寶研究，不發布)"
         default: "full"
 
 permissions:
@@ -23,7 +23,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 90
     env:
       TZ: Asia/Taipei
       FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
@@ -56,9 +56,19 @@ jobs:
           key: chip-data-${{ github.run_id }}
           restore-keys: chip-data-
       - name: playwright (玩股網)
-        if: steps.mode.outputs.mode != 'fast'
+        if: steps.mode.outputs.mode != 'fast' && steps.mode.outputs.mode != 'research'
         run: python -m playwright install --with-deps chromium
+      - name: research (挖寶 A 級：法人/營收特徵研究，結果上傳 artifact，不發布)
+        if: steps.mode.outputs.mode == 'research'
+        run: python tools/treasure_research.py
+      - name: upload research
+        if: steps.mode.outputs.mode == 'research'
+        uses: actions/upload-artifact@v4
+        with:
+          name: treasure-research
+          path: research_out/
       - name: export
+        if: steps.mode.outputs.mode != 'research'
         run: |
           case "${{ steps.mode.outputs.mode }}" in
             fast)  python tools/export_static.py --fast --no-wantgoo ;;
@@ -73,6 +83,7 @@ jobs:
           git add data/models
           git diff --cached --quiet || (git commit -m "weekly retrain: update models [skip ci]" && git push origin HEAD:main)
       - name: deploy to GitHub Pages
+        if: steps.mode.outputs.mode != 'research'
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
