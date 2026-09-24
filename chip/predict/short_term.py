@@ -69,6 +69,14 @@ RIDGE_ALPHA = 30.0
 TIER = 0.30          # 前/後 30% 才叫方向 (一般)
 TIER_STRONG = 0.15   # 前/後 15% 為「強」叫牌 (另報命中率)
 MIN_EDGE = 0.03      # 檔位命中率需高於基準 3 個百分點才啟用
+MIN_SIDE_HIT = 0.55  # 2026-09-24：該方向樣本外命中至少 55% 才叫牌 (舊規則只比下跌日比例高 3pt，隔天不含夜盤空單 50.4%、今年實帳 39%)
+
+
+def side_on(t: dict, side: str) -> bool:
+    """叫牌方向是否啟用：原本的 up_on/dn_on (高於基準 3pt) 且 樣本外命中 ≥ MIN_SIDE_HIT。"""
+    if side == "up":
+        return bool(t.get("up_on")) and (t.get("up_hit") or 0) >= MIN_SIDE_HIT
+    return bool(t.get("dn_on")) and (t.get("dn_hit") or 0) >= MIN_SIDE_HIT
 
 
 # ------------------------------------------------------------------ 特徵
@@ -419,11 +427,11 @@ def forecast(scored: pd.DataFrame, snapshot: dict | None = None) -> dict:
         cal = M.apply_calibration(rep["calibration"], pred)
         t = rep["tiers"]
         call, call_hit, strength = "中性", t.get("mid_up"), ""
-        if t.get("up_on") and pred >= t["edge_hi"]:
+        if side_on(t, "up") and pred >= t["edge_hi"]:
             call, call_hit = "偏多", t["up_hit"]
             if t.get("strong_hi") is not None and pred >= t["strong_hi"] and (t.get("up_hit_strong") or 0) >= t["up_hit"]:
                 strength, call_hit = "強", t["up_hit_strong"]
-        elif t.get("dn_on") and pred <= t["edge_lo"]:
+        elif side_on(t, "dn") and pred <= t["edge_lo"]:
             call, call_hit = "偏空", t["dn_hit"]
             if t.get("strong_lo") is not None and pred <= t["strong_lo"] and (t.get("dn_hit_strong") or 0) >= t["dn_hit"]:
                 strength, call_hit = "強", t["dn_hit_strong"]

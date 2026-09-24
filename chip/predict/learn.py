@@ -466,11 +466,11 @@ def backfill(scored: pd.DataFrame, days: int = BACKFILL_DAYS, variant: str = "ba
                     continue
                 pred = float(r.pred); cal = M.apply_calibration(rep["calibration"], pred)
                 call, call_hit, strength = "中性", t.get("mid_up"), ""
-                if t.get("up_on") and pred >= t["edge_hi"]:
+                if ST.side_on(t, "up") and pred >= t["edge_hi"]:
                     call, call_hit = "偏多", t["up_hit"]
                     if t.get("strong_hi") is not None and pred >= t["strong_hi"] and (t.get("up_hit_strong") or 0) >= t["up_hit"]:
                         strength, call_hit = "強", t["up_hit_strong"]
-                elif t.get("dn_on") and pred <= t["edge_lo"]:
+                elif ST.side_on(t, "dn") and pred <= t["edge_lo"]:
                     call, call_hit = "偏空", t["dn_hit"]
                     if t.get("strong_lo") is not None and pred <= t["strong_lo"] and (t.get("dn_hit_strong") or 0) >= t["dn_hit"]:
                         strength, call_hit = "強", t["dn_hit_strong"]
