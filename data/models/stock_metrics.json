@@ -83,8 +83,14 @@
    "dn_mean": -1.08,
    "dn_n": 5536,
    "dn_yr_min": 0.548,
+   "lo_strong": -0.9219,
+   "dn_strong_hit": 0.67,
+   "dn_strong_n": 1661,
+   "dn_strong_mean": -1.97,
+   "dn_strong_yr_min": 0.617,
    "up_on": true,
-   "dn_on": true
+   "dn_on": true,
+   "dn_strong_on": true
   },
   "combo": {
    "m_hi": 0.393,
@@ -179,8 +185,14 @@
    "dn_mean": -1.03,
    "dn_n": 5500,
    "dn_yr_min": 0.498,
+   "lo_strong": -0.8554,
+   "dn_strong_hit": 0.644,
+   "dn_strong_n": 1650,
+   "dn_strong_mean": -1.99,
+   "dn_strong_yr_min": 0.578,
    "up_on": true,
-   "dn_on": true
+   "dn_on": true,
+   "dn_strong_on": true
   },
   "combo": {
    "m_hi": 0.7627,
@@ -284,8 +296,14 @@
    "dn_mean": -1.2,
    "dn_n": 5406,
    "dn_yr_min": 0.491,
+   "lo_strong": -1.1955,
+   "dn_strong_hit": 0.565,
+   "dn_strong_n": 1622,
+   "dn_strong_mean": -1.35,
+   "dn_strong_yr_min": 0.393,
    "up_on": false,
-   "dn_on": true
+   "dn_on": true,
+   "dn_strong_on": false
   }
  }
 }

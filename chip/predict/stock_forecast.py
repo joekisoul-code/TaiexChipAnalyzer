@@ -20,6 +20,12 @@ START = "2018-01-01"
 HORIZONS = (5, 10, 20)
 FIRST_TEST_YEAR = 2021
 MIN_HIT = 0.52
+# 2026-09-25 跑輸大盤‧強 (wf_stock_rel_v2，經對抗審查重現)：5 日預測 ≤ OOS 3% 分位 → pooled 67.0% (n=1661，年低 62%)，
+# 門檻只用先前年份 (2022~) 70.4%；2/3/4/5% 分位 74.7/70.4/68.1/65.0% 單調平原。跑贏側前 3% 只有 54~58%，不做強分級。
+# 同 10% 覆蓋下約 90 種特徵/目標/模型變體都沒有穩健改善 → 模型不動，只加子分級。樣本外股票外推只有 63.5% → 只對 40 檔權值股標強。
+TIER_STRONG_Q, STRONG_MIN_HIT, STRONG_HS = 0.03, 0.62, (5,)
+# 融資券約 21:00 才公布；15:40 發布時 t 日融資券特徵是 NaN，模型幾乎不會落在尾端 → 當日融資券未到位時不叫牌、也不進帳本
+MARGIN_FEATS = ("s_margin_pct20", "s_margin_div20", "s_short_ratio")
 TIER_Q = 0.10   # 2026-09-24：叫牌 = OOS 預測前/後 10%。舊規則「5 分位命中 ≥ 基準+3pt」在 5/10/20 日從未叫多 (最高分位只 +2pt)
 STOCK_FEATURES = [
     "s_foreign_z1", "s_foreign_z5", "s_foreign_z20", "s_trust_z5", "s_trust_z20", "s_dealer_z5", "s_foreign_streak", "s_trust_streak",
@@ -123,8 +129,14 @@ def _tiers(oos: pd.DataFrame) -> dict:
     t = {"hi": round(hi, 4), "lo": round(lo, 4), "base_up": round(base, 3),
          "up_hit": round(float((up["actual"] > 0).mean()), 3), "up_mean": round(float(up["actual"].mean()), 2), "up_n": int(len(up)), "up_yr_min": round(float(uy.min()), 3),
          "dn_hit": round(float((dn["actual"] < 0).mean()), 3), "dn_mean": round(float(dn["actual"].mean()), 2), "dn_n": int(len(dn)), "dn_yr_min": round(float(dy.min()), 3)}
+    ls = float(oos["pred"].quantile(TIER_STRONG_Q)); sd = oos[oos["pred"] <= ls]
+    if len(sd):
+        sy = sd.groupby("year")["actual"].apply(lambda s_: (s_ < 0).mean())
+        t.update({"lo_strong": round(ls, 4), "dn_strong_hit": round(float((sd["actual"] < 0).mean()), 3), "dn_strong_n": int(len(sd)),
+                  "dn_strong_mean": round(float(sd["actual"].mean()), 2), "dn_strong_yr_min": round(float(sy.min()), 3)})
     t["up_on"] = bool(t["up_hit"] >= max(base + 0.03, MIN_HIT))   # 需同時高於基準 3pt 且 ≥52% (20 日跑贏 49.9% 雖高於基準 46.5%，顯示「跑贏 50%」無意義)
     t["dn_on"] = bool(t["dn_hit"] >= max((1 - base) + 0.03, MIN_HIT))
+    t["dn_strong_on"] = bool(t["dn_on"] and (t.get("dn_strong_hit") or 0) >= STRONG_MIN_HIT)
     return t
 
 
@@ -218,6 +230,9 @@ def forecast(stock_id: str, market: dict | None = None) -> dict:
     last = d.iloc[[-1]]
     out = {"stock_id": stock_id, "date": str(last["date"].iloc[0]), "close": float(last["close"].iloc[0]), "horizons": {}}
     in_uni = stock_id in (bundles[10].get("universe") or []); is_etf = str(stock_id).startswith("00")
+    pending = (not is_etf) and all(pd.isna(last[c].iloc[0]) for c in MARGIN_FEATS if c in last)
+    if pending:
+        out["pending_margin"] = True
     for h, b in bundles.items():
         x = last[b["features"]].astype(float)
         pred = float(M.predict_ensemble(b["models"], x)[0])
@@ -227,6 +242,11 @@ def forecast(stock_id: str, market: dict | None = None) -> dict:
             call, call_hit = "偏多", t["up_hit"]
         elif t.get("dn_on") and pred <= t["lo"]:
             call, call_hit = "偏空", t["dn_hit"]
+        strength = ""
+        if call == "偏空" and h in STRONG_HS and t.get("dn_strong_on") and t.get("lo_strong") is not None and pred <= t["lo_strong"] and in_uni and not is_etf:
+            strength, call_hit = "強", t["dn_strong_hit"]
+        if pending:
+            call, call_hit, note, strength = "中性", None, "當日融資券約 21:00 公布，完整預測於 21:45 更新", ""
         if is_etf:
             call, call_hit, note = "中性", None, "ETF 不適用個股模型，請看大盤預測"
         elif not in_uni:
@@ -237,7 +257,7 @@ def forecast(stock_id: str, market: dict | None = None) -> dict:
                     call_hit = OUT_DN_HIT[h]
                 else:
                     call, call_hit, note = "中性", None, "不在訓練樣本：20 日未驗證"
-        out["horizons"][h] = {"pred": round(pred, 2), **M.apply_calibration(b["calibration"], pred), "call": call, "call_hit": call_hit, "call_note": note,
+        out["horizons"][h] = {"pred": round(pred, 2), **M.apply_calibration(b["calibration"], pred), "call": call, "call_hit": call_hit, "call_note": note, "call_strength": strength if call == "偏空" else "",
                               "drivers": M.explain(b["models"], x, STOCK_NAMES)}
         cb = (b.get("metrics") or {}).get("combo") or {}
         mr = (market or {}).get(h) or (market or {}).get(str(h)) or {}

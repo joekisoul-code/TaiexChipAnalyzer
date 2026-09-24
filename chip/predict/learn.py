@@ -133,14 +133,14 @@ def records_from_precheck(fc: dict) -> list[dict]:
 
 
 def records_from_stock(sid: str, sf: dict) -> list[dict]:
-    if not sf or sf.get("error"):
+    if not sf or sf.get("error") or sf.get("pending_margin"):   # 2026-09-25：當日融資券未到位 (15:40) 不記帳，讓 21:45 完整版成為正式紀錄
         return []
     rows = []
     for h, r in (sf.get("horizons") or {}).items():
         p = _num(r.get("p_up")); bh = _num(r.get("base_hit")) or 0.5
         call = r.get("call") or ("偏多" if p is not None and p >= bh + 0.03 else "偏空" if p is not None and p <= bh - 0.03 else "中性")   # 新版模型直接給前/後 10% 叫牌
         rows.append({"kind": "stk", "sid": str(sid), "as_of": str(sf.get("date")), "target": None, "h": int(h), "mode": "close", "phase": "closed", "live": False,
-                     "base": _num(sf.get("close")), "p_up": p, "base_hit": bh, "call": call, "strength": "", "call_hit": _num(r.get("call_hit")), "abs_call": r.get("abs_call"), "abs_p": _num(r.get("abs_hit")), "variant": "stock", "level": None,
+                     "base": _num(sf.get("close")), "p_up": p, "base_hit": bh, "call": call, "strength": r.get("call_strength") or "", "call_hit": _num(r.get("call_hit")), "abs_call": r.get("abs_call"), "abs_p": _num(r.get("abs_hit")), "variant": "stock", "level": None,
                      "buy_at": None, "sell_at": None, "stop": None, "target_px": None, "range_mode": None, "trend7": None, "pred": _num(r.get("pred")), "realized": None})
     return rows
 

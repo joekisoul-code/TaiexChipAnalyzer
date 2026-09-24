@@ -467,16 +467,18 @@ def forecast(scored: pd.DataFrame, snapshot: dict | None = None) -> dict:
 def _honesty_note(h: int, variant: str, phase: str | None = None) -> str:
     """叫牌可信度的誠實提醒 (v2.2 驗證者要求)：
     - 1 日不含夜盤：OOS 命中僅約 56% (滾動門檻 0.563；基準 55%)，避免使用者高估盤後 1 日叫牌把握。
-    - 1 日含夜盤：81% 為收盤到收盤，主要來自隔夜跳空 (夜盤 05:00 收盤後才可知)；隔日開盤進場的方向命中約 67%。
+    - 1 日含夜盤：81% 為收盤到收盤，主要來自隔夜跳空 (夜盤 05:00 收盤後才可知)。
+      2026-09-25 驗證：舊註「開盤進場約 67%」用的是加權指數官方開盤價，它落後、只反映台指期跳空 31~65%；
+      以台指期 08:45 開盤進場持有到收盤只有 49~50%，沒有交易優勢。
     - 盤中 (phase=open) 以未收盤 K 棒與韓股盤中值計算 → 暫定。
     """
     parts: list[str] = []
     if h == 1 and variant == "base":
         parts.append("OOS 命中約 56% (基準 55%)")
     elif h == 1 and variant == "night":
-        parts.append("81% 為收盤到收盤,主要來自隔夜跳空;開盤進場約 67%")
+        parts.append("命中為收盤到收盤,主要來自隔夜跳空;台指期開盤才進場約 50% (無優勢)")
     elif variant == "night":
-        parts.append("命中為收盤到收盤,含隔夜跳空")
+        parts.append("命中為收盤到收盤,含已發生的隔夜跳空;開盤後才進場無明顯優勢")
     if phase == "open":
         parts.append("盤中以未收盤 K 棒計算,屬暫定")
     return "；".join(parts)

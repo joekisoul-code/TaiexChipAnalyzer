@@ -31,7 +31,11 @@ H, TGT, STOP, REL = 21, 6.0, -8.0, 4.0
 SURGE_N, SURGE_UP, SURGE_DN = 20, 20.0, -10.0   # 飆股：20 交易日內最高價先達 +20%，且之前最低價未跌破 −10%
 SURGE_TOPK, SURGE_POOL = 3, 80   # 2026-09-24 第二輪：候選池 40→80 (前 3 名 31.4%→33.4%，逐年都較好)
 # 飆股專用新特徵 (第二輪 surge3.py，gain 重要度前 5；10 個全用與只用 5 個同為 31.4%，現行 29.7%)
-SURGE_NEW = ["range10", "maxpct20", "ret120", "dd_hi120", "big20"]
+SURGE_NEW = ["range10", "maxpct20", "ret120", "dd_hi120", "big20",
+             # 2026-09-25 第三輪 lean8 (wf_surge_v3，清單只用 2021-12 以前資料依重要度選定並固定；經對抗審查重現)：
+             # App 口徑 (每日前 3 名、28 天內已記錄跳過) 9 組種子平均 33.7%→36.7% (+3.0pt，月區塊 90% [+0.6, +5.5]，五年全正)；
+             # 正式口徑 (前 9 去重取 3) 只 +0.5~1.0pt 不顯著 → 增益集中在顯示的前 2~3 名。需 ≤241 根日K (App 抓 2y)。
+             "vola60", "atr20p", "lo240_dist", "logc", "lim240", "range20", "range60", "maxpct60"]
 FEATS = ["pct", "amp", "lval", "b5", "b10", "b20", "b60", "align", "ret5", "ret20", "ret60", "dd_hi20", "dd_hi60", "lo20_dist", "clv", "uw", "lw",
          "vol_ratio", "vola20", "streak", "lag", "rs20", "m_ret1", "m_bias20"]
 SURGE_FEATS = FEATS + SURGE_NEW
@@ -63,6 +67,13 @@ def features(g: pd.DataFrame, mk: pd.DataFrame, label: bool = True) -> pd.DataFr
     g["streak"] = st; g["lag"] = g["m_ret1"] - g["pct"]; g["rs20"] = g["ret20"] - g["m_ret20"]
     g["range10"] = (h.rolling(10).max() / l.rolling(10).min() - 1) * 100; g["maxpct20"] = g["pct"].rolling(20).max()
     g["ret120"] = c.pct_change(120) * 100; g["dd_hi120"] = (c / h.rolling(120).max() - 1) * 100; g["big20"] = (g["pct"] >= 5).astype(float).rolling(20).sum()
+    pc = c.shift(1)
+    tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+    g["vola60"] = g["pct"].rolling(60).std(); g["atr20p"] = tr.rolling(20).mean() / c * 100
+    g["lo240_dist"] = (c / l.rolling(240).min() - 1) * 100; g["logc"] = np.log10(c)
+    g["lim240"] = (g["pct"] >= 9.3).astype(float).rolling(240).sum()
+    g["range20"] = (h.rolling(20).max() / l.rolling(20).min() - 1) * 100; g["range60"] = (h.rolling(60).max() / l.rolling(60).min() - 1) * 100
+    g["maxpct60"] = g["pct"].rolling(60).max()
     if label:
         C, L, Mk, n = c.values, l.values, g["m_close"].values, len(g)
         hit = np.full(n, np.nan); fin = np.full(n, np.nan)
@@ -262,7 +273,17 @@ def _train_surge(lgb, D: pd.DataFrame, E: pd.DataFrame) -> dict:
             if c >= SURGE_TOPK:
                 break
     x = pd.DataFrame(rows, columns=["year", "s", "fin", "mb"])
-    oos = {"n": int(len(x)), "hit": round(float(x["s"].mean()), 3), "fin": round(float(x["fin"].mean()), 2), "med": round(float(x["fin"].median()), 2),
+    # App 口徑：每日候選池前 3 名，28 天內已記錄者跳過 (不補位) = learning.js recordSurge 的實際追蹤
+    arows, alast = [], {}
+    for d, g in Es.sort_values("date").groupby("date"):
+        for r in g.nlargest(SURGE_POOL, "screen").nlargest(SURGE_TOPK, "ps").itertuples():
+            lp = alast.get(r.code)
+            if lp is not None and (pd.Timestamp(d) - pd.Timestamp(lp)).days < 28:
+                continue
+            arows.append((r.year, r.surge, r.fin20)); alast[r.code] = d
+    xa = pd.DataFrame(arows, columns=["year", "s", "fin"])
+    oos = {"app_hit": round(float(xa["s"].mean()), 3), "app_n": int(len(xa)), "app_fin": round(float(xa["fin"].mean()), 2),
+           "app_by_year": {int(y): round(float(g_["s"].mean()), 3) for y, g_ in xa.groupby("year")},"n": int(len(x)), "hit": round(float(x["s"].mean()), 3), "fin": round(float(x["fin"].mean()), 2), "med": round(float(x["fin"].median()), 2),
            "win": round(float((x["fin"] > 0).mean()), 3), "loss10": round(float((x["fin"] < -10).mean()), 3),
            "base": round(float(Es["surge"].mean()), 3), "pool_base": round(float(Es.groupby("date").apply(lambda g: g.nlargest(SURGE_POOL, "screen")["surge"].mean()).mean()), 3),
            "by_year": {int(y): round(float(g["s"].mean()), 3) for y, g in x.groupby("year")},
@@ -272,7 +293,9 @@ def _train_surge(lgb, D: pd.DataFrame, E: pd.DataFrame) -> dict:
     th = float(np.quantile(fm.predict_proba(ly[SURGE_FEATS])[:, 1], 0.9))
     sm = {"features": SURGE_FEATS, "init": float(fm.booster_.dump_model().get("average_output", 0) or 0), "trees": _dump_trees(fm.booster_), "th_top10": round(th, 4),
           "def": {"n": SURGE_N, "up": SURGE_UP, "dn": SURGE_DN, "topk": SURGE_TOPK, "pool": SURGE_POOL}, "oos": oos, "exit": SURGE_EXIT,
-          "note": "飆股 = 20 交易日內先漲 +20% 且未先跌破 −10%。每日掃描前 80 候選池前 3 名樣本外約 1/3 命中 (平常 16~22%)，平均 +5.8% 但中位只 +2%、兩成虧超過 10% → 高風險，小部位"}
+          "note": (f"飆股 = 20 交易日內先漲 +20% 且未先跌破 −10%。App 口徑 (每日候選池前 {SURGE_TOPK} 名、28 天內已記錄跳過) 樣本外 {oos['app_hit']:.0%}"
+                   f" (候選池平常 {oos['pool_base']:.0%})，20 日平均 {oos['app_fin']:+.1f}%；正式口徑 (前 9 去重取 3) {oos['hit']:.0%}、中位 {oos['med']:+.1f}%、"
+                   f"約 {oos['loss10']:.0%} 虧超過 10% → 高風險，小部位")}
     raw = np.array([_eval(sm, r) for r in Ds[SURGE_FEATS].tail(200).values]); ref = fm.predict_proba(Ds[SURGE_FEATS].tail(200))[:, 1]
     sm["selfcheck_maxdiff"] = round(float(np.max(np.abs(1 / (1 + np.exp(-raw)) - ref))), 6)
     print(f"  surge: 走動式 候選池前 {SURGE_TOPK} 飆股率 {oos['hit']} (候選池 {oos['pool_base']}、全體 {oos['base']})，20 日均 {oos['fin']}%、中位 {oos['med']}%；逐年 {oos['by_year']}；自檢差 {sm['selfcheck_maxdiff']}")
