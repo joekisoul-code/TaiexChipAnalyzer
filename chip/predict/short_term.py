@@ -80,6 +80,22 @@ def side_on(t: dict, side: str) -> bool:
 
 
 # ------------------------------------------------------------------ 特徵
+STRONG_EDGE = 0.03   # 2026-09-24：「強」叫牌需比一般檔位命中高 3pt 以上 (舊規則只要不低於；今年不含夜盤 2 日「強」多實帳 52.5% < 一般 67.7%)
+
+
+def call_of(t: dict, pred: float) -> tuple[str, str, float | None]:
+    """依檔位回傳 (叫牌, 強度, 該檔 OOS 命中)；forecast 與 learn.backfill 共用，規則只寫一處。"""
+    if side_on(t, "up") and pred >= t["edge_hi"]:
+        if t.get("strong_hi") is not None and pred >= t["strong_hi"] and (t.get("up_hit_strong") or 0) >= (t.get("up_hit") or 0) + STRONG_EDGE:
+            return "偏多", "強", t["up_hit_strong"]
+        return "偏多", "", t["up_hit"]
+    if side_on(t, "dn") and pred <= t["edge_lo"]:
+        if t.get("strong_lo") is not None and pred <= t["strong_lo"] and (t.get("dn_hit_strong") or 0) >= (t.get("dn_hit") or 0) + STRONG_EDGE:
+            return "偏空", "強", t["dn_hit_strong"]
+        return "偏空", "", t["dn_hit"]
+    return "中性", "", t.get("mid_up")
+
+
 def build_matrix(scored: pd.DataFrame, night: pd.DataFrame | None = None) -> pd.DataFrame:
     d = market_matrix(scored)
     c = d["close"].astype(float)
@@ -426,15 +442,7 @@ def forecast(scored: pd.DataFrame, snapshot: dict | None = None) -> dict:
         rep = b["report"]
         cal = M.apply_calibration(rep["calibration"], pred)
         t = rep["tiers"]
-        call, call_hit, strength = "中性", t.get("mid_up"), ""
-        if side_on(t, "up") and pred >= t["edge_hi"]:
-            call, call_hit = "偏多", t["up_hit"]
-            if t.get("strong_hi") is not None and pred >= t["strong_hi"] and (t.get("up_hit_strong") or 0) >= t["up_hit"]:
-                strength, call_hit = "強", t["up_hit_strong"]
-        elif side_on(t, "dn") and pred <= t["edge_lo"]:
-            call, call_hit = "偏空", t["dn_hit"]
-            if t.get("strong_lo") is not None and pred <= t["strong_lo"] and (t.get("dn_hit_strong") or 0) >= t["dn_hit"]:
-                strength, call_hit = "強", t["dn_hit_strong"]
+        call, strength, call_hit = call_of(t, pred)
         caveat = _honesty_note(h, variant, snap.get("phase"))
         out[h] = {"pred_std": round(pred, 3), "p_up": cal["p_up"], "hist_mean": cal["hist_mean"], "q20": cal["q20"], "q80": cal["q80"], "bin": cal["bin"],
                   "base_hit": cal["base_hit"], "call": call, "call_strength": strength, "call_hit": round(call_hit, 3) if call_hit is not None else None,

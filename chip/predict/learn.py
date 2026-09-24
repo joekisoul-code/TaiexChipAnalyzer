@@ -32,6 +32,7 @@ HALF_LIFE = 30          # 近期命中率的指數衰減半衰期 (以叫牌次�
 MIN_N_ADJ = 20          # 至少 20 筆已對帳才做調整
 DEGRADE_GAP = 0.05      # 近期命中低於長期 5 個百分點以上 → 降級
 TOUCH_TARGET = 0.20
+BACKFILL_VER = "2026-09-24"   # 叫牌規則改變時換版本 → 舊回填紀錄 (僅 backfill=True) 移除並依新規則重算；真實發布紀錄永不改
 
 
 # ------------------------------------------------------------------ 已發布帳本
@@ -465,20 +466,12 @@ def backfill(scored: pd.DataFrame, days: int = BACKFILL_DAYS, variant: str = "ba
                 if i is None or i + h >= len(dates):
                     continue
                 pred = float(r.pred); cal = M.apply_calibration(rep["calibration"], pred)
-                call, call_hit, strength = "中性", t.get("mid_up"), ""
-                if ST.side_on(t, "up") and pred >= t["edge_hi"]:
-                    call, call_hit = "偏多", t["up_hit"]
-                    if t.get("strong_hi") is not None and pred >= t["strong_hi"] and (t.get("up_hit_strong") or 0) >= t["up_hit"]:
-                        strength, call_hit = "強", t["up_hit_strong"]
-                elif ST.side_on(t, "dn") and pred <= t["edge_lo"]:
-                    call, call_hit = "偏空", t["dn_hit"]
-                    if t.get("strong_lo") is not None and pred <= t["strong_lo"] and (t.get("dn_hit_strong") or 0) >= t["dn_hit"]:
-                        strength, call_hit = "強", t["dn_hit_strong"]
+                call, strength, call_hit = ST.call_of(t, pred)
                 base_px = closes[i]
                 rows.append({"kind": "mkt", "sid": "TAIEX", "as_of": dates[i], "target": dates[i + h] if h <= 3 else None, "h": h, "mode": "night" if variant == "night" else "close", "phase": "closed", "live": False,
                              "base": base_px, "p_up": cal["p_up"], "base_hit": cal["base_hit"], "call": call, "strength": strength, "call_hit": round(float(call_hit), 3) if call_hit is not None else None,
                              "variant": variant, "level": round(base_px * (1 + (cal["hist_mean"] or 0) / 100)) if h <= 3 else None, "buy_at": None, "sell_at": None, "stop": None, "target_px": None,
-                             "range_mode": None, "trend7": None, "realized": None, "backfill": True})
+                             "range_mode": None, "trend7": None, "realized": None, "backfill": True, "bf_ver": BACKFILL_VER})
         print(f"  learn backfill ({variant}): {len(rows)} rows")
         return rows
     except Exception as e:  # noqa: BLE001
@@ -495,6 +488,13 @@ def run(fc: dict, snap: dict | None, scored: pd.DataFrame, stock_forecasts: dict
         new += records_from_stock(sid, sf)
     rows = _merge(rows, new)
     for variant in ("base", "night"):   # 首次：各變體回填今年樣本外預測，讓自學層立刻啟動 (含夜盤 = 早上看到的叫牌)
+        vv = lambda r: (r.get("variant") or "base") == variant
+        if any(r.get("backfill") and r.get("bf_ver") != BACKFILL_VER and vv(r) for r in rows):   # 規則已改 → 舊回填作廢重算
+            before = len(rows)
+            rows = [r for r in rows if not (r.get("backfill") and vv(r))]
+            print(f"  learn backfill ({variant}): 規則版本更新，移除舊回填 {before - len(rows)} 筆")
+            rows = _merge(rows, backfill(scored, variant=variant))
+            continue
         n_eval_v = sum(1 for r in rows if r.get("kind") == "mkt" and r.get("h") == 1 and r.get("realized") and (r.get("variant") or "base") == variant)
         if n_eval_v < MIN_N_ADJ and not any(r.get("backfill") and (r.get("variant") or "base") == variant for r in rows):
             bf = backfill(scored, variant=variant)
