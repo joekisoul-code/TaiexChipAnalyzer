@@ -197,6 +197,10 @@ def build(fc: dict, hourly: dict | None, snap: dict | None, scored: pd.DataFrame
     for c_ in (fc.get("precheck") or {}).get("calendar") or []:
         if c_.get("valid"):
             extra.append({"key": "cal_" + c_["key"], "name": "日曆效應", "dir": c_["dir"][-1] if c_["dir"] in ("偏多", "偏空") else "—", "s": 1 if c_["dir"] == "偏多" else -1 if c_["dir"] == "偏空" else 0, "note": c_.get("text")})
+    fv = fc.get("five") or {}
+    if fv.get("call"):
+        fs = 1 if fv["call"] == "偏多" else -1 if fv["call"] == "偏空" else 0
+        extra.append({"key": "five", "name": "後五日 (交易日)", "dir": _dir(fs), "s": fs, "note": fv.get("text", "")})
     sc = snap.get("score") or {}
     if sc.get("score") is not None and snap.get("phase") == "day":
         ss = _sgn(float(sc["score"]) - 0) if abs(float(sc["score"])) >= 15 else 0

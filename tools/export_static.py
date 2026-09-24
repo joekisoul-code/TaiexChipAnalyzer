@@ -93,6 +93,8 @@ def main() -> None:
             _pc.train(backtest.load_long("2010-01-01"), write=True, verbose=True)
             from chip.predict import infomap as _im   # 預測邏輯總表：所有資訊 × 視野 vs 歷史漲跌 (2026-09-24)
             _im.train(backtest.load_long("2010-01-01"), short_term._night_hist(), write=True, verbose=True)
+            from chip.predict import five_day as _fd   # 後五日方向模組：驗證訊號投票 + 五日模型 (2026-09-24)
+            _fd.train(backtest.load_long("2010-01-01"), short_term._night_hist(), write=True, verbose=True)
         except Exception as e:  # noqa: BLE001
             print("  trend7/range_levels train failed:", e)
     scored, A, meta = market.run(use_wantgoo=use_wg)
@@ -195,6 +197,20 @@ def main() -> None:
         fc["logic"] = logic.build(_st2.build_matrix(backtest.load_long("2010-01-01"), _st2._night_hist()), night_final=(_nd0.get("variant") == "night"))
     except Exception as e:  # noqa: BLE001
         print("  logic failed:", e)
+    try:   # 後五日 (交易日) 方向 (2026-09-24)：只有多方可預測 → 訊號淨票 ≥2 給偏多 (走動式 65%)，空方停用；寫進 horizons[5]
+        from chip.predict import five_day, short_term as _st4
+        fv = five_day.build(backtest.load_long("2010-01-01"), _st4._night_hist())
+        if fv:
+            fc["five"] = fv
+            r5 = (fc.get("horizons") or {}).get(5) or (fc.get("horizons") or {}).get("5")
+            if r5 is not None:
+                r5["call_five"], r5["five_net"], r5["five_note"] = fv["call"], fv["net"], fv["text"]
+                if fv.get("by_net"):
+                    r5["five_up"] = fv["by_net"].get("up")
+                if fv["call"] == "偏多" and (fv.get("rule") or {}).get("hit"):
+                    r5["five_hit"] = fv["rule"]["hit"]
+    except Exception as e:  # noqa: BLE001
+        print("  five_day failed:", e)
     try:   # 預測邏輯總表 (2026-09-24)：今日各有效資訊讀數所在檔位 → 各視野多空票
         from chip.predict import infomap, short_term as _st3
         fc["infomap"] = infomap.build(backtest.load_long("2010-01-01"), _st3._night_hist())

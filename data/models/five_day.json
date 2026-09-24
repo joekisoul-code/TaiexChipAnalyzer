@@ -1,0 +1,208 @@
+{
+ "trained_at": "2026-09-24 09:22:58",
+ "features": [
+  "ret1",
+  "ret1_l1",
+  "ret1_l2",
+  "ret5",
+  "bias5",
+  "bias20",
+  "gap_open",
+  "range_pct",
+  "clv",
+  "up5",
+  "hi20_dist",
+  "lo20_dist",
+  "vola20",
+  "vola_ratio",
+  "vol_ratio",
+  "amount_5d_ratio",
+  "foreign_z1",
+  "foreign_z5",
+  "foreign_streak",
+  "trust_z5",
+  "dealer_z1",
+  "fut_foreign_pct",
+  "fut_foreign_chg1_z",
+  "fut_foreign_chg5_z",
+  "foreign_consistency",
+  "margin_chg5_pct",
+  "short_chg5_z",
+  "f_fut_foreign",
+  "f_reversion",
+  "composite_smooth",
+  "composite_chg5",
+  "state_bull",
+  "state_bear",
+  "dow",
+  "days_to_settle",
+  "settle_week",
+  "days_to_month_end",
+  "g_vix_level",
+  "g_vix_chg",
+  "g_sox_r1",
+  "g_sox_r5",
+  "g_sp500_r1",
+  "g_nasdaq_r1",
+  "g_tsm_adr_r1",
+  "g_kospi_r1",
+  "g_kospi_r5",
+  "g_usdtwd_r5",
+  "g_dxy_r1",
+  "g_us10y_r5",
+  "g_vix_term",
+  "kospi_r0",
+  "nikkei_r0",
+  "hsi_r0",
+  "g_dxy_r5",
+  "g_curve_10y_3m",
+  "smart2",
+  "g_copper_gold_r20",
+  "foreign_z20",
+  "gov8_20d"
+ ],
+ "votes": [
+  "g_us10y_r5",
+  "g_vix_term",
+  "composite_smooth",
+  "vola_ratio",
+  "composite_chg5",
+  "g_dxy_r5"
+ ],
+ "bull_net": 2,
+ "bear_net": -99,
+ "base_up": 0.593,
+ "n": 2609,
+ "by_net": {
+  "-4": {
+   "n": 74,
+   "up": 0.527,
+   "yr_min": 0.36,
+   "yr_max": 0.7,
+   "years": 5
+  },
+  "-3": {
+   "n": 181,
+   "up": 0.486,
+   "yr_min": 0.42,
+   "yr_max": 0.61,
+   "years": 8
+  },
+  "-2": {
+   "n": 280,
+   "up": 0.554,
+   "yr_min": 0.3,
+   "yr_max": 0.7,
+   "years": 11
+  },
+  "-1": {
+   "n": 440,
+   "up": 0.548,
+   "yr_min": 0.18,
+   "yr_max": 0.67,
+   "years": 11
+  },
+  "0": {
+   "n": 482,
+   "up": 0.618,
+   "yr_min": 0.43,
+   "yr_max": 0.72,
+   "years": 11
+  },
+  "1": {
+   "n": 447,
+   "up": 0.597,
+   "yr_min": 0.33,
+   "yr_max": 0.86,
+   "years": 11
+  },
+  "2": {
+   "n": 317,
+   "up": 0.634,
+   "yr_min": 0.47,
+   "yr_max": 0.83,
+   "years": 11
+  },
+  "3": {
+   "n": 197,
+   "up": 0.624,
+   "yr_min": 0.4,
+   "yr_max": 0.88,
+   "years": 10
+  },
+  "4": {
+   "n": 122,
+   "up": 0.721,
+   "yr_min": 0.47,
+   "yr_max": 0.93,
+   "years": 9
+  },
+  "5": {
+   "n": 40,
+   "up": 0.7,
+   "yr_min": 0.56,
+   "yr_max": 0.83,
+   "years": 3
+  }
+ },
+ "thresholds": {
+  "g_us10y_r5": {
+   "lo": -3.3684,
+   "hi": 3.5323
+  },
+  "g_vix_term": {
+   "lo": 0.8332,
+   "hi": 0.9459
+  },
+  "composite_smooth": {
+   "lo": -8.5,
+   "hi": 16.9
+  },
+  "vola_ratio": {
+   "lo": 0.7822,
+   "hi": 1.1587
+  },
+  "composite_chg5": {
+   "lo": -10.4,
+   "hi": 10.2
+  },
+  "g_dxy_r5": {
+   "lo": -0.7023,
+   "hi": 0.7713
+  },
+  "model": {
+   "lo": 0.0387,
+   "hi": 1.1021
+  }
+ },
+ "bull": {
+  "n": 683,
+  "cov": 0.262,
+  "hit": 0.654,
+  "up": 0.654,
+  "yr_min": 0.51,
+  "years": 11
+ },
+ "bear": {
+  "n": 0,
+  "cov": 0.0,
+  "hit": null,
+  "up": null,
+  "yr_min": null,
+  "years": 0
+ },
+ "neutral": {
+  "n": 1926,
+  "cov": 0.738,
+  "hit": null,
+  "up": 0.571,
+  "yr_min": null,
+  "years": 0
+ },
+ "latest_year": {
+  "year": 2026,
+  "n": 171,
+  "bull_hit": 0.66,
+  "n_bull": 47
+ }
+}

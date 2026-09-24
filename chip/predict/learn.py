@@ -96,7 +96,7 @@ def records_from_forecast(fc: dict, snap: dict | None) -> list[dict]:
         if not r:
             continue
         rows.append({"kind": "mkt", "sid": "TAIEX", "as_of": as_of, "target": None, "h": h, "mode": "live" if live else "close", "phase": mode, "live": live, "base": base,
-                     "p_up": _num(r.get("p_up")), "base_hit": _num(r.get("base_hit")), "call": r.get("call") or ("偏多" if (_num(r.get("p_up")) or 0) >= (_num(r.get("base_hit")) or 0.5) + 0.03 else "偏空" if (_num(r.get("p_up")) or 0) <= (_num(r.get("base_hit")) or 0.5) - 0.03 else "中性"),
+                     "p_up": _num(r.get("p_up")), "base_hit": _num(r.get("base_hit")), "call": (r.get("call_five") if (h == 5 and r.get("call_five")) else None) or r.get("call") or ("偏多" if (_num(r.get("p_up")) or 0) >= (_num(r.get("base_hit")) or 0.5) + 0.03 else "偏空" if (_num(r.get("p_up")) or 0) <= (_num(r.get("base_hit")) or 0.5) - 0.03 else "中性"),
                      "strength": r.get("call_strength") or "", "call_hit": _num(r.get("call_hit")), "variant": r.get("variant") or "daily", "level": None,
                      "buy_at": None, "sell_at": None, "stop": None, "target_px": None, "range_mode": None, "trend7": (fc.get("trend7") or {}).get("state"), "realized": None})
     return rows
