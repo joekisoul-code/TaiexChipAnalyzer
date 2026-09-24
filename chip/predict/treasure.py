@@ -30,6 +30,7 @@ log = logging.getLogger(__name__)
 H, TGT, STOP, REL = 21, 6.0, -8.0, 4.0
 FEATS = ["pct", "amp", "lval", "b5", "b10", "b20", "b60", "align", "ret5", "ret20", "ret60", "dd_hi20", "dd_hi60", "lo20_dist", "clv", "uw", "lw",
          "vol_ratio", "vola20", "streak", "lag", "rs20", "m_ret1", "m_bias20"]
+Q_APLUS = 0.97     # A+：分數 ≥ 前一年 97 分位 ∧ 大盤月線下 (tr_k.py：58.2%、+11.3%、勝率 76%，n=165；逐年 61/54/63/45%)
 GATE_MBIAS = 0.0   # A 級閘門：大盤月線乖離 < 0 (大盤在月線下)
 PARAMS = dict(n_estimators=160, learning_rate=0.04, num_leaves=15, min_child_samples=400, subsample=0.8, subsample_freq=1, colsample_bytree=0.8, verbose=-1)
 
@@ -164,32 +165,33 @@ def train(panel: pd.DataFrame | None = None, write: bool = True, verbose: bool =
     res = {"tiers": {}, "by_year": {}}
     rows = []; last = {}
     for y in sorted(E["year"].unique()):
-        prev = E[E["year"] == y - 1]["p"]; th = float((prev if len(prev) else E[E["year"] == y]["p"]).quantile(0.9))
+        prev = E[E["year"] == y - 1]["p"]; _b = prev if len(prev) else E[E["year"] == y]["p"]; th = float(_b.quantile(0.9)); th2 = float(_b.quantile(Q_APLUS))
         for d, g in E[E["year"] == y].sort_values("date").groupby("date"):
             gg = g.nlargest(40, "screen").sort_values("p", ascending=False); n = 0
             for r in gg.itertuples():
                 lp = last.get(r.code)
                 if lp is not None and (pd.Timestamp(d) - pd.Timestamp(lp)).days < 30:
                     continue
-                rows.append((y, bool(r.p >= th and r.m_bias20 < GATE_MBIAS), bool(r.p >= th and r.m_bias20 >= GATE_MBIAS), r.hit, r.fin21)); last[r.code] = d; n += 1
+                rows.append((y, bool(r.p >= th and r.m_bias20 < GATE_MBIAS), bool(r.p >= th and r.m_bias20 >= GATE_MBIAS), bool(r.p >= th2 and r.m_bias20 < GATE_MBIAS), r.hit, r.fin21)); last[r.code] = d; n += 1
                 if n >= 6:
                     break
-    x = pd.DataFrame(rows, columns=["year", "A", "Bp", "hit", "fin"])
-    for tier, g in (("A", x[x["A"]]), ("B+", x[x["Bp"]]), ("B", x[~x["A"] & ~x["Bp"]]), ("all", x)):
+    x = pd.DataFrame(rows, columns=["year", "A", "Bp", "Ap", "hit", "fin"])
+    for tier, g in (("A", x[x["A"]]), ("A+", x[x["Ap"]]), ("A-", x[x["A"] & ~x["Ap"]]), ("B+", x[x["Bp"]]), ("B", x[~x["A"] & ~x["Bp"]]), ("all", x)):
         res["tiers"][tier] = {"n": int(len(g)), "hit": round(float(g["hit"].mean()), 3), "fin": round(float(g["fin"].mean()), 2),
                               "win": round(float((g["fin"] > 0).mean()), 3), "med": round(float(g["fin"].median()), 2), "q10": round(float(g["fin"].quantile(0.1)), 2), "q90": round(float(g["fin"].quantile(0.9)), 2),
                               "worst_year": round(float(g.groupby("year")["fin"].mean().min()), 2) if len(g) else None}
     for y, g in x.groupby("year"):
-        res["by_year"][int(y)] = {"A": round(float(g[g["A"]]["hit"].mean()), 3) if g["A"].any() else None, "nA": int(g["A"].sum()), "B+": round(float(g[g["Bp"]]["hit"].mean()), 3) if g["Bp"].any() else None, "B": round(float(g[~g["A"] & ~g["Bp"]]["hit"].mean()), 3) if (~g["A"] & ~g["Bp"]).any() else None}
+        res["by_year"][int(y)] = {"A+": round(float(g[g["Ap"]]["hit"].mean()), 3) if g["Ap"].any() else None, "A+fin": round(float(g[g["Ap"]]["fin"].mean()), 2) if g["Ap"].any() else None, "A": round(float(g[g["A"]]["hit"].mean()), 3) if g["A"].any() else None, "nA": int(g["A"].sum()), "B+": round(float(g[g["Bp"]]["hit"].mean()), 3) if g["Bp"].any() else None, "B": round(float(g[~g["A"] & ~g["Bp"]]["hit"].mean()), 3) if (~g["A"] & ~g["Bp"]).any() else None}
     E["dec"] = pd.qcut(E["p"], 10, labels=False); res["deciles"] = E.groupby("dec")["hit"].mean().round(3).tolist()
     res["base_hit"] = round(float(E["hit"].mean()), 3)
     # 最終模型 + 門檻 (最近一年分數的 90 分位)
     fm = lgb.LGBMClassifier(**PARAMS).fit(D[FEATS], D["hit"])
     ly = D[D["year"] >= int(D["year"].max()) - 1]
-    th_final = float(np.quantile(fm.predict_proba(ly[FEATS])[:, 1], 0.9))
+    _pl = fm.predict_proba(ly[FEATS])[:, 1]
+    th_final = float(np.quantile(_pl, 0.9)); th_plus = float(np.quantile(_pl, Q_APLUS))
     imp = fm.booster_.feature_importance("gain"); imp = imp / imp.sum()
     out = {"trained_at": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M:%S"), "features": FEATS, "init": float(fm.booster_.dump_model().get("average_output", 0) or 0),
-           "trees": _dump_trees(fm.booster_), "th_A": round(th_final, 4), "gate": {"m_bias20_lt": GATE_MBIAS, "note": "A 級需大盤在月線下；大盤在月線上的高分股標 B+"}, "exit": {"note": "出場研究 (scratch tr_g.py，2022~ 走動式 A 級 n=330)：持有 21 交易日平均 +7.5%、勝率 67%、最差年 +5.1%；+6% 停利/−8% 停損只剩 +1.7%，+10%/−8% +2.5%，+6% 後移動停利 +3.2% → 建議持有滿 30 天，不提早停利；B 級持有 21 日 +3.3%、最差年 −1.6%", "A_hold": 7.48, "A_tp6": 1.68, "A_trail": 3.24},
+           "trees": _dump_trees(fm.booster_), "th_A": round(th_final, 4), "th_Aplus": round(th_plus, 4), "gate": {"m_bias20_lt": GATE_MBIAS, "note": "A 級需大盤在月線下；大盤在月線上的高分股標 B+"}, "exit": {"note": "出場研究 (scratch tr_g.py，2022~ 走動式 A 級 n=330)：持有 21 交易日平均 +7.5%、勝率 67%、最差年 +5.1%；+6% 停利/−8% 停損只剩 +1.7%，+10%/−8% +2.5%，+6% 後移動停利 +3.2% → 建議持有滿 30 天，不提早停利；B 級持有 21 日 +3.3%、最差年 −1.6%", "A_hold": 7.48, "A_tp6": 1.68, "A_trail": 3.24},
            "entry": {"note": "進場研究 (scratch tr_h.py，A 級 n=330，出場固定第 21 交易日)：推薦當天收盤 +7.5%；隔天開盤 +6.8%；掛低 1/2/3% 等 3 天成交率 69/57/45%、整體 +4.6/+4.4/+4.3% (沒成交的那批若當天買平均 +9~14%) → 推薦當天就進場，不要等回檔", "A_close": 7.48, "A_open": 6.84, "A_lim1": 4.55, "A_lim2": 4.41, "fill_lim2": 0.57}, "n_rows": int(len(D)), "n_stocks": int(D["code"].nunique()),
            "universe": sorted(D["code"].unique().tolist()), "importance": sorted(({"f": f, "w": round(float(w), 3)} for f, w in zip(FEATS, imp)), key=lambda z: -z["w"])[:10],
            "oos": res, "def": {"H": H, "target": TGT, "stop": STOP, "rel": REL}}
@@ -198,7 +200,7 @@ def train(panel: pd.DataFrame | None = None, write: bool = True, verbose: bool =
     ref = fm.predict_proba(D[FEATS].tail(200))[:, 1]
     out["selfcheck_maxdiff"] = round(float(np.max(np.abs(1 / (1 + np.exp(-raw)) - ref))), 6)
     if verbose:
-        print(f"  treasure: 樣本 {out['n_rows']} 列 {out['n_stocks']} 檔；走動式 A 級 {res['tiers']['A']}、B+ 級 {res['tiers']['B+']}、B 級 {res['tiers']['B']}、全部 {res['tiers']['all']}；十分位 {res['deciles']}；門檻 {out['th_A']}；樹 {len(out['trees'])} 棵；自檢差 {out['selfcheck_maxdiff']}")
+        print(f"  treasure: 樣本 {out['n_rows']} 列 {out['n_stocks']} 檔；走動式 A+ {res['tiers']['A+']}、A 級 {res['tiers']['A']}、B+ 級 {res['tiers']['B+']}、B 級 {res['tiers']['B']}、全部 {res['tiers']['all']}；十分位 {res['deciles']}；門檻 {out['th_A']}；樹 {len(out['trees'])} 棵；自檢差 {out['selfcheck_maxdiff']}")
         print("  逐年:", res["by_year"])
     if write:
         M.save_json("treasure_model", out)
