@@ -305,7 +305,8 @@ def attach_to_next_days(nd: list[dict], scored: pd.DataFrame, snapshot: dict | N
         x["level_lo"], x["level_hi"] = r["level_lo"], r["level_hi"]                    # 既有鍵 → 路徑型 20%/80%
         x["buy_at"], x["sell_at"], x["stop"], x["target"] = r["buy_at"], r["sell_at"], r["stop"], r["target"]
         x["path_low10"], x["path_low20"], x["path_high80"], x["path_high90"] = r["low10"], r["low20"], r["high80"], r["high90"]
-        x["range_sigma"], x["range_mode"], x["touch_prob"] = r["sigma"], r["mode"] + ("_intraday_approx" if approx else ""), TOUCH_PROB
+        suffix = "_intraday_approx" if live else ("_night_pending" if approx else "")   # 2026-09-24：夜盤進行中另標 (舊版與盤中同標「盤中近似」)
+        x["range_sigma"], x["range_mode"], x["touch_prob"] = r["sigma"], r["mode"] + suffix, TOUCH_PROB
         x["range_note"] = r["note"] + (f"；{why}" if why and not live else "") + ("；盤中近似值" if live else "")
     return (f"買賣點改用路徑型水準 (sigma {nd[0]['range_sigma']:.2f}%/日"
             + ("，含完整夜盤 " + format(night, "+.2f") + "%" if night is not None else ("，" + why if why else "，不含夜盤")) + ")："
