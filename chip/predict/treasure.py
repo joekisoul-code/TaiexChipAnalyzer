@@ -29,9 +29,12 @@ from . import model as M
 log = logging.getLogger(__name__)
 H, TGT, STOP, REL = 21, 6.0, -8.0, 4.0
 SURGE_N, SURGE_UP, SURGE_DN = 20, 20.0, -10.0   # 飆股：20 交易日內最高價先達 +20%，且之前最低價未跌破 −10%
-SURGE_TOPK, SURGE_POOL = 3, 40
+SURGE_TOPK, SURGE_POOL = 3, 80   # 2026-09-24 第二輪：候選池 40→80 (前 3 名 31.4%→33.4%，逐年都較好)
+# 飆股專用新特徵 (第二輪 surge3.py，gain 重要度前 5；10 個全用與只用 5 個同為 31.4%，現行 29.7%)
+SURGE_NEW = ["range10", "maxpct20", "ret120", "dd_hi120", "big20"]
 FEATS = ["pct", "amp", "lval", "b5", "b10", "b20", "b60", "align", "ret5", "ret20", "ret60", "dd_hi20", "dd_hi60", "lo20_dist", "clv", "uw", "lw",
          "vol_ratio", "vola20", "streak", "lag", "rs20", "m_ret1", "m_bias20"]
+SURGE_FEATS = FEATS + SURGE_NEW
 Q_APLUS = 0.97     # A+：分數 ≥ 前一年 97 分位 ∧ 大盤月線下 (tr_k.py：58.2%、+11.3%、勝率 76%，n=165；逐年 61/54/63/45%)
 GATE_MBIAS = 0.0   # A 級閘門：大盤月線乖離 < 0 (大盤在月線下)
 PARAMS = dict(n_estimators=160, learning_rate=0.04, num_leaves=15, min_child_samples=400, subsample=0.8, subsample_freq=1, colsample_bytree=0.8, verbose=-1)
@@ -58,6 +61,8 @@ def features(g: pd.DataFrame, mk: pd.DataFrame, label: bool = True) -> pd.DataFr
     for i in range(1, len(g)):
         st[i] = st[i - 1] + s[i] if s[i] != 0 and (st[i - 1] == 0 or np.sign(st[i - 1]) == s[i]) else s[i]
     g["streak"] = st; g["lag"] = g["m_ret1"] - g["pct"]; g["rs20"] = g["ret20"] - g["m_ret20"]
+    g["range10"] = (h.rolling(10).max() / l.rolling(10).min() - 1) * 100; g["maxpct20"] = g["pct"].rolling(20).max()
+    g["ret120"] = c.pct_change(120) * 100; g["dd_hi120"] = (c / h.rolling(120).max() - 1) * 100; g["big20"] = (g["pct"] >= 5).astype(float).rolling(20).sum()
     if label:
         C, L, Mk, n = c.values, l.values, g["m_close"].values, len(g)
         hit = np.full(n, np.nan); fin = np.full(n, np.nan)
@@ -232,8 +237,8 @@ def _train_surge(lgb, D: pd.DataFrame, E: pd.DataFrame) -> dict:
         tr = (Ds["year"] < y) & (Ds["date"] < f"{y - 1}-12-01"); te = Es["year"] == y
         if tr.sum() < 5000 or not te.any():
             continue
-        m = lgb.LGBMClassifier(**SURGE_PARAMS).fit(Ds.loc[tr, FEATS], Ds.loc[tr, "surge"])
-        Es.loc[te, "ps"] = m.predict_proba(Es.loc[te, FEATS])[:, 1]
+        m = lgb.LGBMClassifier(**SURGE_PARAMS).fit(Ds.loc[tr, SURGE_FEATS], Ds.loc[tr, "surge"])
+        Es.loc[te, "ps"] = m.predict_proba(Es.loc[te, SURGE_FEATS])[:, 1]
     Es = Es[Es["ps"].notna() & Es["surge"].notna()]
     rows, last = [], {}
     for d, g in Es.sort_values("date").groupby("date"):
@@ -251,13 +256,13 @@ def _train_surge(lgb, D: pd.DataFrame, E: pd.DataFrame) -> dict:
            "base": round(float(Es["surge"].mean()), 3), "pool_base": round(float(Es.groupby("date").apply(lambda g: g.nlargest(SURGE_POOL, "screen")["surge"].mean()).mean()), 3),
            "by_year": {int(y): round(float(g["s"].mean()), 3) for y, g in x.groupby("year")},
            "below_ma20": round(float(x[x["mb"] < 0]["s"].mean()), 3) if (x["mb"] < 0).any() else None}
-    fm = lgb.LGBMClassifier(**SURGE_PARAMS).fit(Ds[FEATS], Ds["surge"])
+    fm = lgb.LGBMClassifier(**SURGE_PARAMS).fit(Ds[SURGE_FEATS], Ds["surge"])
     ly = Ds[Ds["year"] >= int(Ds["year"].max()) - 1]
-    th = float(np.quantile(fm.predict_proba(ly[FEATS])[:, 1], 0.9))
-    sm = {"init": float(fm.booster_.dump_model().get("average_output", 0) or 0), "trees": _dump_trees(fm.booster_), "th_top10": round(th, 4),
+    th = float(np.quantile(fm.predict_proba(ly[SURGE_FEATS])[:, 1], 0.9))
+    sm = {"features": SURGE_FEATS, "init": float(fm.booster_.dump_model().get("average_output", 0) or 0), "trees": _dump_trees(fm.booster_), "th_top10": round(th, 4),
           "def": {"n": SURGE_N, "up": SURGE_UP, "dn": SURGE_DN, "topk": SURGE_TOPK, "pool": SURGE_POOL}, "oos": oos,
-          "note": "飆股 = 20 交易日內先漲 +20% 且未先跌破 −10%。每日候選池前 3 名樣本外約 3 成命中 (平常 16~24%)，平均 +5.8% 但中位只 +2%、兩成虧超過 10% → 高風險，小部位"}
-    raw = np.array([_eval(sm, r) for r in Ds[FEATS].tail(200).values]); ref = fm.predict_proba(Ds[FEATS].tail(200))[:, 1]
+          "note": "飆股 = 20 交易日內先漲 +20% 且未先跌破 −10%。每日掃描前 80 候選池前 3 名樣本外約 1/3 命中 (平常 16~22%)，平均 +5.8% 但中位只 +2%、兩成虧超過 10% → 高風險，小部位"}
+    raw = np.array([_eval(sm, r) for r in Ds[SURGE_FEATS].tail(200).values]); ref = fm.predict_proba(Ds[SURGE_FEATS].tail(200))[:, 1]
     sm["selfcheck_maxdiff"] = round(float(np.max(np.abs(1 / (1 + np.exp(-raw)) - ref))), 6)
     print(f"  surge: 走動式 候選池前 {SURGE_TOPK} 飆股率 {oos['hit']} (候選池 {oos['pool_base']}、全體 {oos['base']})，20 日均 {oos['fin']}%、中位 {oos['med']}%；逐年 {oos['by_year']}；自檢差 {sm['selfcheck_maxdiff']}")
     return sm
