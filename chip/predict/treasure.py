@@ -204,7 +204,7 @@ def train(panel: pd.DataFrame | None = None, write: bool = True, verbose: bool =
     th_final = float(np.quantile(_pl, 0.9)); th_plus = float(np.quantile(_pl, Q_APLUS))
     imp = fm.booster_.feature_importance("gain"); imp = imp / imp.sum()
     out = {"trained_at": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M:%S"), "features": FEATS, "init": float(fm.booster_.dump_model().get("average_output", 0) or 0),
-           "trees": _dump_trees(fm.booster_), "th_A": round(th_final, 4), "th_Aplus": round(th_plus, 4), "gate": {"m_bias20_lt": GATE_MBIAS, "note": "A 級需大盤在月線下；大盤在月線上的高分股標 B+"}, "exit": {"note": "出場研究 (scratch tr_g.py，2022~ 走動式 A 級 n=330)：持有 21 交易日平均 +7.5%、勝率 67%、最差年 +5.1%；+6% 停利/−8% 停損只剩 +1.7%，+10%/−8% +2.5%，+6% 後移動停利 +3.2% → 建議持有滿 30 天，不提早停利；B 級持有 21 日 +3.3%、最差年 −1.6%", "A_hold": 7.48, "A_tp6": 1.68, "A_trail": 3.24},
+           "trees": _dump_trees(fm.booster_), "th_A": round(th_final, 4), "th_Aplus": round(th_plus, 4), "gate": {"m_bias20_lt": GATE_MBIAS, "note": "A 級需大盤在月線下；大盤在月線上的高分股標 B+"}, "exit": {"note": "出場研究 (scratch tr_g.py，2022~ 走動式 A 級 n=330)：持有 21 交易日平均 +7.5%、勝率 67%、最差年 +5.1%；+6% 停利/−8% 停損只剩 +1.7%，+10%/−8% +2.5%，+6% 後移動停利 +3.2% → 建議持有滿 30 天，不提早停利；B 級持有 21 日 +3.3%、最差年 −1.6%", "A_hold": 7.48, "A_tp6": 1.68, "A_trail": 3.24, "trail": TREASURE_TRAIL},
            "entry": {"note": "進場研究 (scratch tr_h.py，A 級 n=330，出場固定第 21 交易日)：推薦當天收盤 +7.5%；隔天開盤 +6.8%；掛低 1/2/3% 等 3 天成交率 69/57/45%、整體 +4.6/+4.4/+4.3% (沒成交的那批若當天買平均 +9~14%) → 推薦當天就進場，不要等回檔", "A_close": 7.48, "A_open": 6.84, "A_lim1": 4.55, "A_lim2": 4.41, "fill_lim2": 0.57}, "n_rows": int(len(D)), "n_stocks": int(D["code"].nunique()),
            "universe": sorted(D["code"].unique().tolist()), "importance": sorted(({"f": f, "w": round(float(w), 3)} for f, w in zip(FEATS, imp)), key=lambda z: -z["w"])[:10],
            "oos": res, "def": {"H": H, "target": TGT, "stop": STOP, "rel": REL}}
@@ -228,6 +228,11 @@ def train(panel: pd.DataFrame | None = None, write: bool = True, verbose: bool =
 #   持有 20 天：勝率 56.7%、平均 +6.7%、中位 +2.8%、虧 >10% 20%
 #   漲 10% 後自最高收盤前高點回落 8% 出場，否則持有 20 天：勝率 63.8%、平均 +4.4%、虧 >10% 16%、逐年最低勝率 51% (啟動 10~15% × 回落 6~10% 皆勝率 61~66%，平原非尖點)
 #   停損 (−8~−10%) 一律變差 (勝率 46~49%，波動大常洗掉後再漲)；停利 +20% 無停損 59%、+4.7%
+# 挖寶 A 級移動停利 (2026-09-24，A 級 n=377，2022~ 走動式，收盤進場、最長 21 交易日)：
+#   抱滿：勝率 66.6%、平均 +7.9%、逐年最低勝率 61%；漲 10% 後回落 8% 出場：勝率 70.8%、+5.8%、逐年最低 66%；
+#   漲 6% 後回落 4%：75.9%、+3.8%；漲 15% 後回落 8%：69.5%、+6.2% → 以勝率為主選 10/8
+TREASURE_TRAIL = {"act": 10, "drop": 8, "win": 0.708, "avg": 5.84, "yr_min_win": 0.656, "hold_win": 0.666, "hold_avg": 7.93,
+                  "note": "A 級：漲 10% 後從最高點回落 8% 賣出，否則持有 30 天 → 勝率 71%、平均 +5.8%；抱滿 30 天勝率 67%、平均 +7.9% (報酬較高)"}
 SURGE_EXIT = {"trail_act": 10, "trail_drop": 8, "hold": 20, "win": 0.638, "avg": 4.37, "hold_win": 0.567, "hold_avg": 6.69,
               "note": "漲 10% 後從最高點回落 8% 賣出，否則持有 20 天：勝率 64%、平均 +4.4%；抱滿 20 天平均較高 (+6.7%) 但勝率 57%。不建議設停損 (勝率降到 46~49%)，改用小部位控制風險"}
 SURGE_PARAMS = dict(n_estimators=250, learning_rate=0.03, num_leaves=15, min_child_samples=400, subsample=0.8, subsample_freq=1, colsample_bytree=0.8, verbose=-1)
