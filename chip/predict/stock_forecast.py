@@ -128,6 +128,10 @@ def _tiers(oos: pd.DataFrame) -> dict:
     return t
 
 
+# 2026-09-24 外推驗證：只用權值股訓練，預測挖寶股票池隨機 30 檔 (不在樣本內)，門檻用權值股 OOS 前/後 10%
+#   跑贏檔 5 日 49.2%、10 日 48.3% (基準 45~46%) → 不到一半，不叫；加入一半外部股票一起訓練仍 49% → 擴大樣本無效
+#   跑輸檔 5 日 61.5%、10 日 62.9% → 保留。20 日未驗證 → 樣本外不叫。ETF (00 開頭) 不是個股籌碼結構，一律不套用。
+OUT_DN_HIT = {5: 0.615, 10: 0.629}
 COMBO_HS = (5, 10)
 COMBO_MKT_Q = 0.70   # 大盤模型分數前 30% = 大盤看多
 
@@ -184,16 +188,27 @@ def forecast(stock_id: str, market: dict | None = None) -> dict:
     d = _with_env(f, _market_env()).replace([np.inf, -np.inf], np.nan)
     last = d.iloc[[-1]]
     out = {"stock_id": stock_id, "date": str(last["date"].iloc[0]), "close": float(last["close"].iloc[0]), "horizons": {}}
+    in_uni = stock_id in (bundles[10].get("universe") or []); is_etf = str(stock_id).startswith("00")
     for h, b in bundles.items():
         x = last[b["features"]].astype(float)
         pred = float(M.predict_ensemble(b["models"], x)[0])
         t = (b.get("metrics") or {}).get("tiers") or {}
-        call, call_hit = "中性", None
+        call, call_hit, note = "中性", None, None
         if t.get("up_on") and pred >= t["hi"]:
             call, call_hit = "偏多", t["up_hit"]
         elif t.get("dn_on") and pred <= t["lo"]:
             call, call_hit = "偏空", t["dn_hit"]
-        out["horizons"][h] = {"pred": round(pred, 2), **M.apply_calibration(b["calibration"], pred), "call": call, "call_hit": call_hit,
+        if is_etf:
+            call, call_hit, note = "中性", None, "ETF 不適用個股模型，請看大盤預測"
+        elif not in_uni:
+            if call == "偏多":
+                call, call_hit, note = "中性", None, "不在訓練樣本：跑贏大盤外推命中只有 49%，不叫"
+            elif call == "偏空":
+                if h in OUT_DN_HIT:
+                    call_hit = OUT_DN_HIT[h]
+                else:
+                    call, call_hit, note = "中性", None, "不在訓練樣本：20 日未驗證"
+        out["horizons"][h] = {"pred": round(pred, 2), **M.apply_calibration(b["calibration"], pred), "call": call, "call_hit": call_hit, "call_note": note,
                               "drivers": M.explain(b["models"], x, STOCK_NAMES)}
         cb = (b.get("metrics") or {}).get("combo") or {}
         mr = (market or {}).get(h) or (market or {}).get(str(h)) or {}

@@ -140,7 +140,7 @@ def records_from_stock(sid: str, sf: dict) -> list[dict]:
         p = _num(r.get("p_up")); bh = _num(r.get("base_hit")) or 0.5
         call = r.get("call") or ("偏多" if p is not None and p >= bh + 0.03 else "偏空" if p is not None and p <= bh - 0.03 else "中性")   # 新版模型直接給前/後 10% 叫牌
         rows.append({"kind": "stk", "sid": str(sid), "as_of": str(sf.get("date")), "target": None, "h": int(h), "mode": "close", "phase": "closed", "live": False,
-                     "base": _num(sf.get("close")), "p_up": p, "base_hit": bh, "call": call, "strength": "", "call_hit": _num(r.get("call_hit")), "variant": "stock", "level": None,
+                     "base": _num(sf.get("close")), "p_up": p, "base_hit": bh, "call": call, "strength": "", "call_hit": _num(r.get("call_hit")), "abs_call": r.get("abs_call"), "abs_p": _num(r.get("abs_hit")), "variant": "stock", "level": None,
                      "buy_at": None, "sell_at": None, "stop": None, "target_px": None, "range_mode": None, "trend7": None, "pred": _num(r.get("pred")), "realized": None})
     return rows
 
@@ -221,6 +221,8 @@ def evaluate(rows: list[dict], frames: dict[str, pd.DataFrame], market_close: di
         p = float(r["p_up"])
         rz = {"date": t_date, "ret": round(ret, 3), "rel": round(rel, 3) if rel is not None else None, "up": bool(y > 0), "hit": hit,
               "brier": round((p - (1.0 if y > 0 else 0.0)) ** 2, 4)}
+        if r.get("abs_call"):   # 股價偏漲：對帳股價本身 (非相對大盤)
+            rz["abs_hit"] = bool(ret > 0)
         if r.get("buy_at") and h <= 3:
             lo = min(px[dates[j]]["low"] for j in range(i0 + 1, i0 + h + 1))
             hi = max(px[dates[j]]["high"] for j in range(i0 + 1, i0 + h + 1))
@@ -353,6 +355,10 @@ def summarize(rows: list[dict]) -> dict:
         o = {"by_h": {str(h): _group_stats([r for r in rs if r.get("h") == h]) for h in (5, 10, 20) if any(r.get("h") == h for r in rs)}}
         o["recent"] = [{"as_of": r["as_of"], "h": r["h"], "call": r["call"], "p_up": r["p_up"], "rel": (r["realized"] or {}).get("rel"), "hit": (r["realized"] or {}).get("hit")} for r in rs if r.get("call") != "中性"][-15:][::-1]
         out["stocks"][sid] = o
+    ab = [r for r in rows if r.get("kind") == "stk" and r.get("abs_call") and (r.get("realized") or {}).get("abs_hit") is not None]
+    out["stocks_abs"] = {"n": len(ab), "hit": round(sum(r["realized"]["abs_hit"] for r in ab) / len(ab), 3) if ab else None,
+                         "pending": sum(1 for r in rows if r.get("kind") == "stk" and r.get("abs_call") and not r.get("realized")),
+                         "note": "股價偏漲 (個股跑贏大盤 + 大盤看多) 的實帳：股價本身上漲比例；回測 5/10 日約 63%"}
     return out
 
 
@@ -508,7 +514,7 @@ def run(fc: dict, snap: dict | None, scored: pd.DataFrame, stock_forecasts: dict
     except Exception as e:  # noqa: BLE001
         log.debug("ledger snapshot: %s", e)
     return {"generated": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M:%S"), "n_ledger": len(rows), "n_new": len(new), "n_evaluated_now": n_eval, "n_backfill": sum(1 for r in rows if r.get("backfill")),
-            "market": summ["market"], "stocks": summ["stocks"], "ledger": rows,
+            "market": summ["market"], "stocks": summ["stocks"], "stocks_abs": summ.get("stocks_abs"), "ledger": rows,
             "method": {"half_life": HALF_LIFE, "min_n_adj": MIN_N_ADJ, "degrade_gap": DEGRADE_GAP, "touch_target": TOUCH_TARGET,
                        "desc": "帳本只記發布當下的預測，目標日收盤後對帳；近期命中以指數衰減加權 (半衰期 30 次)；p_up 以近期 Platt 校準 (樣本 20→80 筆逐步信任)；"
                                "近期命中低於長期 5pt 以上的視野降為中性；買賣點水準依近 60 次觸及率調整乘數 (0.85~1.35)。個股為相對大盤方向。"}}
