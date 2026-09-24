@@ -176,7 +176,7 @@ def main() -> None:
     stock_fc, stock_frames = {}, {}
     for sid in chips.WATCHLIST:
         try:
-            sf = stock_forecast.forecast(sid)
+            sf = stock_forecast.forecast(sid, market=(fc.get("horizons") if isinstance(fc, dict) else None))
             if sf and not sf.get("error"):
                 stock_fc[sid] = sf
                 pf = finmind.stock_price(sid, "2024-01-01"); stock_frames[sid] = pf[[c for c in ("date", "close", "high", "low") if c in pf]]

@@ -128,6 +128,27 @@ def _tiers(oos: pd.DataFrame) -> dict:
     return t
 
 
+COMBO_HS = (5, 10)
+COMBO_MKT_Q = 0.70   # 大盤模型分數前 30% = 大盤看多
+
+
+def _combo(panel: pd.DataFrame, oos: pd.DataFrame, h: int, tiers: dict) -> dict:
+    """股價偏漲 (2026-09-24)：個股「跑贏大盤」且大盤模型看多 → 個股股價本身上漲。兩邊都是走動式 OOS。
+    研究 (門檻只用先前年份)：5 日上漲 66.0% (年低 58%)、平均 +4.2%；10 日 64.8% (年低 56%)、+5.6%；全體權值股 52~53%。
+    反向「跑輸大盤 + 大盤看空」股價下跌只有 53~55% → 不做。"""
+    from .features import MARKET_FEATURES, market_matrix
+    mo = M.walk_forward(market_matrix(backtest.load_long("2010-01-01")), MARKET_FEATURES, f"fwd{h}", h, 2014).rename(columns={"pred": "mpred"})
+    m_hi = float(mo["mpred"].quantile(COMBO_MKT_Q))
+    d = panel.dropna(subset=[f"xfwd{h}"]); d = d[d["date"].str[:4].astype(int) >= FIRST_TEST_YEAR]
+    o = oos.assign(abs=d[f"fwd{h}"].values).merge(mo[["date", "mpred"]], on="date", how="left")
+    g = o[(o["pred"] >= tiers["hi"]) & (o["mpred"] >= m_hi)]
+    if len(g) < 200:
+        return {}
+    by = (g["abs"] > 0).groupby(g["year"]).mean()
+    return {"m_hi": round(m_hi, 4), "up_hit": round(float((g["abs"] > 0).mean()), 3), "up_mean": round(float(g["abs"].mean()), 2), "n": int(len(g)),
+            "yr_min": round(float(by.min()), 3), "base_up": round(float((o["abs"] > 0).mean()), 3)}
+
+
 def train(write: bool = True) -> dict:
     panel = build_panel()
     results = {}
@@ -135,6 +156,11 @@ def train(write: bool = True) -> dict:
         oos = M.walk_forward(panel, STOCK_FEATURES, f"xfwd{h}", h, FIRST_TEST_YEAR, min_train=3000)
         met = M.metrics(oos)
         met["tiers"] = _tiers(oos)
+        if h in COMBO_HS and met["tiers"].get("up_on"):
+            try:
+                met["combo"] = _combo(panel, oos, h, met["tiers"])
+            except Exception as e:  # noqa: BLE001
+                log.warning("combo h%s: %s", h, e)
         results[h] = met
         if write:
             d = panel.dropna(subset=[f"xfwd{h}"])
@@ -147,7 +173,8 @@ def train(write: bool = True) -> dict:
     return results
 
 
-def forecast(stock_id: str) -> dict:
+def forecast(stock_id: str, market: dict | None = None) -> dict:
+    """market：大盤 market_forecast 的 horizons (取 pred)，給定時計算「股價偏漲」組合訊號。"""
     bundles = {h: M.load(f"stock_h{h}") for h in HORIZONS}
     if any(b is None for b in bundles.values()):
         return {"error": "尚未訓練個股模型，請執行 python cli.py train --stock"}
@@ -168,6 +195,13 @@ def forecast(stock_id: str) -> dict:
             call, call_hit = "偏空", t["dn_hit"]
         out["horizons"][h] = {"pred": round(pred, 2), **M.apply_calibration(b["calibration"], pred), "call": call, "call_hit": call_hit,
                               "drivers": M.explain(b["models"], x, STOCK_NAMES)}
+        cb = (b.get("metrics") or {}).get("combo") or {}
+        mr = (market or {}).get(h) or (market or {}).get(str(h)) or {}
+        if cb and call == "偏多" and mr.get("pred") is not None:
+            ok = float(mr["pred"]) >= cb["m_hi"]
+            out["horizons"][h]["abs_call"] = "股價偏漲" if ok else None
+            out["horizons"][h]["abs_hit"] = cb["up_hit"] if ok else None
+            out["horizons"][h]["abs_mean"] = cb["up_mean"] if ok else None
     out["metrics"] = {h: {k: v for k, v in b.get("metrics", {}).items() if k != "calibration"} for h, b in bundles.items()}
     out["in_universe"] = stock_id in bundles[10].get("universe", [])
     h10 = out["horizons"][10]

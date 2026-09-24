@@ -85,6 +85,14 @@
    "dn_yr_min": 0.548,
    "up_on": true,
    "dn_on": true
+  },
+  "combo": {
+   "m_hi": 0.393,
+   "up_hit": 0.633,
+   "up_mean": 3.7,
+   "n": 1964,
+   "yr_min": 0.532,
+   "base_up": 0.523
   }
  },
  "10": {
@@ -173,6 +181,14 @@
    "dn_yr_min": 0.498,
    "up_on": true,
    "dn_on": true
+  },
+  "combo": {
+   "m_hi": 0.7627,
+   "up_hit": 0.628,
+   "up_mean": 5.01,
+   "n": 2457,
+   "yr_min": 0.537,
+   "base_up": 0.542
   }
  },
  "20": {
