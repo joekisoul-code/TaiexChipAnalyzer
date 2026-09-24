@@ -4,6 +4,10 @@
 樣本：當日成交值前 ~230 檔上市櫃個股 (排除 ETF)，2019~ 日 K；候選條件同 App 掃描器 (成交值 >5 千萬、當日漲幅 <9.3%)。
 研究 (scratch tr_study.py，2022~ 走動式)：現行評分每日前 6 檔命中 40.1% ≈ 隨機 39.2%；
 LGB 分數 ≥ 前一年 90 分位 且在掃描前 40 內 → 44.0% (結案均 +5.6% vs 現行 +4.1%)，逐年 2022 40/34、2024 41/37、2025 50/43、2026 48/41 皆勝現行。
+A 級強化 (2026-09-24 第二輪，scratch tr_a/tr_b/tr_c.py)：高分 (≥ 前一年 90 分位) 只在「大盤低於月線」時才有效 —
+  高分 ∧ 大盤月線乖離 <0 → 51.8% (n=330，逐年 50~53%，結案均 +7.5%)；高分 ∧ 大盤在月線上 → 42.1% (≈ B 級 40%)。
+  閘門穩健：乖離門檻 +1%~−1% 皆 50.8~51.8%。提高分位門檻 (95/97) 或加市場寬度/候選池相對特徵，逐年不穩定，未採用。
+  → 分級：A = 高分 ∧ 大盤在月線下；B+ = 高分 ∧ 大盤在月線上；B = 其餘。
 主要特徵：20 日波動 (高 → 易達 +6%)、距 20 日低點 (遠 → 好)、20/60 日漲幅 (跌多 → 好，均值回歸)、距 60 日高點 (深 → 好)。
 前端 (learning.js treasureModel) 用 dump 的樹直接算分；特徵由 Yahoo 6 個月日 K + 今日快照在前端計算。
 """
@@ -23,6 +27,7 @@ log = logging.getLogger(__name__)
 H, TGT, STOP, REL = 21, 6.0, -8.0, 4.0
 FEATS = ["pct", "amp", "lval", "b5", "b10", "b20", "b60", "align", "ret5", "ret20", "ret60", "dd_hi20", "dd_hi60", "lo20_dist", "clv", "uw", "lw",
          "vol_ratio", "vola20", "streak", "lag", "rs20", "m_ret1", "m_bias20"]
+GATE_MBIAS = 0.0   # A 級閘門：大盤月線乖離 < 0 (大盤在月線下)
 PARAMS = dict(n_estimators=160, learning_rate=0.04, num_leaves=15, min_child_samples=400, subsample=0.8, subsample_freq=1, colsample_bytree=0.8, verbose=-1)
 
 
@@ -155,14 +160,14 @@ def train(panel: pd.DataFrame | None = None, write: bool = True, verbose: bool =
                 lp = last.get(r.code)
                 if lp is not None and (pd.Timestamp(d) - pd.Timestamp(lp)).days < 30:
                     continue
-                rows.append((y, r.p >= th, r.hit, r.fin21)); last[r.code] = d; n += 1
+                rows.append((y, bool(r.p >= th and r.m_bias20 < GATE_MBIAS), bool(r.p >= th and r.m_bias20 >= GATE_MBIAS), r.hit, r.fin21)); last[r.code] = d; n += 1
                 if n >= 6:
                     break
-    x = pd.DataFrame(rows, columns=["year", "A", "hit", "fin"])
-    for tier, g in (("A", x[x["A"]]), ("B", x[~x["A"]]), ("all", x)):
+    x = pd.DataFrame(rows, columns=["year", "A", "Bp", "hit", "fin"])
+    for tier, g in (("A", x[x["A"]]), ("B+", x[x["Bp"]]), ("B", x[~x["A"] & ~x["Bp"]]), ("all", x)):
         res["tiers"][tier] = {"n": int(len(g)), "hit": round(float(g["hit"].mean()), 3), "fin": round(float(g["fin"].mean()), 2)}
     for y, g in x.groupby("year"):
-        res["by_year"][int(y)] = {"A": round(float(g[g["A"]]["hit"].mean()), 3) if g["A"].any() else None, "nA": int(g["A"].sum()), "B": round(float(g[~g["A"]]["hit"].mean()), 3) if (~g["A"]).any() else None}
+        res["by_year"][int(y)] = {"A": round(float(g[g["A"]]["hit"].mean()), 3) if g["A"].any() else None, "nA": int(g["A"].sum()), "B+": round(float(g[g["Bp"]]["hit"].mean()), 3) if g["Bp"].any() else None, "B": round(float(g[~g["A"] & ~g["Bp"]]["hit"].mean()), 3) if (~g["A"] & ~g["Bp"]).any() else None}
     E["dec"] = pd.qcut(E["p"], 10, labels=False); res["deciles"] = E.groupby("dec")["hit"].mean().round(3).tolist()
     res["base_hit"] = round(float(E["hit"].mean()), 3)
     # 最終模型 + 門檻 (最近一年分數的 90 分位)
@@ -171,7 +176,7 @@ def train(panel: pd.DataFrame | None = None, write: bool = True, verbose: bool =
     th_final = float(np.quantile(fm.predict_proba(ly[FEATS])[:, 1], 0.9))
     imp = fm.booster_.feature_importance("gain"); imp = imp / imp.sum()
     out = {"trained_at": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M:%S"), "features": FEATS, "init": float(fm.booster_.dump_model().get("average_output", 0) or 0),
-           "trees": _dump_trees(fm.booster_), "th_A": round(th_final, 4), "n_rows": int(len(D)), "n_stocks": int(D["code"].nunique()),
+           "trees": _dump_trees(fm.booster_), "th_A": round(th_final, 4), "gate": {"m_bias20_lt": GATE_MBIAS, "note": "A 級需大盤在月線下；大盤在月線上的高分股標 B+"}, "n_rows": int(len(D)), "n_stocks": int(D["code"].nunique()),
            "importance": sorted(({"f": f, "w": round(float(w), 3)} for f, w in zip(FEATS, imp)), key=lambda z: -z["w"])[:10],
            "oos": res, "def": {"H": H, "target": TGT, "stop": STOP, "rel": REL}}
     # 自檢：JSON 樹與 LightGBM 預測一致
@@ -179,7 +184,7 @@ def train(panel: pd.DataFrame | None = None, write: bool = True, verbose: bool =
     ref = fm.predict_proba(D[FEATS].tail(200))[:, 1]
     out["selfcheck_maxdiff"] = round(float(np.max(np.abs(1 / (1 + np.exp(-raw)) - ref))), 6)
     if verbose:
-        print(f"  treasure: 樣本 {out['n_rows']} 列 {out['n_stocks']} 檔；走動式 A 級 {res['tiers']['A']}、B 級 {res['tiers']['B']}、全部 {res['tiers']['all']}；十分位 {res['deciles']}；門檻 {out['th_A']}；樹 {len(out['trees'])} 棵；自檢差 {out['selfcheck_maxdiff']}")
+        print(f"  treasure: 樣本 {out['n_rows']} 列 {out['n_stocks']} 檔；走動式 A 級 {res['tiers']['A']}、B+ 級 {res['tiers']['B+']}、B 級 {res['tiers']['B']}、全部 {res['tiers']['all']}；十分位 {res['deciles']}；門檻 {out['th_A']}；樹 {len(out['trees'])} 棵；自檢差 {out['selfcheck_maxdiff']}")
         print("  逐年:", res["by_year"])
     if write:
         M.save_json("treasure_model", out)
