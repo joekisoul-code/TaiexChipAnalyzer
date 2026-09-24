@@ -95,6 +95,11 @@ def main() -> None:
             _im.train(backtest.load_long("2010-01-01"), short_term._night_hist(), write=True, verbose=True)
             from chip.predict import five_day as _fd   # 後五日方向模組：驗證訊號投票 + 五日模型 (2026-09-24)
             _fd.train(backtest.load_long("2010-01-01"), short_term._night_hist(), write=True, verbose=True)
+            try:   # 挖寶雷達模型 (2026-09-24)：~230 檔個股 FinMind 日 K，走動式驗證後輸出前端樹模型
+                from chip.predict import treasure as _tr
+                _tr.train(None, write=True, verbose=True)
+            except Exception as e:  # noqa: BLE001
+                print("  treasure train failed:", e)
         except Exception as e:  # noqa: BLE001
             print("  trend7/range_levels train failed:", e)
     scored, A, meta = market.run(use_wantgoo=use_wg)
@@ -223,6 +228,13 @@ def main() -> None:
     except Exception as e:  # noqa: BLE001
         print("  verdict failed:", e)
     dump("forecast", {"updated": time.strftime("%Y-%m-%d %H:%M:%S"), "forecast": fc, "hourly": hr, "stocks": stock_fc})
+    try:   # 挖寶雷達樹模型 (前端算分)；模型檔在 repo (每週 --train 重訓)
+        from chip.predict import model as _M
+        _tm = _M.load_json("treasure_model")
+        if _tm:
+            dump("treasure_model", _tm)
+    except Exception as e:  # noqa: BLE001
+        print("  treasure_model dump failed:", e)
     res = None
     if not args.fast:
         res = chips.assess_watchlist(chips.WATCHLIST, use_wantgoo=use_wg)
