@@ -91,6 +91,8 @@ def main() -> None:
             _sp.train(write=True, verbose=True)
             from chip.predict import precheck as _pc   # 預判邏輯：開盤跳空條件統計 + 日曆效應驗證 (2026-09-23)
             _pc.train(backtest.load_long("2010-01-01"), write=True, verbose=True)
+            from chip.predict import infomap as _im   # 預測邏輯總表：所有資訊 × 視野 vs 歷史漲跌 (2026-09-24)
+            _im.train(backtest.load_long("2010-01-01"), short_term._night_hist(), write=True, verbose=True)
         except Exception as e:  # noqa: BLE001
             print("  trend7/range_levels train failed:", e)
     scored, A, meta = market.run(use_wantgoo=use_wg)
@@ -193,6 +195,11 @@ def main() -> None:
         fc["logic"] = logic.build(_st2.build_matrix(backtest.load_long("2010-01-01"), _st2._night_hist()), night_final=(_nd0.get("variant") == "night"))
     except Exception as e:  # noqa: BLE001
         print("  logic failed:", e)
+    try:   # 預測邏輯總表 (2026-09-24)：今日各有效資訊讀數所在檔位 → 各視野多空票
+        from chip.predict import infomap, short_term as _st3
+        fc["infomap"] = infomap.build(backtest.load_long("2010-01-01"), _st3._night_hist())
+    except Exception as e:  # noqa: BLE001
+        print("  infomap failed:", e)
     try:   # 判斷總結 (2026-09-23)：模型叫牌 + 6 票獨立訊號的共識 → 一句可執行判斷 (含同狀況 OOS 命中率)
         from chip.predict import verdict
         fc["verdict"] = verdict.build(fc, hr if not hr.get("error") else None, snap, scored, learn_summary)
