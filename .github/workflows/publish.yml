@@ -17,7 +17,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: publish
+  group: ${{ github.event.inputs.mode == 'research' && 'research' || 'publish' }}   # 研究模式另排佇列，不擋盤中 5 分鐘發布
   cancel-in-progress: false
 
 jobs:
