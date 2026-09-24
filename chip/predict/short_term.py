@@ -100,19 +100,28 @@ def build_matrix(scored: pd.DataFrame, night: pd.DataFrame | None = None) -> pd.
 
 
 def _asof_return(dates: pd.Series, sym: str) -> pd.Series:
-    """該市場「日期 <= D」最後一個交易日的日報酬% (亞股同日收盤，台股收盤後已知)。"""
+    """該市場「同一天 D」的日報酬% (亞股同日收盤，台股收盤後已知)。
+    2026-09-24 改為嚴格同日：該市場 D 日沒有資料 (休市、或 Yahoo 快取尚未更新) → NaN，交給模型的缺值處理與投票的「無資料」。
+    舊版用「<= D 最後一筆」會把過期值 (例如上週五的 +1.18%) 靜默填到今天，實際發生於 09-24 早上 (恆生/KOSPI 三天同值)，
+    污染模型特徵、判斷總結投票、信心分層與預測邏輯總表。"""
     from ..sources import global_markets as gm
     h = gm.history(sym).sort_values("date")
     h["r"] = h["close"].astype(float).pct_change() * 100
-    src = list(zip(h["date"].astype(str), h["r"]))
-    out, j, last = [], 0, np.nan
-    for dte in dates:
-        while j < len(src) and src[j][0] <= dte:
-            if pd.notna(src[j][1]):
-                last = src[j][1]
-            j += 1
-        out.append(last)
-    return pd.Series(out, index=dates.index, dtype=float)
+    m = dict(zip(h["date"].astype(str), h["r"]))
+    return pd.Series([m.get(str(dte), np.nan) for dte in dates], index=dates.index, dtype=float)
+
+
+def asia_last_dates() -> dict:
+    """各亞股資料最後日期 (前端顯示資料新鮮度用)。"""
+    from ..sources import global_markets as gm
+    out = {}
+    for col, sym in (("kospi_r0", "^KS11"), ("nikkei_r0", "^N225"), ("hsi_r0", "^HSI")):
+        try:
+            h = gm.history(sym)
+            out[col] = str(h["date"].max())[:10] if h is not None and len(h) else None
+        except Exception:  # noqa: BLE001
+            out[col] = None
+    return out
 
 
 def _add_price_pattern_features(d: pd.DataFrame) -> pd.DataFrame:
