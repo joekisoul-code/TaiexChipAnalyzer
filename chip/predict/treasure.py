@@ -28,6 +28,8 @@ from . import model as M
 
 log = logging.getLogger(__name__)
 H, TGT, STOP, REL = 21, 6.0, -8.0, 4.0
+SURGE_N, SURGE_UP, SURGE_DN = 20, 20.0, -10.0   # 飆股：20 交易日內最高價先達 +20%，且之前最低價未跌破 −10%
+SURGE_TOPK, SURGE_POOL = 3, 40
 FEATS = ["pct", "amp", "lval", "b5", "b10", "b20", "b60", "align", "ret5", "ret20", "ret60", "dd_hi20", "dd_hi60", "lo20_dist", "clv", "uw", "lw",
          "vol_ratio", "vola20", "streak", "lag", "rs20", "m_ret1", "m_bias20"]
 Q_APLUS = 0.97     # A+：分數 ≥ 前一年 97 分位 ∧ 大盤月線下 (tr_k.py：58.2%、+11.3%、勝率 76%，n=165；逐年 61/54/63/45%)
@@ -67,6 +69,12 @@ def features(g: pd.DataFrame, mk: pd.DataFrame, label: bool = True) -> pd.DataFr
             reached = (not stop) and bool(np.any((cr >= TGT) | ((cr - mr) >= REL)))
             hit[i] = float(reached and cr[-1] > 0); fin[i] = cr[-1]
         g["hit"] = hit; g["fin21"] = fin
+        Hh = g["high"].values; sg = np.full(n, np.nan); f20 = np.full(n, np.nan)
+        for i in range(n - SURGE_N):
+            hr = (Hh[i + 1:i + SURGE_N + 1] / C[i] - 1) * 100; lr = (L[i + 1:i + SURGE_N + 1] / C[i] - 1) * 100
+            up = np.where(hr >= SURGE_UP)[0]; dn = np.where(lr <= SURGE_DN)[0]
+            sg[i] = float(len(up) > 0 and (len(dn) == 0 or up[0] < dn[0])); f20[i] = (C[i + SURGE_N] / C[i] - 1) * 100
+        g["surge"] = sg; g["fin20"] = f20
     return g
 
 
@@ -195,6 +203,10 @@ def train(panel: pd.DataFrame | None = None, write: bool = True, verbose: bool =
            "entry": {"note": "進場研究 (scratch tr_h.py，A 級 n=330，出場固定第 21 交易日)：推薦當天收盤 +7.5%；隔天開盤 +6.8%；掛低 1/2/3% 等 3 天成交率 69/57/45%、整體 +4.6/+4.4/+4.3% (沒成交的那批若當天買平均 +9~14%) → 推薦當天就進場，不要等回檔", "A_close": 7.48, "A_open": 6.84, "A_lim1": 4.55, "A_lim2": 4.41, "fill_lim2": 0.57}, "n_rows": int(len(D)), "n_stocks": int(D["code"].nunique()),
            "universe": sorted(D["code"].unique().tolist()), "importance": sorted(({"f": f, "w": round(float(w), 3)} for f, w in zip(FEATS, imp)), key=lambda z: -z["w"])[:10],
            "oos": res, "def": {"H": H, "target": TGT, "stop": STOP, "rel": REL}}
+    try:
+        out["surge"] = _train_surge(lgb, D, E)
+    except Exception as e:  # noqa: BLE001
+        log.warning("surge model: %s", e)
     # 自檢：JSON 樹與 LightGBM 預測一致
     raw = np.array([_eval(out, r) for r in D[FEATS].tail(200).values])
     ref = fm.predict_proba(D[FEATS].tail(200))[:, 1]
@@ -205,6 +217,50 @@ def train(panel: pd.DataFrame | None = None, write: bool = True, verbose: bool =
     if write:
         M.save_json("treasure_model", out)
     return out
+
+
+SURGE_PARAMS = dict(n_estimators=250, learning_rate=0.03, num_leaves=15, min_child_samples=400, subsample=0.8, subsample_freq=1, colsample_bytree=0.8, verbose=-1)
+
+
+def _train_surge(lgb, D: pd.DataFrame, E: pd.DataFrame) -> dict:
+    """飆股模型 (2026-09-24)：同 FEATS，目標 = 20 日內先 +20% 未先 −10%。走動式 (2022~) 評估：每日掃描前 40 候選池中分數前 3 檔 (同檔 28 天不重複)。
+    研究 (scratch surge_study.py，230 檔)：全部可買股票日飆股率 16.7%；候選池 40 前 3 → 29.7%、20 日均 +5.8%、中位 +2.2%；
+    全市場前 3 → 32%、+6.3%；挖寶原目標模型前 3 只 22.5%；帶量創 60 日高規則 19.7%；加法人/突破特徵無改善；絕對分數門檻反而變差。"""
+    Ds = D[D["surge"].notna()]
+    Es = E.copy(); Es["ps"] = np.nan
+    for y in range(2022, int(Es["year"].max()) + 1):
+        tr = (Ds["year"] < y) & (Ds["date"] < f"{y - 1}-12-01"); te = Es["year"] == y
+        if tr.sum() < 5000 or not te.any():
+            continue
+        m = lgb.LGBMClassifier(**SURGE_PARAMS).fit(Ds.loc[tr, FEATS], Ds.loc[tr, "surge"])
+        Es.loc[te, "ps"] = m.predict_proba(Es.loc[te, FEATS])[:, 1]
+    Es = Es[Es["ps"].notna() & Es["surge"].notna()]
+    rows, last = [], {}
+    for d, g in Es.sort_values("date").groupby("date"):
+        c = 0
+        for r in g.nlargest(SURGE_POOL, "screen").nlargest(SURGE_TOPK * 3, "ps").itertuples():
+            lp = last.get(r.code)
+            if lp is not None and (pd.Timestamp(d) - pd.Timestamp(lp)).days < 28:
+                continue
+            rows.append((r.year, r.surge, r.fin20, r.m_bias20)); last[r.code] = d; c += 1
+            if c >= SURGE_TOPK:
+                break
+    x = pd.DataFrame(rows, columns=["year", "s", "fin", "mb"])
+    oos = {"n": int(len(x)), "hit": round(float(x["s"].mean()), 3), "fin": round(float(x["fin"].mean()), 2), "med": round(float(x["fin"].median()), 2),
+           "win": round(float((x["fin"] > 0).mean()), 3), "loss10": round(float((x["fin"] < -10).mean()), 3),
+           "base": round(float(Es["surge"].mean()), 3), "pool_base": round(float(Es.groupby("date").apply(lambda g: g.nlargest(SURGE_POOL, "screen")["surge"].mean()).mean()), 3),
+           "by_year": {int(y): round(float(g["s"].mean()), 3) for y, g in x.groupby("year")},
+           "below_ma20": round(float(x[x["mb"] < 0]["s"].mean()), 3) if (x["mb"] < 0).any() else None}
+    fm = lgb.LGBMClassifier(**SURGE_PARAMS).fit(Ds[FEATS], Ds["surge"])
+    ly = Ds[Ds["year"] >= int(Ds["year"].max()) - 1]
+    th = float(np.quantile(fm.predict_proba(ly[FEATS])[:, 1], 0.9))
+    sm = {"init": float(fm.booster_.dump_model().get("average_output", 0) or 0), "trees": _dump_trees(fm.booster_), "th_top10": round(th, 4),
+          "def": {"n": SURGE_N, "up": SURGE_UP, "dn": SURGE_DN, "topk": SURGE_TOPK, "pool": SURGE_POOL}, "oos": oos,
+          "note": "飆股 = 20 交易日內先漲 +20% 且未先跌破 −10%。每日候選池前 3 名樣本外約 3 成命中 (平常 16~24%)，平均 +5.8% 但中位只 +2%、兩成虧超過 10% → 高風險，小部位"}
+    raw = np.array([_eval(sm, r) for r in Ds[FEATS].tail(200).values]); ref = fm.predict_proba(Ds[FEATS].tail(200))[:, 1]
+    sm["selfcheck_maxdiff"] = round(float(np.max(np.abs(1 / (1 + np.exp(-raw)) - ref))), 6)
+    print(f"  surge: 走動式 候選池前 {SURGE_TOPK} 飆股率 {oos['hit']} (候選池 {oos['pool_base']}、全體 {oos['base']})，20 日均 {oos['fin']}%、中位 {oos['med']}%；逐年 {oos['by_year']}；自檢差 {sm['selfcheck_maxdiff']}")
+    return sm
 
 
 def _eval(model: dict, x) -> float:
