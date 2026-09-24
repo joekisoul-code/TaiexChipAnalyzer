@@ -191,6 +191,9 @@ def build(fc: dict, hourly: dict | None, snap: dict | None, scored: pd.DataFrame
                       "note": f"{r_.get('text')} → {r_.get('dir')} (歷史 {r_.get('n')} 次上漲率 {float(r_.get('up_rate') or 0):.0%}；最近 8 次上漲 {float(L1.get('recent_up') or 0):.0%})"
                               + (f"；此變體樣本外命中 {o_['hit']:.0%} vs 基準 {o_['base']:.0%}" + ("，無優勢僅供觀察" if edge < 0.03 else "") if o_.get("hit") else "")})
     gp = (fc.get("precheck") or {}).get("gap") or {}
+    if "暫定" in str(gp.get("source") or "") or "進行中" in str(gp.get("source") or ""):   # 2026-09-24：夜盤進行中的暫估不計票 (半場 × 完整夜盤 β 未經驗證)
+        extra.append({"key": "gap", "name": "開盤跳空預判", "dir": "—", "s": 0, "note": "夜盤進行中，05:00 收盤後才計票 (晚間請看美期估算)"})
+        gp = {}
     if gp.get("stats"):
         s_ = gp["stats"]; est = float(gp.get("est") or 0)
         gs = 1 if (est > 0.15 and s_.get("p_hold", 0) >= 0.6) else -1 if (est < -0.15 and s_.get("p_hold", 0) >= 0.6) else 0
