@@ -210,6 +210,14 @@ def train(write: bool = True, verbose: bool = True) -> dict:
             res[name] = {"pinball20": round(_pinball(yv_ * sg, q * sg, Q_BUY), 4), "touch20": round(float(touch.mean()), 3), "touch_yr_min": round(float(byy.min()), 3), "touch_yr_max": round(float(byy.max()), 3),
                          "mae_low": round(float(np.mean(np.abs(yv_ - q) * sg)), 3)}
         res["improve_model"] = round(1 - res["model"]["pinball20"] / res["const"]["pinball20"], 3)
+        if k == 1:   # 逐股 OOS 改善 (驗證：是否所有股票都受益)
+            bs = []
+            for sid, gi in d[ev].assign(pm=pm[ev].values, pc=pc[ev].values).groupby("stock_id"):
+                if len(gi) < 150:
+                    continue
+                yy2, sg2 = gi[f"yLow{k}"].values, gi["sigma"].values
+                bs.append(round(1 - _pinball(yy2 * sg2, gi["pm"].values * sg2, Q_BUY) / _pinball(yy2 * sg2, gi["pc"].values * sg2, Q_BUY), 3))
+            res["by_stock"] = {"n_stocks": len(bs), "improve_median": round(float(np.median(bs)), 3) if bs else None, "improve_min": round(float(min(bs)), 3) if bs else None, "n_negative": int(sum(1 for b_ in bs if b_ < 0))}
         res["improve_table"] = round(1 - res["table"]["pinball20"] / res["const"]["pinball20"], 3)
         res["use_model"] = bool(res["improve_model"] >= 0.02 and 0.15 <= res["model"]["touch20"] <= 0.26)
         out["k"][str(k)] = res
@@ -231,6 +239,14 @@ def train(write: bool = True, verbose: bool = True) -> dict:
         hi, lo = np.quantile(p, 0.7), np.quantile(p, 0.3)
         return {"top30_hold": round(float(yv_[p >= hi].mean()), 3), "bot30_hold": round(float(yv_[p <= lo].mean()), 3), "brier": round(float(np.mean((p - yv_) ** 2)), 4)}
     out["hold3"] = {"n_oos": int(ev.sum()), "base": round(float(yv_.mean()), 3), "model": tiers(pm[ev].values), "table": tiers(pt[ev].values), "const_brier": round(float(np.mean((pb[ev].values - yv_) ** 2)), 4)}
+    cal = pd.DataFrame({"p": pm[ev].values, "y": yv_, "year": yy_[ev].values}); cal["bin"] = pd.cut(cal["p"], [0, .3, .4, .5, .6, .7, 1.0])
+    out["hold3"]["calibration"] = [{"bin": str(b_), "rate": round(float(g_["y"].mean()), 3), "n": int(len(g_))} for b_, g_ in cal.groupby("bin", observed=True)]
+    out["hold3"]["by_year"] = {int(yv): {"top30": round(float(g_.loc[g_["p"] >= g_["p"].quantile(.7), "y"].mean()), 3), "bot30": round(float(g_.loc[g_["p"] <= g_["p"].quantile(.3), "y"].mean()), 3)} for yv, g_ in cal.groupby("year")}
+    bs2 = []
+    for sid, g_ in d[ev].assign(p=pm[ev].values).groupby("stock_id"):
+        if len(g_) >= 150:
+            bs2.append(round(float(g_.loc[g_["p"] >= g_["p"].quantile(.7), "hold3"].mean() - g_.loc[g_["p"] <= g_["p"].quantile(.3), "hold3"].mean()), 3))
+    out["hold3"]["by_stock"] = {"n_stocks": len(bs2), "gap_median": round(float(np.median(bs2)), 3) if bs2 else None, "gap_min": round(float(min(bs2)), 3) if bs2 else None, "n_negative": int(sum(1 for b_ in bs2 if b_ < 0))}
     fb = _rfit(X, y)
     imp = np.mean([mm.feature_importances_ for mm in fb], axis=0); imp = imp / imp.sum()
     out["hold3"]["importance"] = sorted(({"f": f, "name": NAMES.get(f, f), "w": round(float(w), 3)} for f, w in zip(FEATS, imp) if w > 0.03), key=lambda x: -x["w"])
@@ -270,12 +286,14 @@ def build(stock_id: str, price: pd.DataFrame | None = None, base_px: float | Non
             continue
         q20 = float(_pred(b["buy"], row[b["features"]])[0]) * sg; q10 = min(float(_pred(b["stop"], row[b["features"]])[0]) * sg, q20)
         out["k"][str(k)] = {"buy_model": round(px0 * (1 + q20 / 100), 2), "stop_model": round(px0 * (1 + q10 / 100), 2), "low20_pct": round(q20, 2), "low10_pct": round(q10, 2),
-                            "use_model": bool(r.get("use_model")), "oos": {"improve_pinball": r.get("improve_model"), "model": r.get("model"), "sigma": r.get("const")}}
+                            "use_model": bool(r.get("use_model")), "oos": {"improve_pinball": r.get("improve_model"), "model": r.get("model"), "sigma": r.get("const"), "by_stock": r.get("by_stock")}}
     hb = M.load("stock_pullback_hold3")
     if hb:
         p = float(np.clip(_pred(hb["models"], row[hb["features"]])[0], 0, 1))
         h3 = st.get("hold3") or {}
+        cal_ = next((c for c in (h3.get("calibration") or []) if _in_bin(c["bin"], p)), None)
         out["hold3"] = {"p": round(p, 3), "base": h3.get("base"), "top30": (h3.get("model") or {}).get("top30_hold"), "bot30": (h3.get("model") or {}).get("bot30_hold"),
+                        "cal_rate": cal_["rate"] if cal_ else None, "cal_n": cal_["n"] if cal_ else None, "by_year": h3.get("by_year"), "by_stock": h3.get("by_stock"),
                         "label": "回落可能已到低點" if p >= (h3.get("base") or 0.5) + 0.08 else "回落可能未完" if p <= (h3.get("base") or 0.5) - 0.08 else "不明顯"}
     out["supports"] = []
     bull = bool(close >= float(row["ma20"].iloc[0])) if pd.notna(row["ma20"].iloc[0]) else None
@@ -288,6 +306,14 @@ def build(stock_id: str, price: pd.DataFrame | None = None, base_px: float | Non
                                 "hold_regime": (ss.get("hold_bull") if bull else ss.get("hold_bear")) if bull is not None else None, "regime": "多頭" if bull else "空頭", "bounce3": ss.get("bounce3_after_hold"), "break3": ss.get("break3_after_fail"), "n": ss.get("n_tested")})
     out["supports"].sort(key=lambda x: -x["level"])
     return out
+
+
+def _in_bin(b: str, p: float) -> bool:
+    try:
+        lo, hi = b.strip("()[]").split(",")
+        return float(lo) < p <= float(hi)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def client_table() -> dict | None:

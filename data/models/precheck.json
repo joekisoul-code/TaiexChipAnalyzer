@@ -1,5 +1,5 @@
 {
- "trained_at": "2026-09-23 23:29:24",
+ "trained_at": "2026-09-24 08:46:20",
  "gap": {
   "edges": [
    -1.5,
@@ -34,7 +34,16 @@
     "p_up_close": 0.0,
     "range_mean": 2.53,
     "cont_yr_cons": 0.67,
-    "years": 3
+    "years": 3,
+    "hold_yr_min": null,
+    "hold_yr_max": null,
+    "hold_years": 0,
+    "hold_recent": 1.0,
+    "n_recent": 8,
+    "dip_hold_q20": -2.97,
+    "dip_hold_q50": -1.47,
+    "pop_hold_q50": 0.35,
+    "dip_fail_q50": null
    },
    "1|bear": {
     "label": "開低 (-1.5~-0.5%)",
@@ -51,7 +60,16 @@
     "p_up_close": 0.15,
     "range_mean": 1.57,
     "cont_yr_cons": 0.79,
-    "years": 14
+    "years": 14,
+    "hold_yr_min": 0.67,
+    "hold_yr_max": 1.0,
+    "hold_years": 11,
+    "hold_recent": 0.864,
+    "n_recent": 22,
+    "dip_hold_q20": -1.55,
+    "dip_hold_q50": -0.99,
+    "pop_hold_q50": 0.16,
+    "dip_fail_q50": -0.5
    },
    "1|bull": {
     "label": "開低 (-1.5~-0.5%)",
@@ -68,7 +86,16 @@
     "p_up_close": 0.078,
     "range_mean": 1.12,
     "cont_yr_cons": 0.75,
-    "years": 16
+    "years": 16,
+    "hold_yr_min": 0.78,
+    "hold_yr_max": 1.0,
+    "hold_years": 7,
+    "hold_recent": 0.911,
+    "n_recent": 45,
+    "dip_hold_q20": -1.23,
+    "dip_hold_q50": -0.66,
+    "pop_hold_q50": 0.19,
+    "dip_fail_q50": -0.23
    },
    "2|bear": {
     "label": "小幅開低 (-0.5~-0.15%)",
@@ -85,7 +112,16 @@
     "p_up_close": 0.241,
     "range_mean": 1.29,
     "cont_yr_cons": 0.8,
-    "years": 15
+    "years": 15,
+    "hold_yr_min": 0.58,
+    "hold_yr_max": 0.9,
+    "hold_years": 13,
+    "hold_recent": 0.875,
+    "n_recent": 24,
+    "dip_hold_q20": -1.56,
+    "dip_hold_q50": -0.88,
+    "pop_hold_q50": 0.17,
+    "dip_fail_q50": -0.36
    },
    "2|bull": {
     "label": "小幅開低 (-0.5~-0.15%)",
@@ -102,7 +138,16 @@
     "p_up_close": 0.232,
     "range_mean": 0.94,
     "cont_yr_cons": 0.82,
-    "years": 17
+    "years": 17,
+    "hold_yr_min": 0.58,
+    "hold_yr_max": 0.93,
+    "hold_years": 17,
+    "hold_recent": 0.78,
+    "n_recent": 82,
+    "dip_hold_q20": -1.08,
+    "dip_hold_q50": -0.59,
+    "pop_hold_q50": 0.14,
+    "dip_fail_q50": -0.18
    },
    "3|bear": {
     "label": "平盤附近 (±0.15%)",
@@ -119,7 +164,16 @@
     "p_up_close": 0.457,
     "range_mean": 1.04,
     "cont_yr_cons": 0.65,
-    "years": 17
+    "years": 17,
+    "hold_yr_min": 0.38,
+    "hold_yr_max": 0.75,
+    "hold_years": 16,
+    "hold_recent": 0.697,
+    "n_recent": 33,
+    "dip_hold_q20": -0.9,
+    "dip_hold_q50": -0.38,
+    "pop_hold_q50": 0.39,
+    "dip_fail_q50": -0.46
    },
    "3|bull": {
     "label": "平盤附近 (±0.15%)",
@@ -136,7 +190,16 @@
     "p_up_close": 0.518,
     "range_mean": 0.83,
     "cont_yr_cons": 0.71,
-    "years": 17
+    "years": 17,
+    "hold_yr_min": 0.47,
+    "hold_yr_max": 0.71,
+    "hold_years": 17,
+    "hold_recent": 0.59,
+    "n_recent": 139,
+    "dip_hold_q20": -0.69,
+    "dip_hold_q50": -0.3,
+    "pop_hold_q50": 0.29,
+    "dip_fail_q50": -0.39
    },
    "4|bear": {
     "label": "小幅開高 (0.15~0.5%)",
@@ -153,7 +216,16 @@
     "p_up_close": 0.748,
     "range_mean": 1.05,
     "cont_yr_cons": 0.88,
-    "years": 17
+    "years": 17,
+    "hold_yr_min": 0.62,
+    "hold_yr_max": 0.91,
+    "hold_years": 17,
+    "hold_recent": 0.711,
+    "n_recent": 38,
+    "dip_hold_q20": -0.45,
+    "dip_hold_q50": -0.14,
+    "pop_hold_q50": 0.64,
+    "dip_fail_q50": -0.86
    },
    "4|bull": {
     "label": "小幅開高 (0.15~0.5%)",
@@ -170,7 +242,16 @@
     "p_up_close": 0.733,
     "range_mean": 0.9,
     "cont_yr_cons": 0.71,
-    "years": 17
+    "years": 17,
+    "hold_yr_min": 0.48,
+    "hold_yr_max": 0.87,
+    "hold_years": 17,
+    "hold_recent": 0.793,
+    "n_recent": 116,
+    "dip_hold_q20": -0.39,
+    "dip_hold_q50": -0.14,
+    "pop_hold_q50": 0.5,
+    "dip_fail_q50": -0.77
    },
    "5|bear": {
     "label": "開高 (0.5~1.5%)",
@@ -187,7 +268,16 @@
     "p_up_close": 0.848,
     "range_mean": 1.3,
     "cont_yr_cons": 0.93,
-    "years": 15
+    "years": 15,
+    "hold_yr_min": 0.73,
+    "hold_yr_max": 0.96,
+    "hold_years": 12,
+    "hold_recent": 0.882,
+    "n_recent": 51,
+    "dip_hold_q20": -0.54,
+    "dip_hold_q50": -0.17,
+    "pop_hold_q50": 0.72,
+    "dip_fail_q50": -1.45
    },
    "5|bull": {
     "label": "開高 (0.5~1.5%)",
@@ -204,7 +294,16 @@
     "p_up_close": 0.901,
     "range_mean": 1.0,
     "cont_yr_cons": 0.65,
-    "years": 17
+    "years": 17,
+    "hold_yr_min": 0.75,
+    "hold_yr_max": 1.0,
+    "hold_years": 14,
+    "hold_recent": 0.896,
+    "n_recent": 77,
+    "dip_hold_q20": -0.49,
+    "dip_hold_q50": -0.2,
+    "pop_hold_q50": 0.56,
+    "dip_fail_q50": -1.04
    },
    "6|bear": {
     "label": "大幅開高 (>1.5%)",
@@ -221,14 +320,38 @@
     "p_up_close": 1.0,
     "range_mean": 1.92,
     "cont_yr_cons": 1.0,
-    "years": 3
+    "years": 3,
+    "hold_yr_min": 1.0,
+    "hold_yr_max": 1.0,
+    "hold_years": 1,
+    "hold_recent": 1.0,
+    "n_recent": 13,
+    "dip_hold_q20": -0.47,
+    "dip_hold_q50": -0.05,
+    "pop_hold_q50": 1.16,
+    "dip_fail_q50": null
    }
   },
   "night_beta": {
    "beta": 0.526,
+   "beta_recent": 0.357,
    "n": 2279,
    "resid_sd": 0.367,
-   "r2": 0.557
+   "r2": 0.557,
+   "by_year": {
+    "2017": 0.666,
+    "2018": 0.594,
+    "2019": 0.572,
+    "2020": 0.604,
+    "2021": 0.514,
+    "2022": 0.57,
+    "2023": 0.441,
+    "2024": 0.649,
+    "2025": 0.684,
+    "2026": 0.313
+   },
+   "dir_agree_big": 0.958,
+   "n_big": 850
   }
  },
  "calendar": {

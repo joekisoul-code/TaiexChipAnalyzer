@@ -67,16 +67,24 @@ def train(scored: pd.DataFrame, write: bool = True, verbose: bool = True) -> dic
     g["fill"] = np.where(up, g["low"] <= g["prev"], g["high"] >= g["prev"])
     g["cont"] = np.where(up, g["close"] > g["open"], np.where(g["gap"] < 0, g["close"] < g["open"], g["close"] > g["open"]))
     g["hold"] = np.where(up, g["close"] > g["prev"], np.where(g["gap"] < 0, g["close"] < g["prev"], g["close"] > g["prev"]))
+    g["dip"] = (g["low"] / g["open"] - 1) * 100; g["pop"] = (g["high"] / g["open"] - 1) * 100
     for (b, bull), gg in g.groupby(["bucket", "bull"]):
         if len(gg) < 20:
             continue
         yr = gg.groupby("year")["cont"].mean(); yr = yr[gg.groupby("year").size() >= 5]
         cont = float(gg["cont"].mean())
+        hy = gg.groupby("year")["hold"].agg(["mean", "size"]); hy = hy[hy["size"] >= 8]
+        hd = gg[gg["hold"] == True]  # noqa: E712
+        extra_ = {"hold_yr_min": round(float(hy["mean"].min()), 2) if len(hy) else None, "hold_yr_max": round(float(hy["mean"].max()), 2) if len(hy) else None, "hold_years": int(len(hy)),
+                  "hold_recent": round(float(gg[gg["year"] >= gg["year"].max() - 2]["hold"].mean()), 3), "n_recent": int((gg["year"] >= gg["year"].max() - 2).sum()),
+                  "dip_hold_q20": round(float(hd["dip"].quantile(0.2)), 2) if len(hd) >= 10 else None, "dip_hold_q50": round(float(hd["dip"].median()), 2) if len(hd) >= 10 else None,
+                  "pop_hold_q50": round(float(hd["pop"].median()), 2) if len(hd) >= 10 else None,
+                  "dip_fail_q50": round(float(gg[gg["hold"] == False]["dip"].median()), 2) if (gg["hold"] == False).sum() >= 10 else None}  # noqa: E712
         out["gap"]["cells"][f"{int(b)}|{'bull' if bull else 'bear'}"] = {
             "label": GAP_LABELS[int(b)], "regime": "多頭 (前收在月線上)" if bull else "空頭 (前收在月線下)", "n": int(len(gg)), "p_fill": round(float(gg["fill"].mean()), 3), "p_cont": round(cont, 3),
             "p_hold": round(float(gg["hold"].mean()), 3), "intra_mean": round(float(gg["intra"].mean()), 3), "intra_med": round(float(gg["intra"].median()), 3), "intra_p20": round(float(gg["intra"].quantile(0.2)), 2), "intra_p80": round(float(gg["intra"].quantile(0.8)), 2),
             "ret_mean": round(float(gg["ret"].mean()), 3), "p_up_close": round(float((gg["ret"] > 0).mean()), 3), "range_mean": round(float(gg["rng"].mean()), 2),
-            "cont_yr_cons": round(float(((yr >= 0.5) == (cont >= 0.5)).mean()), 2) if len(yr) else None, "years": int(len(yr))}
+            "cont_yr_cons": round(float(((yr >= 0.5) == (cont >= 0.5)).mean()), 2) if len(yr) else None, "years": int(len(yr)), **extra_}
     # 夜盤 → 跳空 β (2020~ 有夜盤資料的日子)
     try:
         from . import short_term as ST
@@ -88,7 +96,12 @@ def train(scored: pd.DataFrame, write: bool = True, verbose: bool = True) -> dic
                 x, y = m["night_chg_pct"].values, m["gap"].values
                 beta = float(np.dot(x - x.mean(), y - y.mean()) / np.dot(x - x.mean(), x - x.mean()))
                 resid = y - beta * x
-                out["gap"]["night_beta"] = {"beta": round(beta, 3), "n": int(len(m)), "resid_sd": round(float(resid.std()), 3), "r2": round(float(1 - resid.var() / y.var()), 3)}
+                mr = m.tail(250); xr, yr_ = mr["night_chg_pct"].values, mr["gap"].values
+                beta_r = float(np.dot(xr - xr.mean(), yr_ - yr_.mean()) / np.dot(xr - xr.mean(), xr - xr.mean())) if len(mr) >= 120 else beta
+                by_year = {int(yv): round(float(np.dot(gg["night_chg_pct"] - gg["night_chg_pct"].mean(), gg["gap"] - gg["gap"].mean()) / np.dot(gg["night_chg_pct"] - gg["night_chg_pct"].mean(), gg["night_chg_pct"] - gg["night_chg_pct"].mean())), 3) for yv, gg in m.groupby(m["date"].str[:4]) if len(gg) >= 60}
+                big = np.abs(x) > 0.5
+                out["gap"]["night_beta"] = {"beta": round(beta, 3), "beta_recent": round(beta_r, 3), "n": int(len(m)), "resid_sd": round(float(resid.std()), 3), "r2": round(float(1 - resid.var() / y.var()), 3),
+                                            "by_year": by_year, "dir_agree_big": round(float((np.sign(x[big]) == np.sign(y[big])).mean()), 3), "n_big": int(big.sum())}
     except Exception as e:  # noqa: BLE001
         log.warning("night beta: %s", e)
     # 日曆效應
@@ -140,12 +153,13 @@ def build(scored: pd.DataFrame, snap: dict | None, fc: dict | None) -> dict | No
         except Exception:  # noqa: BLE001
             nv, why = None, None
         nb = (st.get("gap") or {}).get("night_beta") or {}
-        if nv is not None and nb.get("beta") is not None:
-            est, src = nb["beta"] * float(np.clip(nv, -8, 8)), f"夜盤 {nv:+.2f}% × β {nb['beta']} (R² {nb.get('r2')})"
+        bu = nb.get("beta_recent") or nb.get("beta")   # 2026-09-24：β 逐年 0.31~0.68 (2026 只 0.31)，改用近 250 日 β
+        if nv is not None and bu is not None:
+            est, src = bu * float(np.clip(nv, -8, 8)), f"夜盤 {nv:+.2f}% × 近一年 β {bu} (全期 {nb.get('beta')}，R² {nb.get('r2')})"
         else:
             tn = snap.get("tx_night") or {}
-            if tn.get("change_pct") is not None and nb.get("beta") is not None and snap.get("phase") == "night":
-                est, src = nb["beta"] * float(np.clip(float(tn["change_pct"]), -8, 8)), f"夜盤進行中 {float(tn['change_pct']):+.2f}% × β {nb['beta']} (暫定)"
+            if tn.get("change_pct") is not None and bu is not None and snap.get("phase") == "night":
+                est, src = bu * float(np.clip(float(tn["change_pct"]), -8, 8)), f"夜盤進行中 {float(tn['change_pct']):+.2f}% × 近一年 β {bu} (暫定)"
     if est is not None:
         b = int(np.searchsorted(GAP_EDGES, est, side="right"))
         cell = (st["gap"]["cells"] or {}).get(f"{b}|{'bull' if bull else 'bear'}") or {}
@@ -156,10 +170,14 @@ def build(scored: pd.DataFrame, snap: dict | None, fc: dict | None) -> dict | No
                       f"當日回補跳空 (反彈到前收) 機率 {cell['p_fill']:.0%}、收盤低於開盤 (續跌) {cell['p_cont']:.0%}、收盤仍低於前收 {cell['p_hold']:.0%}" if dn else
                       f"收盤高於開盤 {cell['p_cont']:.0%}")
                    + f"；日內 (開→收) 平均 {cell['intra_mean']:+.2f}% (兩成~八成 {cell['intra_p20']:+.2f}~{cell['intra_p80']:+.2f}%)、收盤上漲率 {cell['p_up_close']:.0%}、平均振幅 {cell['range_mean']:.2f}%")
+            if cell.get("dip_hold_q50") is not None and (up or dn):
+                txt += f"；守住日的日內回檔中位 {cell['dip_hold_q50']:+.2f}%、兩成 {cell['dip_hold_q20']:+.2f}% (未守住日中位 {cell['dip_fail_q50']:+.2f}%)"
+            if cell.get("hold_years"):
+                txt += f"；守住率逐年 {cell['hold_yr_min']:.0%}~{cell['hold_yr_max']:.0%} ({cell['hold_years']} 年)，近三年 {cell['hold_recent']:.0%} (n={cell['n_recent']})"
             if up and cell["p_fill"] >= 0.5:
                 txt += " → 開高後多半會回測前收，不追開盤價，等回補再看是否守住"
             elif up and cell["p_hold"] >= 0.6:
-                txt += " → 開高守住機率高，回落不深即為進場點"
+                txt += f" → 開高守住機率高，開盤價下 {abs(cell.get('dip_hold_q50') or 0.2):.1f}~{abs(cell.get('dip_hold_q20') or 0.5):.1f}% 的小回檔即為進場點，跌破開盤 1.3% 以上視為守不住"
             elif dn and cell["p_fill"] >= 0.5:
                 txt += " → 開低多半會反彈到前收附近，開盤殺低是短線買點"
             elif dn and cell["p_hold"] >= 0.6:
