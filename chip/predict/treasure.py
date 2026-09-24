@@ -110,6 +110,14 @@ def build_panel(n_twse: int = 170, n_tpex: int = 60, start: str = "2019-01-01") 
         codes += [c for c, _ in sorted(rows, key=lambda x: -x[1])[:n_tpex]]
     except Exception as e:  # noqa: BLE001
         log.warning("tpex list: %s", e)
+    if len(codes) < 50:   # GitHub Actions 連不到 TWSE/TPEx openapi (2026-09-24 實測) → 用上次訓練存下的股票清單
+        prev = (M.load_json("treasure_model") or {}).get("universe") or []
+        if prev:
+            log.warning("treasure universe: openapi 失敗，改用模型檔內的 %d 檔清單", len(prev))
+            codes = list(prev)
+        else:
+            from ..realtime import LARGE_CAPS
+            codes = list(LARGE_CAPS)
     frames = []
     for c in dict.fromkeys(codes):
         for _ in range(3):
@@ -177,7 +185,7 @@ def train(panel: pd.DataFrame | None = None, write: bool = True, verbose: bool =
     imp = fm.booster_.feature_importance("gain"); imp = imp / imp.sum()
     out = {"trained_at": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M:%S"), "features": FEATS, "init": float(fm.booster_.dump_model().get("average_output", 0) or 0),
            "trees": _dump_trees(fm.booster_), "th_A": round(th_final, 4), "gate": {"m_bias20_lt": GATE_MBIAS, "note": "A 級需大盤在月線下；大盤在月線上的高分股標 B+"}, "n_rows": int(len(D)), "n_stocks": int(D["code"].nunique()),
-           "importance": sorted(({"f": f, "w": round(float(w), 3)} for f, w in zip(FEATS, imp)), key=lambda z: -z["w"])[:10],
+           "universe": sorted(D["code"].unique().tolist()), "importance": sorted(({"f": f, "w": round(float(w), 3)} for f, w in zip(FEATS, imp)), key=lambda z: -z["w"])[:10],
            "oos": res, "def": {"H": H, "target": TGT, "stop": STOP, "rel": REL}}
     # 自檢：JSON 樹與 LightGBM 預測一致
     raw = np.array([_eval(out, r) for r in D[FEATS].tail(200).values])

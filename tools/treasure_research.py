@@ -1,4 +1,4 @@
-"""挖寶雷達 A 級研究 (雲端用，需 FINMIND_TOKEN)：法人買賣超 / 月營收 是否提高 A 級命中。
+"""挖寶雷達 A 級研究 (需 FINMIND_TOKEN：repo Secret 目前為空，免費額度約每小時 300~600 次)：法人買賣超 / 月營收 是否提高 A 級命中。
 用法：python tools/treasure_research.py  → 結果印出並寫 research_out/treasure_research.json (workflow research 模式上傳為 artifact)。
 比較 (同一批股票、2022~ 逐年走動式、每日掃描前 40 取前 6、30 天去重)：
   V0 = 現行 24 特徵；V3 = V0 + 外資/投信/合計 5、20 日買賣超 (÷20 日均量) + 營收年增 (單月、近 3 月)。
@@ -41,6 +41,9 @@ def get(fn, c):
     return pd.DataFrame()
 
 
+if not os.getenv("FINMIND_TOKEN"):
+    say("FINMIND_TOKEN 未設定：無 token 時 FinMind 每小時額度不足以下載 150 檔 × 3 種資料，研究中止。請在 repo Settings → Secrets 新增 FINMIND_TOKEN 後再跑 research 模式。")
+    (OUT / "treasure_research.json").write_text(json.dumps({"error": "no FINMIND_TOKEN", "log": log}, ensure_ascii=False), encoding="utf-8"); sys.exit(0)
 P = T.build_panel(N_TWSE, N_TPEX)
 codes = P["code"].unique().tolist(); say("panel", len(codes), "stocks", len(P), "rows", round(time.time() - t0), "s")
 inst, rev = [], []
