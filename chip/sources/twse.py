@@ -213,7 +213,8 @@ def holidays(year: int | None = None) -> set[str]:
     def load():
         j = get_json(f"{BASE}/holidaySchedule/holidaySchedule", params={"response": "json", "queryYear": str(year - 1911) if year else ""})
         if not isinstance(j, dict) or j.get("stat", "").lower() != "ok":
-            return []
+            # 丟例外而不是回 []：避免把「還沒公布/暫時失敗」當成「沒有休市日」快取 12 小時 (選擇權剩餘天數會高估、IV 低估)
+            raise RuntimeError(f"holidaySchedule {year}: {j.get('stat') if isinstance(j, dict) else type(j)}")
         out = []
         for r in j["data"]:
             name, desc = r[1], r[2]
@@ -228,11 +229,20 @@ def holidays(year: int | None = None) -> set[str]:
 def next_trading_days(from_date: str, n: int = 3) -> list[str]:
     """from_date 之後的 n 個交易日 (跳過週末與休市日)。"""
     d = dt.date.fromisoformat(from_date)
-    hol = holidays(d.year) | holidays(d.year + 1)
+    hol_by_year: dict[int, set[str]] = {}
+
+    def hol(y: int) -> set[str]:
+        if y not in hol_by_year:
+            try:
+                hol_by_year[y] = holidays(y)
+            except Exception as e:  # noqa: BLE001   休市表抓不到/尚未公布 → 只跳週末 (與舊行為相同；需要嚴格日曆的呼叫端先自行呼叫 holidays())
+                log.warning("holidays %s unavailable, weekends only: %s", y, e)
+                hol_by_year[y] = set()
+        return hol_by_year[y]
     out = []
     while len(out) < n:
         d += dt.timedelta(days=1)
-        if d.weekday() < 5 and d.isoformat() not in hol:
+        if d.weekday() < 5 and d.isoformat() not in hol(d.year):
             out.append(d.isoformat())
     return out
 

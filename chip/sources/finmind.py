@@ -56,8 +56,8 @@ def fetch(dataset: str, data_id: str | None = None, start_date: str | None = Non
 
 
 # ---------------------------------------------------------------- 大盤序列
-def taiex_price(start: str | None = None) -> pd.DataFrame:
-    df = fetch("TaiwanStockPrice", "TAIEX", start)
+def taiex_price(start: str | None = None, ttl: int = config.TTL_HISTORY) -> pd.DataFrame:
+    df = fetch("TaiwanStockPrice", "TAIEX", start, ttl=ttl)
     if df.empty:
         return df
     df = df.rename(columns={"max": "high", "min": "low", "Trading_money": "amount_raw",
@@ -127,8 +127,8 @@ def tx_night_history(start: str | None = None) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------- 個股序列
-def stock_price(stock_id: str, start: str | None = None) -> pd.DataFrame:
-    df = fetch("TaiwanStockPrice", stock_id, start)
+def stock_price(stock_id: str, start: str | None = None, ttl: int = config.TTL_HISTORY) -> pd.DataFrame:
+    df = fetch("TaiwanStockPrice", stock_id, start, ttl=ttl)
     if df.empty:
         return df
     df = df.rename(columns={"max": "high", "min": "low", "Trading_money": "amount",

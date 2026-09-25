@@ -282,7 +282,7 @@ def main() -> None:
     else:
         # fast 模式不重算追蹤清單/國際研究；Pages 部署是整站覆蓋 (force_orphan)，若不把上次發布的檔案帶回來，
         # 盤中每 5 分鐘一次的 fast 會把 watchlist.json / global.json 洗掉 (SKYNET 個股籌碼成本會 404)
-        for name in ("watchlist", "global"):
+        for name in ("watchlist", "global", "desk", "desk_archive"):
             if not (DATA / f"{name}.json").exists():
                 try:
                     r = requests.get(gov8.PAGES_URL.rstrip("/") + f"/data/{name}.json", timeout=20)
@@ -296,6 +296,40 @@ def main() -> None:
         dump("gov8", gov8.build(scored, res))
     except Exception as e:  # noqa: BLE001
         print("  gov8 failed:", e)
+    # 操盤台 (2026-09-25)：0050/00631L/00663L/00981A/2330/065423 的均線、選擇權回檔機率帶、高低點承接價、價位帶、回撤控制價位、
+    # 資金防守、八大行庫歸檔、00981A 持股、權證、2330 ADR。完整模式重算；fast 模式只在清晨 (美股收盤後，更新 ADR) 重算，其餘沿用上次發布
+    if not args.fast or time.localtime().tm_hour < 9:
+        try:
+            from chip.analysis import desk
+            d_desk, d_arch = desk.build()
+            dump("desk", d_desk)
+            dump("desk_archive", {k: v for k, v in d_arch.items() if not k.startswith("_")})
+            print(f"  desk: {len(d_desk.get('instruments') or {})} instruments, opt {((d_desk.get('opt') or {}).get('date'))}")
+        except Exception as e:  # noqa: BLE001
+            print("  desk failed:", e)
+            # 完整模式沒有前一步的 carry-over → 失敗時把上次發布的 desk/desk_archive 帶回 (Pages 整站覆蓋，不帶就會消失)
+            for name in ("desk", "desk_archive"):
+                if (DATA / f"{name}.json").exists():
+                    continue
+                for base in (gov8.PAGES_URL.rstrip("/") + "/data/", "https://raw.githubusercontent.com/joekisoul-code/TaiexChipAnalyzer/gh-pages/data/"):
+                    try:
+                        r = requests.get(base + f"{name}.json", timeout=30)
+                        if r.ok and r.text.strip().startswith("{"):
+                            (DATA / f"{name}.json").write_text(r.text, encoding="utf-8")
+                            print(f"  carried over {name}.json")
+                            break
+                    except Exception as e2:  # noqa: BLE001
+                        print(f"  carry {name} failed:", e2)
+                if name == "desk_archive" and not (DATA / "desk_archive.json").exists():
+                    try:
+                        from chip.analysis import desk as _dk
+                        for src in (_dk.LOCAL_ARCHIVE, _dk._repo_archive_path()):
+                            if src.exists():
+                                shutil.copy(src, DATA / "desk_archive.json")
+                                print("  desk_archive from local backup", src)
+                                break
+                    except Exception as e3:  # noqa: BLE001
+                        print("  desk_archive local backup failed:", e3)
     dump("status", {"ready": True, "updated": time.strftime("%Y-%m-%d %H:%M:%S"), "mode": "fast" if args.fast else "full", "seconds": round(time.time() - t0)})
     print(f"done in {time.time() - t0:.0f}s → {SITE}")
 

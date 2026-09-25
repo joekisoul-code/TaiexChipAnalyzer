@@ -27,8 +27,14 @@ def _ms(v) -> str:
 
 
 # ------------------------------------------------------------------ 資料組裝
-def adjust_splits(price: pd.DataFrame) -> tuple[pd.DataFrame, list[dict]]:
-    """偵測分割/反分割 (相鄰收盤比值 >2.5 或 <0.4)，把之前的價格除以倍數、成交量乘以倍數 (FinMind 為未還原價)。"""
+# 已知分割 (分割日 → 倍數)：分割日當天的漲跌會讓「收盤比值四捨五入」猜錯倍數 (00631L 1拆22 當天 -4.4% → 比值 23.0)，
+# 已知的以此為準 (以追蹤指數同期報酬反推驗證，2026-09-25)
+KNOWN_SPLITS = {"0050": {"2025-06-18": 4.0}, "00631L": {"2026-03-31": 22.0}, "00663L": {"2025-06-11": 7.0}}
+
+
+def adjust_splits(price: pd.DataFrame, stock_id: str | None = None) -> tuple[pd.DataFrame, list[dict]]:
+    """偵測分割/反分割 (相鄰收盤比值 >2.5 或 <0.4)，把之前的價格除以倍數、成交量乘以倍數 (FinMind 為未還原價)。
+    stock_id 在 KNOWN_SPLITS 且日期相符時用已知倍數。"""
     if price.empty or len(price) < 3:
         return price, []
     p = price.copy().reset_index(drop=True)
@@ -39,6 +45,7 @@ def adjust_splits(price: pd.DataFrame) -> tuple[pd.DataFrame, list[dict]]:
         if pd.notna(r) and (r < 0.4 or r > 2.5):
             factor = round(1 / r) if r < 0.4 else 1 / round(r)     # 分割 1:N → factor = N；反分割 → 1/N
             factor = float(factor) if factor else 1.0
+            factor = KNOWN_SPLITS.get(str(stock_id or ""), {}).get(str(p.at[i, "date"])[:10], factor)
             for c in ("open", "high", "low", "close"):
                 p.loc[: i - 1, c] = p.loc[: i - 1, c] / factor
             for c in ("volume", "volume_lots"):
@@ -52,7 +59,7 @@ def load(stock_id: str, wg: dict | None = None) -> dict:
     """回傳 {'price': DataFrame(date, open, high, low, close, volume_lots), 'flows': DataFrame(date, foreign, trust, dealer, main, gov8, margin_chg, short, sbl),
     'concentration': DataFrame(weekly), 'broker': list, 'margin': DataFrame, 'shareholding': DataFrame}"""
     price = finmind.stock_price(stock_id, (dt.date.today() - dt.timedelta(days=400)).isoformat())
-    price, splits = adjust_splits(price)
+    price, splits = adjust_splits(price, stock_id)
     out: dict = {"stock_id": stock_id, "price": price, "splits": splits}
     flows = price[["date", "close"]].copy() if not price.empty else pd.DataFrame(columns=["date", "close"])
     # 法人 (FinMind，含 ETF)
