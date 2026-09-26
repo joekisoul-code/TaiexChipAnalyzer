@@ -17,12 +17,13 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import math
+import time
 
 import numpy as np
 import pandas as pd
 
 from .. import config
-from ..http import cached, num
+from ..http import cached, num, session
 from . import twse
 from .taifex import _iso, _rows
 
@@ -70,7 +71,8 @@ def implied_vol(price, F, K, T, cp, r=R, lo=0.01, hi=3.0, it=60):
 # ------------------------------------------------------------------ 資料
 def daily_report() -> pd.DataFrame:
     """TXO 一般時段最新一日：date, series, strike, cp(C/P), settle, oi, volume, close, bid, ask。"""
-    rows = cached("taifex:opt_daily", config.TTL_INTRADAY, lambda: _rows("DailyMarketReportOpt", OPT_KEYS))
+    # OpenAPI 前面有 Cloudflare 快取 (Age 可達 1 小時)；加時間戳參數繞過
+    rows = cached("taifex:opt_daily", config.TTL_INTRADAY, lambda: _rows(f"DailyMarketReportOpt?_={int(time.time())}", OPT_KEYS))
     out = []
     for r in rows:
         if (r.get("Contract") or "").strip() != "TXO" or (r.get("TradingSession") or "").strip() != "一般":
@@ -166,9 +168,45 @@ def _cm(ss: pd.DataFrame, col: str, target: int, var: bool = True) -> float | No
     return float(w * v1 + (1 - w) * v2)
 
 
-def features(df: pd.DataFrame | None = None) -> dict:
-    """最新一日 TXO 特徵。失敗回 {}。"""
-    df = daily_report() if df is None else df
+def daily_download(date: str) -> pd.DataFrame:
+    """備援：期交所「每日行情下載」(www.taifex.com.tw/cht/3/dlOptDataDown，Big5 CSV) 取指定日 TXO 一般時段。OpenAPI 只給最新一日且可能晚更新。"""
+    def load():
+        d = date.replace("-", "/")
+        r = session().post("https://www.taifex.com.tw/cht/3/dlOptDataDown", timeout=120,
+                           data={"down_type": "1", "commodity_id": "TXO", "commodity_id2": "", "queryStartDate": d, "queryEndDate": d},
+                           headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.taifex.com.tw/cht/3/dlOptDailyMarketView"})
+        if r.status_code != 200 or "attachment" not in (r.headers.get("content-disposition") or ""):
+            raise RuntimeError(f"dlOptDataDown {date}: HTTP {r.status_code} (非附件)")
+        txt = r.content.decode("big5", errors="replace")
+        out = []
+        for line in txt.splitlines():
+            c = [x.strip() for x in line.rstrip(",").split(",")]
+            if len(c) < 18 or not c[0][:1].isdigit() or c[1] != "TXO" or c[17] != "一般":
+                continue
+            out.append({"date": c[0].replace("/", "-"), "series": c[2], "strike": num(c[3]), "cp": "C" if c[4] == "買權" else "P",
+                        "settle": num(c[10]), "oi": num(c[11]), "volume": num(c[9]), "close": num(c[8]), "bid": num(c[12]), "ask": num(c[13])})
+        if not out:
+            raise RuntimeError(f"dlOptDataDown {date}: 無 TXO 一般時段資料")
+        return out
+    return pd.DataFrame(cached(f"taifex:opt_dl:{date}", config.TTL_HISTORY, load))
+
+
+def features(df: pd.DataFrame | None = None, expect: str | None = None) -> dict:
+    """最新一日 TXO 特徵。expect = 應有的資料日 (最後交易日)；OpenAPI 落後時改抓期交所下載檔。失敗回 {}。"""
+    src = "OpenAPI"
+    if df is None:
+        try:
+            df = daily_report()
+        except Exception as e:  # noqa: BLE001
+            log.warning("TXO OpenAPI: %s", e)
+            df = pd.DataFrame()
+        if expect and (df.empty or str(df["date"].max()) < expect):
+            try:
+                d2 = daily_download(expect)
+                if not d2.empty:
+                    df, src = d2, "dlOptDataDown"
+            except Exception as e:  # noqa: BLE001
+                log.warning("TXO download fallback: %s", e)
     if df is None or df.empty:
         return {}
     date = str(df["date"].max())
@@ -207,7 +245,7 @@ def features(df: pd.DataFrame | None = None) -> dict:
     ss = pd.DataFrame([_series_stats(g) for _, g in live.groupby("series")])
     if ss.empty:
         return {}
-    out: dict = {"date": date, "generated": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M"), "calendar_fallback": cal_fb}
+    out: dict = {"date": date, "generated": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M"), "calendar_fallback": cal_fb, "source": src}
     for t in (5, 21, 42):
         out[f"iv{t}"] = _cm(ss, "atm", t)
     # 固定天期 k (交易日) 的 ATM IV：desk 區間用 (k 日路徑高低分位 = 乘數 × ivk/√252)

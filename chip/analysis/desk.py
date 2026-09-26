@@ -29,8 +29,8 @@ import pandas as pd
 
 from .. import config
 from ..http import cached, session
-from ..sources import finmind, global_markets, histock, taifex_opt, twse
-from . import chips, gov8_dist
+from ..sources import exdiv, finmind, global_markets, histock, taifex_opt, twse
+from . import chips, desk_bands, gov8_dist
 
 log = logging.getLogger(__name__)
 PAGES_URL = "https://joekisoul-code.github.io/TaiexChipAnalyzer/"
@@ -46,6 +46,10 @@ GOV8_IDS = ["0050", "00631L", "00663L", "00981A", "2330"]
 MAS = (5, 10, 30, 60)
 ARCHIVE_MAX = 1500
 OPT_HIST_MAX = 3000
+LEDGER_MAX_DAYS = 400                       # 機率帶上線帳本保留的發布日數
+LEDGER_KS = (1, 5, 20)
+QS = ("low10", "low20", "high80", "high90")
+Q_NOMINAL = {"low10": 0.10, "low20": 0.20, "high80": 0.20, "high90": 0.10}   # 名目觸及率
 ACCOUNT, RISK_R = 10_000_000, 0.01          # 部位大小示例：帳戶 1,000 萬、單筆風險 1%
 VOL_TARGETS = (0.15, 0.20)
 R_F = 0.017
@@ -87,7 +91,7 @@ LOCAL_ARCHIVE = config.CACHE_DIR / "desk_archive.json"      # Actions 的 data/c
 def _merge_archives(a: dict, b: dict) -> dict:
     """兩份歸檔取聯集 (同日期以 a 為準)；避免任一來源讀不到時歷史被洗掉。"""
     a, b = a or {}, b or {}
-    out = {"gov8": {}, "opt_hist": [], "opt_last": None, "holdings_00981A": {}}
+    out = {"gov8": {}, "opt_hist": [], "opt_last": None, "holdings_00981A": {}, "band_ledger": [], "exdiv": {}, "fresh_log": []}
     for sid in set((a.get("gov8") or {}).keys()) | set((b.get("gov8") or {}).keys()):
         rows = {r["date"]: r for r in ((b.get("gov8") or {}).get(sid) or []) if r.get("date")}
         rows.update({r["date"]: r for r in ((a.get("gov8") or {}).get(sid) or []) if r.get("date")})
@@ -97,6 +101,13 @@ def _merge_archives(a: dict, b: dict) -> dict:
     out["opt_hist"] = [oh[d] for d in sorted(oh)]
     la, lb = a.get("opt_last") or {}, b.get("opt_last") or {}
     out["opt_last"] = la if str(la.get("date") or "") >= str(lb.get("date") or "") else lb
+    bl = {(r.get("date"), r.get("sid"), r.get("k")): r for r in (b.get("band_ledger") or []) if r.get("date")}
+    bl.update({(r.get("date"), r.get("sid"), r.get("k")): r for r in (a.get("band_ledger") or []) if r.get("date")})
+    out["band_ledger"] = [bl[k] for k in sorted(bl)]
+    ea, eb = a.get("exdiv") or {}, b.get("exdiv") or {}
+    out["exdiv"] = {**eb, **{k: v for k, v in ea.items() if str((v or {}).get("asof") or "") >= str((eb.get(k) or {}).get("asof") or "")}}
+    fl = {(r.get("run"), r.get("src")): r for r in (b.get("fresh_log") or []) + (a.get("fresh_log") or []) if r.get("run")}
+    out["fresh_log"] = [fl[k] for k in sorted(fl)][-600:]
     ha, hb = a.get("holdings_00981A") or {}, b.get("holdings_00981A") or {}
     out["holdings_00981A"] = ha if str((ha.get("last") or {}).get("date") or "") >= str((hb.get("last") or {}).get("date") or "") else hb
     return out
@@ -414,7 +425,8 @@ def defense_block(meta: dict, adj: pd.Series, dates: pd.Series, tw: pd.DataFrame
 
 
 # ------------------------------------------------------------------ 4. 選擇權 iv → k 日高低點機率帶 (回檔低點)
-def range_block(meta: dict | None, close: float, beta: float | None, idio: float | None, opt: dict, ev: dict, cal: list[str]) -> dict:
+def range_block(meta: dict | None, close: float, beta: float | None, idio: float | None, opt: dict, ev: dict, cal: list[str], live: bool = False) -> dict:
+    """live = 今日滾動乘數 (desk_bands.range_live 成功)；否則為凍結於 desk_evidence 的 2026-09-24 乘數。"""
     rg = ev.get("range") or {}
     ivk = opt.get("ivk") or {}
     if not ivk or not close:
@@ -422,7 +434,12 @@ def range_block(meta: dict | None, close: float, beta: float | None, idio: float
     sid = meta["id"] if meta else "TWII"
     a = (rg.get("assets") or {}).get(sid) or {}
     calibrated = bool(meta and a.get("m") and all(a["m"].get(k) and all(v is not None for v in a["m"][k].values()) for k in a["m"]))
-    out = {"close": _r(close, 2), "beta": _r(beta, 3), "idio": _r(idio, 3), "method": "指數 (台指期校準)" if not meta else ("校準" if calibrated else "未校準映射 (資料短，低信心)"),
+    if not meta:
+        method = "指數 (加權自身高低點，每日滾動 750 日)" if live else "指數 (台指期校準，凍結於 2026-09-24)"
+    else:
+        method = ("校準 (每日滾動 750 日)" if live else "校準 (凍結於 2026-09-24)") if calibrated else "未校準映射 (資料短，低信心)"
+    mver = ("twii_roll750" if live else "tx_frozen_20260924") if not meta else (("roll750" if live else "frozen_20260924") if calibrated else "mapped_tx")
+    out = {"close": _r(close, 2), "beta": _r(beta, 3), "idio": _r(idio, 3), "method": method, "mver": mver, "live": bool(live),
            "levels": {}, "ends": {}}
     for k in (1, 2, 3, 5, 10, 20):
         v = ivk.get(str(k))
@@ -431,7 +448,8 @@ def range_block(meta: dict | None, close: float, beta: float | None, idio: float
         sk = v / math.sqrt(252) * 100
         row = {}
         for q in ("low10", "low20", "high80", "high90"):
-            m_idx = (((rg.get("index") or {}).get(str(k)) or {}).get(q) or {}).get("m")
+            cell = (((rg.get("index") or {}).get(str(k)) or {}).get(q) or {})
+            m_idx = cell.get("m") if not meta else cell.get("m_tx", cell.get("m"))       # 未校準映射沿用台指期校準值
             if not meta:
                 pct = m_idx * sk if m_idx is not None else None
                 m_exp = (((rg.get("index") or {}).get(str(k)) or {}).get(q) or {}).get("m_exp")
@@ -790,7 +808,8 @@ def warrant_terms(code: str) -> dict:
     return {"code": code, "name": x.get("權證簡稱"), "type": x.get("權證類型"), "style": x.get("類別"), "underlying_name": x.get("標的證券/指數"),
             "strike": _r(x.get("最新履約價格(元)/履約指數"), 4), "ratio": _r(float(x.get("最新標的履約配發數量(每仟單位權證)") or 0) / 1000, 5),
             "last_trade": roc(x.get("最後交易日")), "expiry": roc(x.get("履約截止日")), "exercise_from": roc(x.get("履約開始日")),
-            "units_k": _r(x.get("發行單位數量(仟單位)"), 0), "note": (x.get("備註") or "").strip()[:400]}
+            "units_k": _r(x.get("發行單位數量(仟單位)"), 0), "note": (x.get("備註") or "").strip(),       # 不截斷 (除息調整紀錄在備註裡)
+            "report_date": roc(x.get("出表日期")), "strike_orig": _r(x.get("原始履約價格(元)/履約指數"), 4)}
 
 
 def _N(x):
@@ -822,7 +841,7 @@ def _iv(c, S, K, T, r=R_F):
     return v if 0.011 < v < 4.99 else None
 
 
-def warrant_block(wpx: pd.DataFrame, upx: pd.DataFrame, uadj: pd.Series, ev: dict) -> dict:
+def warrant_block(wpx: pd.DataFrame, upx: pd.DataFrame, uadj: pd.Series, ev: dict, exd981: dict | None = None) -> dict:
     """認購權證：T 以交易日/252 為主 (研究口徑)、另列日曆日；IV 以 LP 最佳買賣中價反推 (沒有報價才用收盤)。"""
     terms = warrant_terms(WARRANT["id"])
     if not terms or wpx.empty or upx.empty or not terms.get("strike") or not terms.get("ratio"):
@@ -830,6 +849,10 @@ def warrant_block(wpx: pd.DataFrame, upx: pd.DataFrame, uadj: pd.Series, ev: dic
     W, S = float(wpx["close"].iloc[-1]), float(upx["close"].iloc[-1])
     K, ratio = float(terms["strike"]), float(terms["ratio"])
     d0 = str(wpx["date"].iloc[-1])[:10]
+    ev981 = exdiv.rebase(exd981 or {}, d0)
+    K_twse, r_twse = K, ratio
+    guard = exdiv.terms_guard({**terms, "strike": K, "ratio": ratio}, [], ev981.get("realized") or [], d0, first_trade=terms.get("exercise_from"))
+    K, ratio = float(guard["strike"]), float(guard["ratio"])            # 條款檔 (每日 ~05:30 批次) 落後除息日時用公式推算
     try:
         cal = twse.next_trading_days(d0, 45)
     except Exception:  # noqa: BLE001
@@ -893,13 +916,20 @@ def warrant_block(wpx: pd.DataFrame, upx: pd.DataFrame, uadj: pd.Series, ev: dic
         exp = terms.get("expiry")
         adjs = sorted((f"{a}-{b}-{c}", float(k), float(q)) for a, b, c, k, q in re.findall(
             r"(\d{4})/(\d{2})/(\d{2})\s*標的證券除息，調整後履約價格([\d.]+)元，調整後行使比例([\d.]+)", terms.get("note") or ""))
-        sched = [("0000-00-00", K, ratio)]
+        sched = [("0000-00-00", K_twse, r_twse)]
         if adjs:
             fac = (uadj.reset_index(drop=True) / upx["close"].astype(float).reset_index(drop=True))
             fs = pd.Series(fac.values, index=upx["date"].astype(str).str[:10].values)
             e0 = adjs[0][0]
             f0 = float(fs[fs.index < e0].iloc[-1] / fs[fs.index >= e0].iloc[0]) if (fs.index < e0).any() and (fs.index >= e0).any() else 1.0
             sched = [("0000-00-00", adjs[0][1] / f0, adjs[0][2] * f0)] + adjs     # 首次調整前的原始條款 (由除息因子反推)
+
+        est_from = set()
+        for e_, k_, r_ in guard.get("steps") or []:        # 條款檔落後：推算的調整也要進逐日條款 (否則除息當天 IV 會假跳)
+            if all(e_ != s_[0] for s_ in sched):
+                sched.append((e_, k_, r_))
+                est_from.add(e_)
+        sched.sort(key=lambda s_: s_[0])
 
         def terms_at(dd):
             k_, r_ = sched[0][1], sched[0][2]
@@ -918,10 +948,19 @@ def warrant_block(wpx: pd.DataFrame, upx: pd.DataFrame, uadj: pd.Series, ev: dic
             hist.append({"date": dd, "w": _r(r["close"], 3), "u": _r(r["u"], 2), "K": _r(k_, 3), "ratio": _r(r_, 4),
                          "iv": _r(_iv(float(r["close"]) / r_, float(r["u"]), k_, n_ / 252), 4)})
         out["iv_hist"] = hist
-        out["terms_hist"] = [{"from": e, "strike": _r(k, 3), "ratio": _r(q, 4)} for e, k, q in sched]
+        out["terms_hist"] = [{"from": e, "strike": _r(k, 3), "ratio": _r(q, 4), **({"estimated": True} if e in est_from else {})} for e, k, q in sched]
     except Exception as e:  # noqa: BLE001
         log.debug("warrant iv hist: %s", e)
-    flags = []
+    flags = list(guard.get("flags") or [])
+    try:
+        proj = exdiv.project_terms(K, ratio, ev981.get("upcoming") or [], S, terms.get("last_trade") or "9999-12-31")
+        if proj:
+            out["terms_projected"] = proj
+            flags.append("存續期內標的除息 " + "、".join(f"{x['ex_date']} {x['cash']}" for x in proj) + "：履約價/比例將調整 (除息保護)")
+    except Exception as e:  # noqa: BLE001
+        log.debug("warrant project_terms: %s", e)
+    if guard.get("estimated"):
+        out["terms_estimated"] = {"strike": K, "ratio": ratio}
     if not date_ok:
         flags.append(f"權證收盤日 {d0} 與 00981A 收盤日 {u_date} 不同：IV/希臘值暫不計算")
     if n_lt <= 20:
@@ -1028,7 +1067,7 @@ def tsmc_block(px2330: pd.DataFrame, adj2330: pd.Series, adj50: pd.DataFrame, ev
         w["etf00981A"], w["asof"] = w981[0], f"加權 2026-08-31 (推估)、0050 2026-09-24、00981A {w981[1]}"
     out: dict = {"weights": w}
     try:
-        tsm = global_markets.history("TSM", "20y")
+        tsm = global_markets.history_closed("TSM", "20y")
         fx = global_markets.history("TWD=X", "20y")
         now = dt.datetime.now(config.TZ)
         # 美股 d 日收盤在台北 d+1 05:00 前後；未收盤的 bar 不用
@@ -1085,6 +1124,19 @@ def tsmc_block(px2330: pd.DataFrame, adj2330: pd.Series, adj50: pd.DataFrame, ev
     nxt_rev = _rev_day(today.year, today.month)
     if nxt_rev < today:
         nxt_rev = _rev_day(today.year + (today.month == 12), today.month % 12 + 1)
+    try:   # 月營收 (描述；研究：營收加速度與公布後 5/20 日報酬負相關 −0.17~−0.18、不可交易)
+        rv = finmind.fetch("TaiwanStockMonthRevenue", "2330", (today - dt.timedelta(days=900)).isoformat())
+        if rv is not None and not rv.empty:
+            rv = rv.sort_values(["revenue_year", "revenue_month"]).reset_index(drop=True)
+            r_ = rv["revenue"].astype(float)
+            yoy = r_ / r_.shift(12) - 1
+            mom = r_ / r_.shift(1) - 1
+            acc = yoy - yoy.shift(1).rolling(3).mean()
+            out["revenue"] = [{"ym": f"{int(x.revenue_year)}-{int(x.revenue_month):02d}", "rev_yi": _r(float(x.revenue) / 1e8, 0),
+                               "yoy": _r(yoy.iloc[i] * 100, 1), "mom": _r(mom.iloc[i] * 100, 1), "accel": _r(acc.iloc[i] * 100, 1)}
+                              for i, x in enumerate(rv.itertuples()) if i >= len(rv) - 6]
+    except Exception as e:  # noqa: BLE001
+        log.debug("2330 revenue: %s", e)
     out["events"] = [{"what": "月營收公布 (約)", "date": nxt_rev.isoformat(), "note": "10 日前最後一個交易日盤後；只有隔夜跳空有超額 (2017 起不顯著)"},
                      {"what": "季配除息 (約)", "date": "3/6/9/12 月中旬", "note": "除息日開盤溢價扣成本與股利稅後約 0；填息中位數 2 天"}]
     out["notes"] = (ev.get("special") or {}).get("2330") or []
@@ -1116,6 +1168,7 @@ def opt_block(feat: dict, hist: list[dict], last_trading: str | None, ev: dict) 
     h = pd.DataFrame(hist)
     out = {k: feat.get(k) for k in ("date", "iv5", "iv21", "iv42", "ivk", "rr25", "ts_5_21", "p25_21", "c25_21", "F_near", "pcr_oi", "near", "month", "series", "calendar_fallback")}
     out["carried"] = bool(feat.get("_carried"))
+    out["source"] = feat.get("source")
     out["stale"] = bool(last_trading and feat.get("date") and feat["date"] < last_trading)
     for col in ("iv5", "iv21"):
         s = pd.to_numeric(h.get(col), errors="coerce").dropna() if col in h else pd.Series(dtype=float)
@@ -1125,6 +1178,69 @@ def opt_block(feat: dict, hist: list[dict], last_trading: str | None, ev: dict) 
     out["hist"] = [{"date": r["date"], "iv5": r.get("iv5"), "iv21": r.get("iv21")} for r in hist[-120:]]
     rg = ev.get("range") or {}
     out["evidence"] = {k: rg.get(k) for k in ("evidence", "exec_note", "walls", "chips")}
+    return out
+
+
+# ------------------------------------------------------------------ 機率帶上線帳本 (真正的樣本外追蹤)
+def ledger_add(ledger: list[dict], sid: str, date: str, close: float, rng: dict) -> None:
+    """記下 date 收盤發布的 k 日帶 (k ∈ LEDGER_KS)。同 (date, sid, k) 只留最新一筆。"""
+    lv = (rng or {}).get("levels") or {}
+    ends = (rng or {}).get("ends") or {}
+    for k in LEDGER_KS:
+        row = lv.get(str(k)) or {}
+        levels = {q: (row.get(q) or {}).get("px") for q in QS if (row.get(q) or {}).get("px") is not None}
+        if len(levels) < 4 or not ends.get(str(k)):
+            continue
+        rec = {"date": date, "sid": sid, "k": k, "close": _r(close, 2), "end": ends[str(k)], "levels": levels, "mver": (rng or {}).get("mver") or "unknown"}
+        if (rng or {}).get("exdiv"):
+            rec["exdiv"] = True
+        for i in range(len(ledger) - 1, -1, -1):
+            x = ledger[i]
+            if x.get("date") == date and x.get("sid") == sid and x.get("k") == k:
+                ledger[i] = rec
+                break
+        else:
+            ledger.append(rec)
+
+
+def ledger_eval(ledger: list[dict], hl: dict[str, pd.DataFrame]) -> dict:
+    """hl[sid] = DataFrame(date, high, low)。窗口 (date, end] 全部有價格才評估 (實際高低價是否觸及)。
+    回傳 {sid: {mver: {k: {q: {n, hit, rate, nominal}}}, recent: [...]}}；依乘數版本分組 (凍結值與每日滾動值分開統計)。"""
+    out: dict = {}
+    for x in ledger:
+        df = hl.get(x["sid"])
+        if df is None or df.empty or str(df["date"].iloc[-1]) < x["end"]:
+            continue
+        w = df[(df["date"] > x["date"]) & (df["date"] <= x["end"])]
+        if w.empty:
+            continue
+        s = 1.0                                   # 分割換算：歷史價已依分割調整，發布時的價位要同比例換算
+        if "close" in df.columns and x.get("close"):
+            c0 = df.loc[df["date"] == x["date"], "close"]
+            if len(c0) and float(c0.iloc[0]) > 0:
+                s = float(c0.iloc[0]) / float(x["close"])
+                if abs(s - 1) < 0.02:              # 非分割的小差異 (四捨五入) 不換算
+                    s = 1.0
+        lo, hi = float(w["low"].min()) / s, float(w["high"].max()) / s
+        st = out.setdefault(x["sid"], {}).setdefault(x.get("mver") or "unknown", {}).setdefault(str(x["k"]), {q: {"n": 0, "hit": 0} for q in QS})
+        hits = {}
+        for q, v in x["levels"].items():
+            if v is None or q not in st:
+                continue
+            h = (lo <= v) if q.startswith("low") else (hi >= v)
+            st[q]["n"] += 1
+            st[q]["hit"] += int(h)
+            hits[q] = h
+        out[x["sid"]].setdefault("recent", []).append({"date": x["date"], "k": x["k"], "mver": x.get("mver"), "lo": _r(lo, 2), "hi": _r(hi, 2), "hits": hits})
+    for sid, v in out.items():
+        for mv, byk in v.items():
+            if mv == "recent":
+                continue
+            for k, st in byk.items():
+                for q, c in st.items():
+                    c["rate"] = _r(c["hit"] / c["n"], 3) if c["n"] else None
+                    c["nominal"] = Q_NOMINAL[q]
+        v["recent"] = sorted(v.get("recent") or [], key=lambda r: (r["date"], r["k"]))[-15:]
     return out
 
 
@@ -1149,17 +1265,17 @@ def build(prev_archive: dict | None = None) -> tuple[dict, dict]:
     """回傳 (desk, archive)。prev_archive = 上次發布的 desk_archive.json (跨次累積)。"""
     prev_archive = prev_archive if prev_archive is not None else load_archive()
     ev = _evidence()
+    last_td = _last_trading_day()
     try:
-        feat = taifex_opt.features()
+        feat = taifex_opt.features(expect=last_td)
     except Exception as e:  # noqa: BLE001
         log.warning("TXO features: %s", e)
         feat = {}
     if not feat and prev_archive.get("opt_last"):
         feat = dict(prev_archive["opt_last"]); feat["_carried"] = True
     ohist = opt_history(prev_archive, feat) if feat else list(prev_archive.get("opt_hist") or [])
-    last_td = _last_trading_day()
     try:
-        tw = twii()
+        tw = twii((dt.date.today() - dt.date.fromisoformat(desk_bands.TWII_START)).days)   # 固定起點 (機率帶保守版 = 2017-01-03 起擴張)
     except Exception as e:  # noqa: BLE001   加權抓不到：各區塊降級，不中止整個 build
         log.warning("TWII: %s", e)
         tw = pd.DataFrame(columns=["date", "high", "low", "close", "volume"])
@@ -1172,31 +1288,41 @@ def build(prev_archive: dict | None = None) -> tuple[dict, dict]:
     desk: dict = {"generated": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M:%S"), "disclaimer": DISCLAIMER,
                   "evidence_asof": ev.get("asof"), "evidence_source": ev.get("source"),
                   "opt": opt_block(feat, ohist, last_td, ev), "index": {}, "instruments": {}, "framework": {k: ev.get(k) for k in ("risk", "zones_evidence", "gov8_evidence", "overlay")}}
-    if tw_close:
-        desk["index"] = {"date": str(tw["date"].iloc[-1]), "close": _r(tw_close, 2), "stale": bool(last_td and str(tw["date"].iloc[-1]) < last_td),
-                         "range": range_block(None, tw_close, None, None, feat, ev, cal)}
-        try:
-            desk["index"]["zones"] = zones_block(tw.tail(400), is_index=True)
-        except Exception as e:  # noqa: BLE001
-            log.debug("TWII zones: %s", e)
+    # 除息事件 (已公告未除息 / 已除息；TWSE 預告表 + 計算結果 + FinMind)：區間扣股利、次日門檻換算、權證除息保護
+    try:
+        exd = exdiv.load_all([m["id"] for m in DESK], last_td or dt.date.today().isoformat(), exdiv.get_json, archive=(prev_archive.get("exdiv") or {}))
+    except Exception as e:  # noqa: BLE001
+        log.warning("exdiv: %s", e)
+        exd = {}
     # 歸檔以上次的內容為底：任一標的這次抓價/抓 HiStock 失敗都不會把它的舊列洗掉
     prev_gov8 = prev_archive.get("gov8") or {}
     archive = {"gov8": {k: list(v or []) for k, v in prev_gov8.items()}, "opt_hist": ohist,
                "opt_last": ({k: v for k, v in feat.items() if k not in ("series", "_carried")} if feat and not feat.get("_carried") else prev_archive.get("opt_last")),
-               "holdings_00981A": dict(prev_archive.get("holdings_00981A") or {})}
+               "holdings_00981A": dict(prev_archive.get("holdings_00981A") or {}),
+               "exdiv": ({sid: {"asof": v.get("asof"), "upcoming": v.get("upcoming")} for sid, v in exd.items() if v.get("upcoming")} or dict(prev_archive.get("exdiv") or {})),
+               "fresh_log": list(prev_archive.get("fresh_log") or [])}
     frames: dict[str, dict] = {}
+    exd_i: dict[str, dict] = {}              # 各標的依自己資料日重切的除息事件
     for meta in DESK:
         sid = meta["id"]
         try:
             days = 1100
             if prev_gov8.get(sid):                   # 價格視窗涵蓋歸檔起點 (FIFO/隱含價需要當日價)
                 days = max(days, (dt.date.today() - dt.date.fromisoformat(prev_gov8[sid][0]["date"])).days + 10)
-            px = prices(sid, days)
-            if px.empty:
+            px_all = prices(sid, max(days, desk_bands.BAND_DAYS))        # 機率帶校準要約 1,300 交易日；其他區塊切回 days
+            if px_all.empty:
                 continue
-            divs = dividends(sid, str(px["date"].iloc[0])) if meta["kind"] != "lev2" else []
-            adj = adj_close(px, divs)
-            frames[sid] = {"px": px, "adj": adj, "divs": divs}
+            divs_all = dividends(sid, str(px_all["date"].iloc[0])) if meta["kind"] != "lev2" else []
+            if meta["kind"] != "lev2":           # 併入 TWSE 除息計算結果 (除息前一晚即可得；不依賴 FinMind 當晚是否更新)
+                have = {d["date"] for d in divs_all}
+                for e in (exd.get(sid) or {}).get("realized") or []:
+                    if e.get("ex_date") and e["ex_date"] not in have and e.get("before") and e.get("cash") and e["ex_date"] <= str(px_all["date"].iloc[-1]):
+                        divs_all.append({"date": e["ex_date"], "div": float(e["cash"]), "before": float(e["before"])})
+            adj_all = adj_close(px_all, divs_all)
+            keep = (px_all["date"] >= (dt.date.today() - dt.timedelta(days=days)).isoformat()).values
+            px, adj = px_all[keep].reset_index(drop=True), adj_all[keep].reset_index(drop=True)      # 含息因子只依賴之後的股利 → 切片與只抓 days 相同
+            divs = [d for d in divs_all if d["date"] >= str(px["date"].iloc[0])]
+            frames[sid] = {"px": px, "adj": adj, "divs": divs, "px_band": px_all, "adj_band": adj_all}
         except Exception as e:  # noqa: BLE001
             log.warning("desk prices %s: %s", sid, e)
     for meta in DESK:                                  # 價格失敗的標的仍更新八大歸檔 (HiStock 不依賴價格)
@@ -1207,6 +1333,22 @@ def build(prev_archive: dict | None = None) -> tuple[dict, dict]:
                 log.warning("desk %s gov8 (no px): %s", meta["id"], e)
     adj50 = pd.DataFrame({"date": frames["0050"]["px"]["date"].astype(str).values, "adj": frames["0050"]["adj"].values}) if "0050" in frames else pd.DataFrame(columns=["date", "adj"])
     tw_adj = tw
+    # 機率帶乘數每日滾動重算 (研究 opt_bands)；失敗的標的沿用 desk_evidence 凍結值
+    band_mon: dict = {}
+    try:
+        rg_live, band_mon = desk_bands.range_live(ev, tw, frames, ohist)
+        ev = {**ev, "range": rg_live}
+    except Exception as e:  # noqa: BLE001
+        log.warning("range_live: %s", e)
+    live = band_mon.get("live") or {}
+    desk["opt"]["band_monitor"] = band_mon
+    if tw_close:
+        desk["index"] = {"date": str(tw["date"].iloc[-1]), "close": _r(tw_close, 2), "stale": bool(last_td and str(tw["date"].iloc[-1]) < last_td),
+                         "range": range_block(None, tw_close, None, None, feat, ev, cal, live=bool(live.get("TWII")))}
+        try:
+            desk["index"]["zones"] = zones_block(tw.tail(400), is_index=True)
+        except Exception as e:  # noqa: BLE001
+            log.debug("TWII zones: %s", e)
     # 加權含息近似 (研究 t5 E)：加權價格報酬 × 0050 配息成分；只給 00663L 耗損監控用 (年度層級才可靠)
     tw_tr = tw[["date", "close"]].copy()
     if "0050" in frames and len(tw_tr):
@@ -1243,11 +1385,65 @@ def build(prev_archive: dict | None = None) -> tuple[dict, dict]:
         try:
             j = pd.DataFrame({"date": dates.values, "a": adj.values}).merge(tw_adj[["date", "close"]], on="date")
             b, idio = _beta_idio(j["a"], j["close"], 120 if sid == "00981A" else 250)
-            rec["range"] = range_block(meta, close, b, idio, feat, ev, cal)
+            la = ((ev.get("range") or {}).get("assets") or {}).get(sid) or {}
+            if (live.get(sid) and la.get("beta") is not None and la.get("idio") is not None
+                    and math.isfinite(la["beta"]) and math.isfinite(la["idio"])):   # 與校準同口徑的 β/σ_idio
+                b, idio = la["beta"], la["idio"]
+            try:
+                cal_s = twse.next_trading_days(dates.iloc[-1], 25)
+            except Exception:  # noqa: BLE001
+                cal_s = cal
+            rec["range"] = range_block(meta, close, b, idio, feat, ev, cal_s, live=bool(live.get(sid)))
+            ev_x = exdiv.rebase(exd.get(sid) or {}, str(dates.iloc[-1]))
+            exd_i[sid] = ev_x
+            ups = [u for u in (ev_x.get("upcoming") or []) if not u.get("suspicious")]
+            for u in ev_x.get("upcoming") or []:                       # 合理性：股利 > 收盤 15% 不採用
+                D = u.get("cash") or u.get("cash_est")
+                if D and D / close > 0.15:
+                    u["suspicious"] = True
+            ups = [u for u in ups if not u.get("suspicious")]
+            rec["exdiv"] = {"upcoming": ev_x.get("upcoming") or [], "last": (ev_x.get("realized") or [])[-1:], "estimate": ev_x.get("estimate"),
+                            "board_pending": ev_x.get("board_pending"), "sources": ev_x.get("sources"), "carried_from": ev_x.get("carried_from")}
+            if rec.get("range") and ups:
+                exdiv.adjust_range(rec["range"], ups, cal_s)          # 窗口含除息：low 扣全額、high 依比例 (看盤價口徑，px_tr 為含息口徑)
             if rec["range"] and feat.get("date") and feat["date"] != rec["date"]:
                 rec["range"]["date_mismatch"] = {"opt": feat["date"], "close": rec["date"]}
         except Exception as e:  # noqa: BLE001
             log.warning("desk %s range: %s", sid, e)
+        try:   # 次日除息：所有「次日收盤 = X」門檻 (含息價的一次齊次函數) 乘 f = (P−D)/P → 換成除息後看盤價 (精確)
+            ev_x = exd_i.get(sid) or exdiv.rebase(exd.get(sid) or {}, str(dates.iloc[-1]))
+            ups_ok = [u for u in (ev_x.get("upcoming") or []) if not u.get("suspicious")]
+            nxt = twse.next_trading_days(dates.iloc[-1], 1)[0]
+            fac, e_ = exdiv.next_day_factor(ups_ok, nxt, close)
+            if fac != 1.0 and e_:
+                o = rec.get("overlay") or {}
+                ref_x = float(adj.iloc[-1]) * fac          # 除息參考價 P−D：次日漲跌幅與距離都以它為基準
+                for x in o.get("levels") or []:
+                    if x["key"] == "ma60_exit" and x.get("price"):
+                        x["price_tr"], x["price"] = x["price"], _r(x["price"] * fac, 2)
+                        x["dist"] = _r((x["price"] / ref_x - 1) * 100, 2)
+                if o.get("primary"):
+                    o["primary"]["price_tr"] = o["primary"].get("price")
+                    for k2 in ("price", "reenter"):
+                        if o["primary"].get(k2):
+                            o["primary"][k2] = _r(o["primary"][k2] * fac, 2)
+                    o["primary"]["dist"] = _r((o["primary"]["price"] / ref_x - 1) * 100, 2)
+                    st_ = o.get("_stop")
+                    if st_ and not st_[2]:
+                        o["_stop"] = (o["primary"]["price"], st_[1], st_[2])
+                for cx in (rec.get("ma") or {}).get("crosses") or []:
+                    if cx.get("trigger_next"):          # feasible_next 不重算：|T·f/(P·f) − 1| = |T/P − 1|
+                        cx["trigger_next"] = _r(cx["trigger_next"] * fac, 2)
+                for m_ in ((rec.get("ma") or {}).get("ma") or {}).values():
+                    if m_.get("deduct_next_adj"):
+                        m_["deduct_next_adj"] = _r(m_["deduct_next_adj"] * fac, 2)
+                rec["next_exdiv"] = {"date": e_["ex_date"], "cash": e_.get("cash") or e_.get("cash_est"), "f": round(fac, 6), "est": not e_.get("cash") or not e_.get("before"),
+                                     "note": "次日門檻 (MA60 出場/站回、交叉觸發、含息扣抵) 已換算成除息後看盤價 (×(P−D)/P)" + ("；金額或前收為估計" if (not e_.get("cash") or not e_.get("before")) else "")}
+            if rec.get("ma"):
+                rec["ma"]["exdiv"] = exdiv.ma_exdiv(dates.tolist(), px["close"].astype(float).tolist(), adj.tolist(),
+                                                    ev_x.get("realized") or [], ups_ok, twse.next_trading_days(dates.iloc[-1], 70))
+        except Exception as e:  # noqa: BLE001
+            log.debug("desk %s exdiv thresholds: %s", sid, e)
         try:
             under = None
             if meta.get("under") == "0050" and "0050" in frames:
@@ -1259,7 +1455,7 @@ def build(prev_archive: dict | None = None) -> tuple[dict, dict]:
             log.warning("desk %s defense: %s", sid, e)
         try:
             o = rec.get("overlay") or {}
-            sz = sizing(o, rec.get("defense") or {}, float(adj.iloc[-1]))
+            sz = sizing(o, rec.get("defense") or {}, float(adj.iloc[-1]) * float((rec.get("next_exdiv") or {}).get("f") or 1.0))
             if sz:
                 o["sizing"] = sz
         except Exception as e:  # noqa: BLE001
@@ -1310,25 +1506,79 @@ def build(prev_archive: dict | None = None) -> tuple[dict, dict]:
     try:
         if "00981A" in frames:
             wpx = prices(WARRANT["id"], 300, split_adjust=False)
-            wb = warrant_block(wpx, frames["00981A"]["px"], frames["00981A"]["adj"], ev)
+            wb = warrant_block(wpx, frames["00981A"]["px"], frames["00981A"]["adj"], ev, exd.get("00981A"))
             if wb:
                 wb["id"], wb["name"], wb["kind"] = WARRANT["id"], WARRANT["name"], "warrant"
                 wb["stale"] = bool(last_td and wb.get("date") and wb["date"] < last_td)
                 rg = ((desk["instruments"].get("00981A") or {}).get("range") or {}).get("levels") or {}
                 if wb.get("iv") and (wb.get("terms") or {}).get("strike"):     # 00981A 機率帶換算成權證價 (IV 不變)
-                    K, ratio = wb["terms"]["strike"], wb["terms"]["ratio"]
+                    te = wb.get("terms_estimated") or {}
+                    K, ratio = te.get("strike", wb["terms"]["strike"]), te.get("ratio", wb["terms"]["ratio"])
                     T = wb["trade_days_to_expiry"] / 252
                     maps = {}
                     for k in ("5", "10"):
                         if int(k) < wb["trade_days_to_last"] and rg.get(k):
+                            # 有除息保護的權證：價值是含息價路徑的函數 → 用含息口徑 px_tr (沒有除息時就是 px) 配現行條款 (驗證：用扣息價配推算條款會高估 9~11%)
+                            pxq = lambda q_: (rg[k].get(q_) or {}).get("px_tr") or (rg[k].get(q_) or {}).get("px")   # noqa: E731
                             maps[k] = {q: {"under": (rg[k].get(q) or {}).get("px"),
-                                           "warrant": _r(_bs((rg[k].get(q) or {}).get("px") or 0, K, max(T - int(k) / 252, 1e-9), wb["iv"])[0] * ratio, 3) if (rg[k].get(q) or {}).get("px") else None}
+                                           "warrant": _r(_bs(pxq(q) or 0, K, max(T - int(k) / 252, 1e-9), wb["iv"])[0] * ratio, 3) if pxq(q) else None}
                                        for q in ("low10", "low20", "high80", "high90")}
                     wb["band_map"] = maps
                 desk["instruments"][WARRANT["id"]] = wb
     except Exception as e:  # noqa: BLE001
         log.warning("desk warrant: %s", e)
     desk["order"] = [m["id"] for m in DESK] + [WARRANT["id"]]
+    # 機率帶上線帳本：記錄今天發布的 1/5/20 日帶，評估已到期的 (實際高低價)
+    try:
+        led = list(prev_archive.get("band_ledger") or [])
+        if not feat.get("_carried") and not feat.get("calendar_fallback"):
+            if desk.get("index", {}).get("range") and not desk["index"].get("stale"):
+                ledger_add(led, "TWII", desk["index"]["date"], desk["index"]["close"], desk["index"]["range"])
+            for sid, r in desk["instruments"].items():
+                if r.get("range") and not r.get("stale") and not (r["range"].get("date_mismatch")):
+                    ledger_add(led, sid, r["date"], r["close"], r["range"])
+        keep = sorted({x["date"] for x in led})[-LEDGER_MAX_DAYS:]
+        led = [x for x in led if x["date"] in set(keep)]
+        archive["band_ledger"] = led
+        hl = {sid: f["px"][["date", "high", "low", "close"]].astype({"date": str}) for sid, f in frames.items()}
+        if len(tw) and {"high", "low", "close"} <= set(tw.columns):
+            hl["TWII"] = tw[["date", "high", "low", "close"]].astype({"date": str})
+        desk["ledger"] = {"since": led[0]["date"] if led else None, "n_records": len(led), "stats": ledger_eval(led, hl),
+                          "note": "上線後逐日記錄當天發布的機率帶，到期後用實際最高/最低價核對 (真正的樣本外)；樣本累積前以回測觸及率為準。"}
+    except Exception as e:  # noqa: BLE001
+        log.warning("desk ledger: %s", e)
+        archive["band_ledger"] = list(prev_archive.get("band_ledger") or [])
+    # 資料新鮮度：各區塊內容日期 vs 應有日期 (最後交易日)；fresh_log 累積後可統計各來源實際幾點出現當日資料
+    try:
+        now_s = dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M")
+        I_ = desk["instruments"]
+        F = exdiv.freshness
+        tw48 = [((v.get("sources") or {}).get("TWT48U")) for v in exd.values()]
+        ex_ok = bool(exd) and all(x == "ok" for x in tw48)
+        ex_stale = bool(exd) and not ex_ok and all(x in ("ok", "stale") for x in tw48)
+        # ADR：美股 d 日收盤在台北 d+1 04:00~05:00 → 最近一個已收盤的美股交易日 = (台北現在 − 29.5 小時) 的日期，遇週末往前 (美股假日會誤報 1 天)
+        u_ = (dt.datetime.now(config.TZ) - dt.timedelta(hours=29, minutes=30)).date()
+        while u_.weekday() >= 5:
+            u_ -= dt.timedelta(days=1)
+        adr_expect = u_.isoformat()
+        g8_to = {sid: (r.get("gov8") or {}).get("to") for sid, r in I_.items() if r.get("kind") != "warrant" and (r.get("gov8") or {}).get("to")}
+        g8_lag = sorted(sid for sid, d_ in g8_to.items() if last_td and d_ < last_td)
+        fr = [F("日K (FinMind)", max([r.get("date") or "" for r in I_.values() if r.get("kind") != "warrant"] or [""]) or None, last_td, now_s),
+              F("加權指數 (FinMind)", (desk.get("index") or {}).get("date"), last_td, now_s),
+              F("台指選擇權 (期交所)", (desk.get("opt") or {}).get("date"), last_td, now_s, carried=bool((desk.get("opt") or {}).get("carried"))),
+              F("八大行庫 (HiStock)", min(g8_to.values()) if g8_to else None, last_td, now_s),
+              F("00981A 持股 (統一投信)", ((((I_.get("00981A") or {}).get("active") or {}).get("holdings")) or {}).get("date"), last_td, now_s),
+              F("權證報價 (TWSE MIS)", (I_.get(WARRANT["id"]) or {}).get("quote_date") or (I_.get(WARRANT["id"]) or {}).get("date"), last_td, now_s),
+              F("TSM ADR (Yahoo)", (((I_.get("2330") or {}).get("tsmc") or {}).get("adr") or {}).get("gap_tsm_date") or (((I_.get("2330") or {}).get("tsmc") or {}).get("adr") or {}).get("date"), adr_expect, now_s),
+              F("除息公告 (TWSE/FinMind)", last_td if (ex_ok or ex_stale) else None, last_td, now_s, carried=ex_stale)]
+        if g8_lag:
+            fr[3]["lagging"] = g8_lag
+        if (desk.get("opt") or {}).get("source"):
+            fr[2]["src"] = desk["opt"]["source"]
+        desk["freshness"] = fr
+        archive["fresh_log"] = (archive.get("fresh_log") or [])[-560:] + [{"run": now_s, "src": x["name"], "date": x["date"]} for x in fr]
+    except Exception as e:  # noqa: BLE001
+        log.debug("freshness: %s", e)
     desk["data_asof"] = {"last_td": last_td, "twii": (desk.get("index") or {}).get("date"), "opt": (desk.get("opt") or {}).get("date"),
                          "stale": [sid for sid, r in desk["instruments"].items() if r.get("stale")] + (["TWII"] if (desk.get("index") or {}).get("stale") else [])
                          + (["TXO"] if (desk.get("opt") or {}).get("stale") else [])}
@@ -1344,6 +1594,10 @@ def build(prev_archive: dict | None = None) -> tuple[dict, dict]:
         shrunk.append("opt_hist")
     if shrunk:
         log.warning("desk_archive 縮水保護：%s 保留上次內容", shrunk)
-    desk["archive_stats"] = {"gov8": {sid: len(v) for sid, v in archive["gov8"].items()}, "opt_hist": len(archive["opt_hist"]), "loaded": prev_archive.get("_loaded", True)}
+    if len(archive.get("band_ledger") or []) < len(prev_archive.get("band_ledger") or []) and len({x["date"] for x in prev_archive.get("band_ledger") or []}) < LEDGER_MAX_DAYS:
+        archive["band_ledger"] = list(prev_archive.get("band_ledger") or [])
+        shrunk.append("band_ledger")
+    desk["archive_stats"] = {"gov8": {sid: len(v) for sid, v in archive["gov8"].items()}, "opt_hist": len(archive["opt_hist"]),
+                             "band_ledger": len(archive.get("band_ledger") or []), "loaded": prev_archive.get("_loaded", True)}
     save_archive(archive)
     return desk, archive

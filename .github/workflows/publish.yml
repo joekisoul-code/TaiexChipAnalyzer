@@ -50,7 +50,17 @@ jobs:
           fi
           echo "mode=$MODE" >> $GITHUB_OUTPUT
       - name: restore data cache (快取 / SQLite；模型不進 cache，一律以 git 版本為準)
+        if: steps.mode.outputs.mode != 'research'
         uses: actions/cache@v4
+        with:
+          path: |
+            data/cache
+            data/chip.sqlite
+          key: chip-data-${{ github.run_id }}
+          restore-keys: chip-data-
+      - name: restore data cache (research：只讀，不存回，免得較舊的快取蓋掉同時段發布的資料)
+        if: steps.mode.outputs.mode == 'research'
+        uses: actions/cache/restore@v4
         with:
           path: |
             data/cache

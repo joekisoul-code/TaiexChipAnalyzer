@@ -210,11 +210,16 @@ def index_1min(date: str) -> list[list]:
 
 def holidays(year: int | None = None) -> set[str]:
     """TWSE 休市日 (ISO 日期)。"""
+    year = year or dt.date.today().year
+
     def load():
-        j = get_json(f"{BASE}/holidaySchedule/holidaySchedule", params={"response": "json", "queryYear": str(year - 1911) if year else ""})
+        # queryYear 參數會被 TWSE 忽略 (一律回今年)；要用 date=YYYY0101 指定年度，並核對回傳的 queryYear
+        j = get_json(f"{BASE}/holidaySchedule/holidaySchedule", params={"response": "json", "date": f"{year}0101"})
         if not isinstance(j, dict) or j.get("stat", "").lower() != "ok":
             # 丟例外而不是回 []：避免把「還沒公布/暫時失敗」當成「沒有休市日」快取 12 小時 (選擇權剩餘天數會高估、IV 低估)
             raise RuntimeError(f"holidaySchedule {year}: {j.get('stat') if isinstance(j, dict) else type(j)}")
+        if str(j.get("queryYear") or "") != str(year) or not j.get("data"):
+            raise RuntimeError(f"holidaySchedule {year}: 回傳 {j.get('queryYear')} 年 / {len(j.get('data') or [])} 列 (尚未公布)")
         out = []
         for r in j["data"]:
             name, desc = r[1], r[2]
@@ -223,21 +228,30 @@ def holidays(year: int | None = None) -> set[str]:
             if any(k in name + desc for k in ("放假", "無交易", "休市", "春節", "紀念日", "補假")):
                 out.append(r[0])
         return out
-    return set(cached(f"twse:holidays:{year}", config.TTL_HISTORY, load))
+    return set(cached(f"twse:holidays2:{year}", config.TTL_HISTORY, load))
+
+
+_HOL_FAIL: dict[int, float] = {}      # 休市表抓不到的年度 → 時間 (1 小時內不重抓，避免每次呼叫都打 TWSE)
 
 
 def next_trading_days(from_date: str, n: int = 3) -> list[str]:
     """from_date 之後的 n 個交易日 (跳過週末與休市日)。"""
+    import time as _t
     d = dt.date.fromisoformat(from_date)
     hol_by_year: dict[int, set[str]] = {}
 
     def hol(y: int) -> set[str]:
         if y not in hol_by_year:
+            fixed = {f"{y}-01-01", f"{y}-02-28", f"{y}-04-04", f"{y}-05-01", f"{y}-10-10"}   # 固定日期國定假日 (農曆節日無法推)
+            if _t.time() - _HOL_FAIL.get(y, 0) < 3600:
+                hol_by_year[y] = fixed
+                return fixed
             try:
                 hol_by_year[y] = holidays(y)
-            except Exception as e:  # noqa: BLE001   休市表抓不到/尚未公布 → 只跳週末 (與舊行為相同；需要嚴格日曆的呼叫端先自行呼叫 holidays())
-                log.warning("holidays %s unavailable, weekends only: %s", y, e)
-                hol_by_year[y] = set()
+            except Exception as e:  # noqa: BLE001   休市表抓不到/尚未公布 → 週末 + 固定日期 (需要嚴格日曆的呼叫端先自行呼叫 holidays())
+                log.warning("holidays %s unavailable, weekends + fixed dates only: %s", y, e)
+                _HOL_FAIL[y] = _t.time()
+                hol_by_year[y] = fixed
         return hol_by_year[y]
     out = []
     while len(out) < n:

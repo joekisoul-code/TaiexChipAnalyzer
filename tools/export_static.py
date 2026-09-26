@@ -297,11 +297,77 @@ def main() -> None:
     except Exception as e:  # noqa: BLE001
         print("  gov8 failed:", e)
     # 操盤台 (2026-09-25)：0050/00631L/00663L/00981A/2330/065423 的均線、選擇權回檔機率帶、高低點承接價、價位帶、回撤控制價位、
-    # 資金防守、八大行庫歸檔、00981A 持股、權證、2330 ADR。完整模式重算；fast 模式只在清晨 (美股收盤後，更新 ADR) 重算，其餘沿用上次發布
-    if not args.fast or time.localtime().tm_hour < 9:
+    # 資金防守、八大行庫歸檔、00981A 持股、權證、2330 ADR。完整模式重算；fast 模式在清晨/當天第一次 (ADR) 或資料落後最後交易日時重算，其餘沿用上次發布
+    def _prev_desk() -> dict:
+        """上次發布的 desk (fast 已帶回本地；完整模式從 Pages/raw 抓)。"""
+        try:
+            if (DATA / "desk.json").exists():
+                return json.loads((DATA / "desk.json").read_text(encoding="utf-8"))
+            for base in (gov8.PAGES_URL.rstrip("/") + "/data/", "https://raw.githubusercontent.com/joekisoul-code/TaiexChipAnalyzer/gh-pages/data/"):
+                r = requests.get(base + "desk.json", timeout=30)
+                if r.ok and r.text.strip().startswith("{"):
+                    return r.json()
+        except Exception as e:  # noqa: BLE001
+            print("  prev desk failed:", e)
+        return {}
+
+    def _guard_degraded(new: dict, allowed: set) -> dict:
+        """FinMind 斷線/額度用完時 build() 不丟例外、只回空的 instruments/index → 不能蓋掉上次好的資料。
+        缺的標的/指數用上次的補上並標 carried；generated 沿用上次，之後的 fast 會再重試。"""
+        prev = _prev_desk()
+        if not prev:
+            return new
+        ni, pi = new.get("instruments") or {}, prev.get("instruments") or {}
+        miss = [k for k in pi if k not in ni and k in allowed]
+        idx_bad = not (new.get("index") or {}).get("close") and (prev.get("index") or {}).get("close")
+        if not miss and not idx_bad:
+            return new
+        for k in miss:
+            ni[k] = {**pi[k], "carried": True}
+        new["instruments"] = ni
+        if idx_bad:
+            new["index"] = {**prev["index"], "carried": True}
+        if new.get("order") is None or len(new.get("order") or []) < len(prev.get("order") or []):
+            new["order"] = prev.get("order")
+        new["partial"] = {"at": new.get("generated"), "carried": miss + (["TWII"] if idx_bad else [])}
+        new["generated"] = prev.get("generated") or new.get("generated")
+        print(f"  desk degraded → carried {new['partial']['carried']} from previous ({new['generated']})")
+        return new
+
+    def _desk_needed() -> bool:
+        """完整模式一律重算；fast 模式在清晨 (ADR) 或已發布的 desk 落後最後交易日時重算。
+        GitHub cron 實際延遲數小時 (15:40 排程常在 20~22 點才跑)，所以只要 fast 那次發現資料過期就先重算。"""
+        if not args.fast or time.localtime().tm_hour < 9:
+            return True
+        try:
+            from chip.analysis import desk as _dk
+            pub = json.loads((DATA / "desk.json").read_text(encoding="utf-8")) if (DATA / "desk.json").exists() else {}
+            if not pub or not pub.get("instruments") or not (pub.get("index") or {}).get("close"):
+                return True
+            lt = _dk._last_trading_day()
+            asof = pub.get("data_asof") or {}
+            idx_d = str((pub.get("index") or {}).get("date") or asof.get("twii") or "")
+            opt_d = str((pub.get("opt") or {}).get("date") or asof.get("opt") or "")
+            hr = time.localtime().tm_hour
+            if lt and hr >= 16 and (idx_d < lt or opt_d < lt):
+                print(f"  desk stale (twii {idx_d}, opt {opt_d} < {lt}) → rebuild")
+                return True
+            # 清晨 07:00 那次常被 GitHub 延到 9 點後 → 14 點前若 desk 是在今天 05:30 (美股收盤) 之前產生的，就重算一次補 ADR
+            # (比時間不比日期：晚間排程常拖到凌晨 1~3 點才跑，那時美股還沒收盤)
+            gen = str(pub.get("generated") or "")[:19]
+            cutoff = time.strftime("%Y-%m-%d") + " 05:30:00"
+            if hr < 14 and time.strftime("%Y-%m-%d %H:%M:%S") >= cutoff and gen < cutoff:
+                print(f"  desk generated {gen} (< {cutoff}) → morning rebuild (ADR)")
+                return True
+            return False
+        except Exception as e:  # noqa: BLE001
+            print("  desk need check failed:", e)
+            return False
+    if _desk_needed():
         try:
             from chip.analysis import desk
             d_desk, d_arch = desk.build()
+            d_desk = _guard_degraded(d_desk, {m["id"] for m in desk.DESK} | {desk.WARRANT["id"]})
             dump("desk", d_desk)
             dump("desk_archive", {k: v for k, v in d_arch.items() if not k.startswith("_")})
             print(f"  desk: {len(d_desk.get('instruments') or {})} instruments, opt {((d_desk.get('opt') or {}).get('date'))}")
