@@ -91,7 +91,8 @@ def records_from_forecast(fc: dict, snap: dict | None) -> list[dict]:
                      "phase": mode, "live": live, "base": base, "p_up": _num(x.get("p_up")), "base_hit": _num(x.get("base_hit")), "call": x.get("call") or "中性",
                      "strength": x.get("call_strength") or "", "call_hit": _num(x.get("call_hit")), "variant": x.get("variant"), "level": _num(x.get("level")),
                      "buy_at": _num(x.get("buy_at")), "sell_at": _num(x.get("sell_at")), "stop": _num(x.get("stop")), "target_px": _num(x.get("target")),
-                     "range_mode": x.get("range_mode"), "trend7": (fc.get("trend7") or {}).get("state"), "realized": None})
+                     "range_mode": x.get("range_mode"), "trend7": (fc.get("trend7") or {}).get("state"), "realized": None,
+                     "event_tags": x.get("event_tags") or [], "event_range_factor": _num(x.get("event_range_factor"))})   # 事件 (2026-09-27)：事後分組評估
     for h in (5, 10, 20):
         r = (fc.get("horizons") or {}).get(h) or (fc.get("horizons") or {}).get(str(h))
         if not r:

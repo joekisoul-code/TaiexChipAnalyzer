@@ -1,0 +1,1917 @@
+{
+ "schema": "event_params/v1",
+ "version": "2026-09-27",
+ "asof_research": "2026-09-27 (tw_elections / us_elections / macro / holidays 四族研究 + 獨立驗證)",
+ "horizon_days": 120,
+ "grade_def": {
+  "強": "通過驗證 (verified pass)，2010+ 或樣本外仍成立、LOO 穩定；可改帶寬或出數字",
+  "中": "效應通過驗證但只在樣本內 / 未做帶寬 pinball 測試 / n 小；只描述或候選 (預設關閉)",
+  "弱": "原始 p<0.05 但未過 Holm/BH、或 2010+ 消失、或依賴單一事件；只描述並標註「未通過驗證」",
+  "無": "檢定失敗；只顯示「歷史上無可辨識效應」"
+ },
+ "multiple_testing": {
+  "tw_elections": {
+   "n_tests": 166,
+   "method": "Holm+BH 全族"
+  },
+  "us_elections": {
+   "n_tests": 340,
+   "method": "Holm+BH 全族；min Holm 0.17, min BH 0.051"
+  },
+  "macro": {
+   "n_tests": 145,
+   "method": "Holm+BH 全族；34 raw<0.05, 18 BH<0.10, 6 Holm<0.05"
+  },
+  "holidays": {
+   "n_tests": 159,
+   "method": "Holm+BH 族內與全域 (OOS p)"
+  },
+  "total": 810
+ },
+ "costs_roundtrip_pct": {
+  "etf_fee_each_side": 0.0855,
+  "tax": 0.1,
+  "slippage_each_side": 0.05,
+  "roundtrip": 0.371
+ },
+ "direction": {
+  "vote_weight": 0.0,
+  "votes": {},
+  "verdict": "所有事件方向檢定在多重檢定校正後皆未通過；walk-forward 方向規則扣成本後全數輸給單純持有或為負 → 不進 short_term / five_day / verdict；OOS 命中改善 = 0 (未加入)。",
+  "wf_evidence": {
+   "tw_elections_all_post1_20": {
+    "wf_per_event_pct": 1.45,
+    "hold_per_event_pct": 2.62,
+    "n": 23
+   },
+   "tw_local_pre20": {
+    "wf_per_event_pct": 4.24,
+    "note": "= 恆多，無增量"
+   },
+   "geo_post1_20": {
+    "wf_per_event_pct": -2.94
+   },
+   "macro_wf_sign_net_pct": {
+    "fomc": -0.224,
+    "cpi": -0.402,
+    "nfp": -0.336,
+    "cbc": -0.24,
+    "tsmc": -0.676,
+    "msci": -0.226
+   },
+   "holiday_min_bh_direction": 0.28,
+   "us_taiex_from_spx_rule_hits": "2/11, 1/5"
+  },
+  "banned_phrases_zh": [
+   "買進",
+   "賣出",
+   "加碼",
+   "減碼",
+   "放空",
+   "做多",
+   "做空",
+   "進場",
+   "出場",
+   "建議買",
+   "建議賣",
+   "布局",
+   "抄底",
+   "逃頂"
+  ]
+ },
+ "band_rules": {
+  "post_closure_sqrt_nus": {
+   "grade": "強",
+   "verified_status": "pass",
+   "enabled": true,
+   "finding_ids": [
+    "B:realised:LNY",
+    "B:realised:ge2wd",
+    "B:realised:1wd",
+    "TV01",
+    "TV06",
+    "TV07",
+    "TV11",
+    "TV13"
+   ],
+   "applies_to": [
+    "chip/predict/range_levels.py base 模式 (ATR14+EWMA sigma) k=1",
+    "任何 HV/ATR/EWMA 實現波動帶 k=1"
+   ],
+   "not_applies_to": [
+    "chip/analysis/desk_bands.py 選擇權 IV 帶 (IV 已定價休市；加寬使 pinball 變差 +7~20%)"
+   ],
+   "formula": "factor = sqrt(max(1, n_us_uncovered))；n_us_uncovered = 上一台股交易日收盤後、本交易日開盤前已收盤且未被『對齊的完整夜盤』涵蓋的美股交易日數",
+   "k": [
+    1
+   ],
+   "quantiles": [
+    "low10",
+    "low20",
+    "high80",
+    "high90"
+   ],
+   "symmetric": true,
+   "estimation": "無擬合參數 (理論 sqrt 時間縮放)；驗證：2010+ 事件，sigma60 收盤帶，分位數取前 750 個正常交易日 (walk-forward)",
+   "coverage_miss_either_side": {
+    "nominal": {
+     "band80": 0.2,
+     "band90": 0.1
+    },
+    "normal_day_ref_band80": 0.218,
+    "LNY_first_session": {
+     "n": 17,
+     "factor_mean": 2.72,
+     "R0_band80": {
+      "k": 11,
+      "n": 17,
+      "rate": 0.647,
+      "wilson95": [
+       0.413,
+       0.827
+      ]
+     },
+     "R4_band80": {
+      "k": 5,
+      "n": 17,
+      "rate": 0.294,
+      "wilson95": [
+       0.133,
+       0.531
+      ]
+     },
+     "R0_band90": {
+      "k": 9,
+      "n": 17,
+      "rate": 0.529,
+      "wilson95": [
+       0.31,
+       0.738
+      ]
+     },
+     "R4_band90": {
+      "k": 2,
+      "n": 17,
+      "rate": 0.118,
+      "wilson95": [
+       0.033,
+       0.343
+      ]
+     },
+     "R0_holm_fam_p": 0.002
+    },
+    "closure_ge2_weekdays_nonLNY": {
+     "n": 32,
+     "factor_mean": 1.68,
+     "R0_band80": {
+      "k": 17,
+      "n": 32,
+      "rate": 0.531,
+      "wilson95": [
+       0.364,
+       0.691
+      ]
+     },
+     "R4_band80": {
+      "k": 7,
+      "n": 32,
+      "rate": 0.219,
+      "wilson95": [
+       0.11,
+       0.388
+      ]
+     },
+     "R0_band90": {
+      "k": 11,
+      "n": 32,
+      "rate": 0.344,
+      "wilson95": [
+       0.204,
+       0.517
+      ]
+     },
+     "R4_band90": {
+      "k": 4,
+      "n": 32,
+      "rate": 0.125,
+      "wilson95": [
+       0.05,
+       0.281
+      ]
+     },
+     "R0_holm_fam_p": 0.0008
+    },
+    "closure_1_weekday": {
+     "n": 80,
+     "factor_mean": 1.34,
+     "R0_band80": {
+      "k": 29,
+      "n": 80,
+      "rate": 0.362,
+      "wilson95": [
+       0.266,
+       0.472
+      ]
+     },
+     "R4_band80": {
+      "k": 16,
+      "n": 80,
+      "rate": 0.2,
+      "wilson95": [
+       0.127,
+       0.3
+      ]
+     },
+     "R0_band90": {
+      "k": 17,
+      "n": 80,
+      "rate": 0.212,
+      "wilson95": [
+       0.137,
+       0.314
+      ]
+     },
+     "R4_band90": {
+      "k": 8,
+      "n": 80,
+      "rate": 0.1,
+      "wilson95": [
+       0.052,
+       0.185
+      ]
+     },
+     "R0_holm_fam_p": 0.014
+    }
+   },
+   "pinball": "研究未報告此規則的 pinball 與 CI (只有覆蓋率)；實作驗收測試須在 range_levels 路徑帶上補算 (見 design.md §6)",
+   "caveat": "LNY 仍略偏窄 (band80 miss 0.29)；k>=2 未驗證；驗證用 sigma60 收盤帶，轉用到 range_levels 路徑帶須通過驗收回測才開啟",
+   "k_gt1": {
+    "enabled": false,
+    "formula": "sqrt((k-1+n)/k) (理論，未驗證)",
+    "status": "untested"
+   },
+   "n_us_zero_rule": "n_us=0 (美股休市) → factor 1.0 (TV16：收盤波動 x1.03 無收窄)",
+   "range_levels_path": {
+    "enabled": true,
+    "acceptance": {
+     "date": "2026-09-27",
+     "script": "research/events/accept_bands.py (design §7 驗收 A)",
+     "sample": "2014+ 休市後首日 (TAIEX，range_levels base k=1 路徑帶，walk-forward 乘數)",
+     "criteria": "low20/high80 觸及率 ∈ [0.12, 0.28] 且 pinball 相對不調整的事件群聚 bootstrap 95% CI 上限 < 0",
+     "prod_expanding": {
+      "all": {
+       "n": 116,
+       "pinball_rel": -0.111,
+       "ci95": [
+        -0.1824,
+        -0.024
+       ],
+       "touch_R0": {
+        "low10": 0.198,
+        "low20": 0.319,
+        "high80": 0.353,
+        "high90": 0.216
+       },
+       "touch_R": {
+        "low10": 0.095,
+        "low20": 0.224,
+        "high80": 0.172,
+        "high90": 0.078
+       },
+       "f_mean": 1.59
+      },
+      "n_us_ge2": {
+       "n": 104,
+       "pinball_rel": -0.1171,
+       "ci95": [
+        -0.1906,
+        -0.0229
+       ],
+       "touch_R0": {
+        "low10": 0.212,
+        "low20": 0.327,
+        "high80": 0.356,
+        "high90": 0.221
+       },
+       "touch_R": {
+        "low10": 0.096,
+        "low20": 0.221,
+        "high80": 0.154,
+        "high90": 0.067
+       },
+       "f_mean": 1.658
+      },
+      "pass": true
+     },
+     "normal750": {
+      "all": {
+       "n": 116,
+       "pinball_rel": -0.1156,
+       "ci95": [
+        -0.1861,
+        -0.0258
+       ],
+       "touch_R0": {
+        "low10": 0.207,
+        "low20": 0.319,
+        "high80": 0.362,
+        "high90": 0.216
+       },
+       "touch_R": {
+        "low10": 0.095,
+        "low20": 0.233,
+        "high80": 0.164,
+        "high90": 0.078
+       },
+       "f_mean": 1.59
+      },
+      "pass": true
+     },
+     "normal_day_ref_touch": {
+      "low10": 0.09,
+      "low20": 0.199,
+      "high80": 0.205,
+      "high90": 0.101,
+      "n": 577
+     },
+     "result": "pass"
+    },
+    "k": [
+     1
+    ],
+    "mode": "base_event (n_US ≥ 2 時退回 base 模式，不與夜盤 β 混用)"
+   }
+  },
+  "desk_iv_bands": {
+   "grade": "無",
+   "verified_status": "fail",
+   "multiplier": 1.0,
+   "enabled": false,
+   "finding_ids": [
+    "E3",
+    "G5",
+    "USE-PRES-RANGE-TAIEX",
+    "band:iv:fomc",
+    "band:iv:cpi",
+    "band:iv:nfp",
+    "band:iv:cbc",
+    "band:iv:tsmc",
+    "band:iv:msci",
+    "B:IV:k1:1wd",
+    "B:IV:k1:ge2wd",
+    "B:IV:k5:LNY",
+    "B:IV:k5:1wd",
+    "B:IV:k5:ge2wd"
+   ],
+   "note": "所有事件 (台灣選舉、兩岸、美國選舉、FOMC/CPI/NFP/CBC/MSCI/台積電法說、休市) 對 TAIEX IV 帶乘數一律 1.0；56 組 walk-forward 設定無一顯著改善 pinball，10 組顯著變差",
+   "election_T0_breaches": {
+    "k1": "2/8",
+    "k5": "0/8",
+    "k20": "1/8",
+    "nominal_either": 0.2
+   }
+  },
+  "tsmc_call_2330_k1": {
+   "grade": "中",
+   "verified_status": "weak",
+   "enabled": true,
+   "scope": "desk 2330 資產帶 k=1，只套在『法說會當日收盤發布、涵蓋次一交易日』的帶 (ADR 反應前)；ADR 已收盤後改由 ADR 跳空估計主導，乘數不套",
+   "lambda": 1.8,
+   "lambda_source": "walk-forward (僅用過去 >=12 事件) IV 版最後值 1.80、中位 1.95；ATR 版最後 1.95、中位 2.15；取 1.8 (較保守)",
+   "finding_ids": [
+    "band2330:iv:tsmc:k1:common",
+    "band2330:atr:tsmc:k1:common",
+    "tsmc:2330_absret_t"
+   ],
+   "pinball_change": {
+    "iv_sigma": {
+     "n": 23,
+     "years": "2021-2026",
+     "pct": -19.8,
+     "ci95": [
+      -30.8,
+      -2.9
+     ],
+     "p": 0.048,
+     "loo": [
+      -22.8,
+      -17.3
+     ],
+     "years_better": "5/6"
+    },
+    "atr_sigma": {
+     "n": 47,
+     "years": "2015-2026",
+     "pct": -15.2,
+     "ci95": [
+      -25.1,
+      -0.1
+     ],
+     "p": 0.059,
+     "years_better": "8/12"
+    },
+    "verifier_ewma": {
+     "n": 47,
+     "wf_pct": -15.8,
+     "p": 0.038,
+     "fixed_lambda_1.5_pct": -14.5,
+     "fixed_lambda_1.5_p": 0.0005,
+     "placebo_plus7d_pct": -0.7
+    }
+   },
+   "touch_rates_iv": {
+    "before": {
+     "low10": 0.3,
+     "low20": 0.39,
+     "high80": 0.43,
+     "high90": 0.39
+    },
+    "after": {
+     "low10": 0.09,
+     "low20": 0.17,
+     "high80": 0.17,
+     "high90": 0.09
+    }
+   },
+   "bh_over_145": 0.2,
+   "k5": {
+    "enabled": false,
+    "pinball_pct": 4.9,
+    "p": 0.528
+   },
+   "index_k1": {
+    "enabled": false,
+    "pinball_iv_pct": -5.7,
+    "p": 0.361,
+    "note": "TAIEX 指數帶不套"
+   }
+  },
+  "pre_holiday_session_range": {
+   "grade": "中",
+   "verified_status": "pass(effect) / fail(band)",
+   "enabled": false,
+   "candidate_factor": 0.87,
+   "finding_ids": [
+    "TV08",
+    "TV08b"
+   ],
+   "effect": {
+    "n": 208,
+    "range_ratio": 0.87,
+    "p": 0.0005,
+    "2010+": 0.85,
+    "pre2010": 0.91
+   },
+   "note": "效應成立；帶寬驗收 B (pinball walk-forward) 未通過 (2003~09 CI 跨 0) → 維持關閉、只寫 band_ledger 標記",
+   "acceptance_B": {
+    "date": "2026-09-27",
+    "pass": false,
+    "2003-2009": {
+     "n": 47,
+     "pinball_rel": -0.028,
+     "ci95": [
+      -0.0989,
+      0.0187
+     ],
+     "touch_R0": {
+      "low10": 0.021,
+      "low20": 0.17,
+      "high80": 0.191,
+      "high90": 0.128
+     },
+     "touch_R": {
+      "low10": 0.043,
+      "low20": 0.213,
+      "high80": 0.234,
+      "high90": 0.149
+     },
+     "f_mean": 0.87
+    },
+    "2010+": {
+     "n": 142,
+     "pinball_rel": -0.0423,
+     "ci95": [
+      -0.0772,
+      -0.0094
+     ],
+     "touch_R0": {
+      "low10": 0.07,
+      "low20": 0.141,
+      "high80": 0.12,
+      "high90": 0.063
+     },
+     "touch_R": {
+      "low10": 0.085,
+      "low20": 0.183,
+      "high80": 0.211,
+      "high90": 0.085
+     },
+     "f_mean": 0.87
+    },
+    "note": "2010 前 CI 跨 0 → 未通過，維持關閉"
+   }
+  },
+  "yearend_week_range": {
+   "grade": "中",
+   "verified_status": "pass(effect) / fail(band)",
+   "enabled": false,
+   "candidate_factor": 0.8,
+   "finding_ids": [
+    "TV14",
+    "TV05"
+   ],
+   "effect": {
+    "n": 29,
+    "range_ratio": 0.8,
+    "p": 0.0001,
+    "2010+": 0.79,
+    "pre2010": 0.83
+   },
+   "fengguan_day_range": {
+    "ratio": 0.78,
+    "p": 0.021,
+    "grade": "弱"
+   },
+   "acceptance_B": {
+    "date": "2026-09-27",
+    "pass": false,
+    "2003-2009": {
+     "n": 35,
+     "pinball_rel": -0.0316,
+     "ci95": [
+      -0.1513,
+      0.0804
+     ],
+     "touch_R0": {
+      "low10": 0.0,
+      "low20": 0.0,
+      "high80": 0.286,
+      "high90": 0.143
+     },
+     "touch_R": {
+      "low10": 0.0,
+      "low20": 0.086,
+      "high80": 0.4,
+      "high90": 0.257
+     },
+     "f_mean": 0.8
+    },
+    "2010+": {
+     "n": 80,
+     "pinball_rel": -0.0477,
+     "ci95": [
+      -0.1142,
+      0.0162
+     ],
+     "touch_R0": {
+      "low10": 0.025,
+      "low20": 0.05,
+      "high80": 0.237,
+      "high90": 0.125
+     },
+     "touch_R": {
+      "low10": 0.05,
+      "low20": 0.113,
+      "high80": 0.325,
+      "high90": 0.225
+     },
+     "f_mean": 0.8
+    },
+    "note": "high80 觸及率 >0.28、CI 跨 0 → 未通過，維持關閉"
+   },
+   "note": "效應成立；帶寬驗收 B 未通過 (2010+ high80 觸及率 0.325 > 0.28、CI 跨 0) → 維持關閉、只寫 band_ledger 標記"
+  },
+  "fengguan_iv_k1_widen": {
+   "grade": "弱",
+   "verified_status": "weak",
+   "enabled": false,
+   "candidate_factor": 2.4,
+   "ledger_only": true,
+   "finding_ids": [
+    "B:IV:k1:LNY"
+   ],
+   "n": 9,
+   "pinball_pct": -19.5,
+   "p": 0.25,
+   "note": "低估的是上緣 (high80 5/9)，屬美股休市期間走勢，對稱加寬不是正解"
+  },
+  "pre_pre_holiday_iv_k1_narrow": {
+   "grade": "弱",
+   "verified_status": "weak",
+   "enabled": false,
+   "candidate_factor": 0.73,
+   "ledger_only": true,
+   "finding_ids": [
+    "B:IV:k1:pre-pre-holiday"
+   ],
+   "n": 72,
+   "pinball_pct": -8.4,
+   "p": 0.08
+  },
+  "tw_election_T0_hv": {
+   "grade": "弱",
+   "verified_status": "pass(全樣本) / weak(2010+)",
+   "enabled": false,
+   "candidate_factor": 1.28,
+   "ledger_only": true,
+   "finding_ids": [
+    "E1",
+    "E1b",
+    "E4",
+    "E6"
+   ],
+   "effect": {
+    "n": 23,
+    "excess_x": 1.59,
+    "holm": 0.025,
+    "pre2010": {
+     "n": 11,
+     "x": 2.0
+    },
+    "since2010": {
+     "n": 12,
+     "x": 1.29,
+     "p": 0.116
+    }
+   },
+   "wf_multiplier": {
+    "hv_breach_before": "5/19",
+    "hv_breach_after": "0/19",
+    "pinball_pct": -3.3,
+    "p": 0.89,
+    "worse_events": "15/19"
+   }
+  },
+  "us_presidential_spx_range": {
+   "grade": "弱",
+   "verified_status": "weak",
+   "enabled": false,
+   "candidate_factor": 1.4,
+   "range": [
+    1.3,
+    1.5
+   ],
+   "finding_ids": [
+    "USE-PRES-RANGE-SPX"
+   ],
+   "next": "2028-11-08 (美股反應日；台北 2028-11-08 週三)",
+   "effect": {
+    "n": 16,
+    "range_z": 1.6,
+    "median": 1.29,
+    "wf": "10/11 vs 1.0, p 0.001",
+    "bh": 0.051
+   },
+   "note": "只適用 S&P 日內區間；不套 TAIEX (TXO IV 已定價)"
+  },
+  "us_midterm": {
+   "grade": "無",
+   "verified_status": "fail",
+   "multiplier": 1.0,
+   "finding_ids": [
+    "USE-MID-RANGE"
+   ]
+  }
+ },
+ "gap_rules": {
+  "post_closure_gap_forecast": {
+   "grade": "強",
+   "verified_status": "pass",
+   "enabled": true,
+   "finding_ids": [
+    "G:LNY:gap",
+    "G:ge2wd:gap",
+    "G:1wd:gap",
+    "G:LNY:cc",
+    "G:ge2wd:cc",
+    "G:1wd:cc"
+   ],
+   "formula": "gap_hat_0050(%) = beta_gap × Σ log(SOX) 於 n_us_uncovered 個美股交易日 (缺 SOX → TSM ADR)；cc_hat_TAIEX = beta_cc × 同一累積",
+   "beta_estimation": "每日滾動：前 750 個正常交易日 (非休市後) 0050 跳空 / TAIEX 收盤對前一美股交易日 SOX 報酬之 OLS 斜率 (walk-forward)",
+   "beta_ref": {
+    "gap_normal_day": [
+     0.22,
+     0.27
+    ],
+    "gap_event_fit": [
+     0.35,
+     0.4
+    ],
+    "cc_sox_LNY": 0.32,
+    "cc_tsm_LNY": 0.23
+   },
+   "use_normal_day_beta": true,
+   "oos": {
+    "gap_LNY": {
+     "n_oos": 17,
+     "r2_sox": 0.67,
+     "r2_tsm": 0.66,
+     "sign_hit_sox": 1.0,
+     "resid_rms_sigma60": {
+      "sox": 1.76,
+      "tsm": 1.65
+     },
+     "raw_rms_sigma60": 2.75,
+     "sign_hit_tsm": 0.88,
+     "research_resid_rms_sigma60": {
+      "sox": 2.08,
+      "tsm": 1.94,
+      "raw": 3.3,
+      "n_oos": 10
+     }
+    },
+    "gap_ge2wd": {
+     "n_oos": 46,
+     "r2_sox": 0.62,
+     "r2_tsm": 0.62,
+     "sign_hit": 0.89,
+     "resid_rms_sigma60": {
+      "sox": 1.23,
+      "tsm": 1.17
+     },
+     "raw_rms_sigma60": 1.9,
+     "sign_hit_sox": 0.89,
+     "sign_hit_tsm": 0.89,
+     "research_resid_rms_sigma60": {
+      "sox": 1.28,
+      "tsm": 1.21,
+      "raw": 1.99,
+      "n_oos": 41
+     }
+    },
+    "gap_1wd": {
+     "n_oos": 71,
+     "r2_sox": 0.68,
+     "r2_tsm": 0.56,
+     "resid_rms_sigma60": {
+      "sox": 0.75,
+      "tsm": 0.92
+     },
+     "raw_rms_sigma60": 1.29,
+     "sign_hit_sox": 0.79,
+     "sign_hit_tsm": 0.76,
+     "research_resid_rms_sigma60": {
+      "sox": 0.76,
+      "tsm": 0.95,
+      "raw": 1.33,
+      "n_oos": 67
+     }
+    },
+    "cc_LNY": {
+     "n_oos": 17,
+     "r2_sox": 0.5,
+     "r2_tsm": 0.44,
+     "sign_hit_sox": 0.82,
+     "resid_rms_sigma60": 2.58,
+     "raw_rms_sigma60": 3.31
+    },
+    "cc_ge2wd": {
+     "n_oos": 49,
+     "r2_sox": 0.53,
+     "r2_tsm": 0.45,
+     "sign_hit": 0.76
+    },
+    "cc_1wd": {
+     "n_oos": 80,
+     "r2_sox": 0.42,
+     "r2_tsm": 0.3
+    },
+    "resid_note": "resid_rms_sigma60 依預估來源 (sox / tsm) 分開，數值取驗證重跑 (walk-forward 正常日 β，n 與 n_oos 一致)；research_* 為研究原表 (樣本較短) 備查"
+   },
+   "residual_mean": "≈0 (|t|<0.7)",
+   "when": "只在美股休市期間各交易日都已收盤後 (復市當天清晨) 才輸出；封關日/休市前一日只顯示『待美股』",
+   "band_centre_shift": {
+    "enabled": false,
+    "note": "以 beta×累積移動平移 range_levels 中心、寬度改殘差 rms：研究建議但未做帶寬 pinball 測試 → ledger 測試"
+   },
+   "caveat": "0050 除息日若與復市日重疊須剔除；TAIEX 開盤價不可靠，跳空一律以 0050 計"
+  },
+  "no_us_session_gap": {
+   "grade": "強",
+   "verified_status": "pass",
+   "enabled": true,
+   "finding_ids": [
+    "TV19",
+    "TV16"
+   ],
+   "gap_size_factor": 0.76,
+   "since2010": 0.72,
+   "n": 114,
+   "cc_vol_factor": 1.0,
+   "note": "前一晚美股休市 → 0050 跳空幅度約為平常 0.7~0.76 倍；收盤波動不變 (x1.03)，不縮帶"
+  },
+  "tsmc_call_0050_gap": {
+   "grade": "中",
+   "verified_status": "weak",
+   "finding_ids": [
+    "tsmc:tw_absgap50_t"
+   ],
+   "pctile": 0.658,
+   "p": 0.0012,
+   "bh": 0.02,
+   "holm": 0.17,
+   "n": 56,
+   "verifier_B": 0.704,
+   "note": "法說會隔日 0050 跳空幅度偏大 (約落在正常日第 66 百分位)；描述用"
+  },
+  "tw_election_0050_gap": {
+   "grade": "弱",
+   "finding_ids": [
+    "E8"
+   ],
+   "note": "不用"
+  }
+ },
+ "iv_expectations": {
+  "closure_mechanical": {
+   "grade": "強",
+   "verified_status": "pass",
+   "finding_ids": [
+    "IV01",
+    "IV02",
+    "IV03"
+   ],
+   "ivk5_dlog": {
+    "LNY": -0.216,
+    "any_closure": -0.084,
+    "normal": 0.005,
+    "n_LNY": 10,
+    "n_any": 80
+   },
+   "iv21_dlog": {
+    "LNY": -0.107,
+    "any_closure": -0.012
+   },
+   "use": "IV 變化特徵跨休市時扣除預期機械下降 (ivk5_dlog_adj = 實際 − 預期)；App 顯示『IV 下降屬交易日年化機械效果』"
+  },
+  "tw_election_T0_iv5": {
+   "grade": "中",
+   "verified_status": "pass",
+   "finding_ids": [
+    "E2",
+    "E15"
+   ],
+   "iv5_dlog_mean": -0.142,
+   "baseline": -0.011,
+   "n": 8,
+   "neg": "6/8",
+   "holm": 0.025,
+   "loo_p_max": 0.018,
+   "tenor_limit": "只 iv5 / k<=5；iv21、ivk_20 約 -4% 且不穩",
+   "conditioning": "T-1 iv5 / 20 日均 >= 1.2 時大幅下降 (2024 1.70x → -40%，2020 1.18x → -25%，2025-08 1.22x → -21%)；公投/罷免型日期近 0",
+   "mean_pct": -13,
+   "cases": [
+    {
+     "date": "2018-11-26",
+     "t1_ratio": 1.04,
+     "iv5_dlog": -0.193,
+     "pct": -18
+    },
+    {
+     "date": "2020-01-13",
+     "t1_ratio": 1.18,
+     "iv5_dlog": -0.29,
+     "pct": -25
+    },
+    {
+     "date": "2020-06-08",
+     "t1_ratio": 0.85,
+     "iv5_dlog": 0.021,
+     "pct": 2
+    },
+    {
+     "date": "2021-12-20",
+     "t1_ratio": 0.94,
+     "iv5_dlog": 0.147,
+     "pct": 16
+    },
+    {
+     "date": "2022-11-28",
+     "t1_ratio": 0.88,
+     "iv5_dlog": -0.007,
+     "pct": -1
+    },
+    {
+     "date": "2024-01-15",
+     "t1_ratio": 1.7,
+     "iv5_dlog": -0.512,
+     "pct": -40
+    },
+    {
+     "date": "2025-07-28",
+     "t1_ratio": 1.01,
+     "iv5_dlog": -0.063,
+     "pct": -6
+    },
+    {
+     "date": "2025-08-25",
+     "t1_ratio": 1.22,
+     "iv5_dlog": -0.238,
+     "pct": -21
+    }
+   ],
+   "ratio_threshold": 1.2,
+   "cases_source": "verify_tw_elections/v1_out.txt (t1_ratio = T-1 iv5 ÷ T-21..T-2 平均；pct = exp(dlog)−1)"
+  },
+  "fomc_ivk1": {
+   "grade": "弱",
+   "verified_status": "weak",
+   "finding_ids": [
+    "fomc:tw_div_t"
+   ],
+   "vol_pts": -0.85,
+   "n": 72,
+   "since2022": -1.31
+  },
+  "tsmc_ivk": {
+   "grade": "弱",
+   "verified_status": "weak",
+   "finding_ids": [
+    "tsmc:tw_div_t"
+   ],
+   "vol_pts": -1.57,
+   "n": 39
+  },
+  "us_election_txo_iv5": {
+   "grade": "弱",
+   "verified_status": "weak",
+   "finding_ids": [
+    "USE-TXO-IV"
+   ],
+   "dlog_mean": -0.197,
+   "n": 4,
+   "note": "2022 期中 +11% (CPI 週)"
+  },
+  "us_midterm_vix": {
+   "grade": "無",
+   "finding_ids": [
+    "USE-VIX-CRUSH"
+   ],
+   "resid_pct": -5.7,
+   "p": 0.17,
+   "note": "期中選舉不承諾 VIX 下降"
+  },
+  "us_presidential_vix": {
+   "grade": "弱",
+   "resid_pct": -10.9,
+   "p": 0.016,
+   "n": 9
+  }
+ },
+ "event_types": {
+  "post_closure_session": {
+   "name_zh": "休市後首個交易日 (一般)",
+   "family": "holidays",
+   "anchor": "復市日",
+   "grade_vol": "強",
+   "grade_dir": "無",
+   "vol": {
+    "abs_ret_x_sigma60": {
+     "ge2wd": 1.97,
+     "1wd": 1.39,
+     "since2010_ge2wd": 2.13,
+     "since2010_1wd": 1.48
+    },
+    "n": {
+     "ge2wd": 40,
+     "1wd": 138
+    }
+   },
+   "direction": {
+    "desc": "休市後首日方向在扣除美股休市期間漲跌後無殘差 (TD06r p 0.26)",
+    "status": "fail"
+   },
+   "notes_zh": "波動大小取決於休市期間累積了幾個美股交易日；方向由美股期間漲跌決定，無日曆效應。"
+  },
+  "lny_reopen": {
+   "name_zh": "農曆年開紅盤",
+   "family": "holidays",
+   "anchor": "開紅盤日",
+   "grade_vol": "強",
+   "grade_dir": "無",
+   "vol": {
+    "abs_ret_x": 2.62,
+    "range_x": 2.01,
+    "gap0050_x": 3.39,
+    "n": 29,
+    "n_gap": 18,
+    "sessions2_5_x": 0.97
+   },
+   "direction": {
+    "excess_pct": 0.66,
+    "after_sox_adj_pct": 0.04,
+    "p_signflip": 0.2,
+    "status": "fail",
+    "desc": "開紅盤上漲全部來自休市期間美股 (扣除後 +0.04%)"
+   },
+   "notes_zh": "開紅盤單日波動約平常 2.6 倍，只持續一天；漲跌幾乎完全由春節期間費半/台積電 ADR 累積漲跌決定。"
+  },
+  "lny_fengguan": {
+   "name_zh": "農曆年封關日",
+   "family": "holidays",
+   "anchor": "封關日",
+   "grade_vol": "弱",
+   "grade_dir": "弱",
+   "vol": {
+    "range_x": 0.78,
+    "p": 0.021
+   },
+   "direction": {
+    "up_rate": 0.86,
+    "base_up_rate": 0.54,
+    "n": 29,
+    "since2010_up": "14/17",
+    "since2010_excess_pct": 0.2,
+    "bh_oos": 0.4,
+    "status": "weak",
+    "desc": "上漲機率高但平均僅 +0.2%，低於來回成本 0.371%，未通過多重檢定"
+   },
+   "notes_zh": "歷史傾向 (未通過驗證)：封關日多數收紅但幅度很小。選擇權 k=1 帶上緣可能偏窄 (n=9，僅記錄)。"
+  },
+  "lny_pre5": {
+   "name_zh": "農曆年前 5 日 (紅包行情)",
+   "family": "holidays",
+   "grade_vol": "無",
+   "grade_dir": "無",
+   "direction": {
+    "excess_pct": 0.89,
+    "p": 0.092,
+    "since2010_pct": 0.5,
+    "status": "fail"
+   },
+   "notes_zh": "無可辨識的紅包行情。"
+  },
+  "pre_holiday_session": {
+   "name_zh": "連假前最後交易日",
+   "family": "holidays",
+   "anchor": "休市前一日",
+   "grade_vol": "中",
+   "grade_dir": "無",
+   "vol": {
+    "range_x": 0.87,
+    "n": 208,
+    "p": 0.0005,
+    "abs_ret_x_since2010": 0.79
+   },
+   "direction": {
+    "excess_pct_since2010": 0.01,
+    "status": "fail"
+   },
+   "notes_zh": "連假前一日盤中區間通常較窄 (約平常 0.87 倍)；方向無效應。前一日發布的選擇權 k=1 帶可能偏寬 (僅記錄)。"
+  },
+  "specific_tw_holidays": {
+   "name_zh": "中秋/端午/國慶/228/清明前後",
+   "family": "holidays",
+   "grade_vol": "強(經由休市長度)",
+   "grade_dir": "無",
+   "direction": {
+    "n": [
+     22,
+     24,
+     23,
+     23,
+     26
+    ],
+    "all_p_ge": 0.15,
+    "status": "fail"
+   },
+   "notes_zh": "個別節日本身沒有方向效應；波動放大是因為累積多個美股交易日 (清明在 2010 前無效應即為證)。"
+  },
+  "tw_yearend_last5": {
+   "name_zh": "台股年底最後 5 個交易日 (作帳行情)",
+   "family": "holidays",
+   "grade_vol": "中",
+   "grade_dir": "弱",
+   "vol": {
+    "range_x": 0.8,
+    "n": 29,
+    "p": 0.0001
+   },
+   "direction": {
+    "excess_pct": 1.33,
+    "p_signflip": 0.0035,
+    "since2010_pct": 1.0,
+    "since2010_up": "13/16",
+    "wf_net_pct": 0.63,
+    "wf_p_raw": 0.002,
+    "holm_family": 0.18,
+    "status": "weak",
+    "desc": "最持久的台股特有傾向，但未通過 90 項方向檢定的 Holm 校正"
+   },
+   "notes_zh": "歷史傾向 (未通過驗證)：年底最後一週 2010 年後 16 年有 13 年上漲、平均超額約 +1%；盤中區間約平常 0.8 倍。不是買賣建議。"
+  },
+  "tw_yearend_last_day": {
+   "name_zh": "台股年度最後交易日",
+   "family": "holidays",
+   "grade_vol": "無",
+   "grade_dir": "無",
+   "direction": {
+    "excess_pct": 0.39,
+    "p": 0.093,
+    "status": "fail"
+   },
+   "notes_zh": "無可辨識效應。"
+  },
+  "jan_first": {
+   "name_zh": "1 月首個交易日 / 1 月效應",
+   "family": "holidays",
+   "grade_vol": "無",
+   "grade_dir": "無",
+   "direction": {
+    "first_day_p": 0.48,
+    "first5_p": 0.17,
+    "month_p": 0.14,
+    "status": "fail"
+   },
+   "notes_zh": "無 1 月效應；首日波動偏大只是元旦休市 (已含在休市規則)。"
+  },
+  "us_holiday_no_session": {
+   "name_zh": "前一晚美股休市的台股交易日",
+   "family": "holidays",
+   "grade_vol": "無(全日波動) / 強(跳空幅度)",
+   "grade_dir": "無",
+   "vol": {
+    "gap0050_x": 0.76,
+    "cc_x": 1.03,
+    "n": 114
+   },
+   "direction": {
+    "p": 0.25,
+    "status": "fail"
+   },
+   "notes_zh": "前一晚美股休市：0050 開盤跳空通常較小 (約 0.7~0.76 倍)，但全日波動與平常相同。",
+   "grade_gap": "強"
+  },
+  "us_thanksgiving": {
+   "name_zh": "美國感恩節 / 黑色星期五",
+   "family": "holidays",
+   "grade_vol": "強(美股)",
+   "grade_dir": "無",
+   "vol": {
+    "spx_black_friday_range_x": 0.56,
+    "n": 36
+   },
+   "direction": {
+    "p": 0.49,
+    "status": "fail"
+   },
+   "notes_zh": "黑色星期五為美股半日盤，S&P 區間約平常 0.56 倍 (機械性)。"
+  },
+  "us_santa": {
+   "name_zh": "美股聖誕行情 (12 月最後 5 日 + 1 月前 2 日)",
+   "family": "holidays",
+   "grade_vol": "強(美股)",
+   "grade_dir": "無",
+   "vol": {
+    "spx_last5_range_x": 0.72
+   },
+   "direction": {
+    "excess_1950_2009_pct": 1.24,
+    "since2010_pct": 0.06,
+    "p_since2010": 0.86,
+    "status": "fail"
+   },
+   "notes_zh": "聖誕行情 2010 年後已消失；美股年底週區間約平常 0.72 倍。"
+  },
+  "us_pre_holiday": {
+   "name_zh": "美股休市前一交易日",
+   "family": "holidays",
+   "grade_vol": "強(美股)",
+   "grade_dir": "無",
+   "vol": {
+    "spx_range_x": 0.79,
+    "n": 318
+   },
+   "direction": {
+    "excess_pct": 0.055,
+    "p": 0.39,
+    "status": "fail"
+   },
+   "notes_zh": "美股休市前一日區間較窄 (部分為半日盤)。"
+  },
+  "fomc": {
+   "name_zh": "FOMC 利率決策",
+   "family": "macro",
+   "anchor": "台股反應日 = 決策隔日",
+   "grade_vol": "弱(台股) / 強(美股)",
+   "grade_dir": "無",
+   "vol": {
+    "spx_range_pctile": 0.618,
+    "spx_n": 262,
+    "spx_since2012": 0.691,
+    "tw_absret_pctile": 0.574,
+    "tw_n": 223,
+    "tw_since2012": 0.61,
+    "tw_absret_over_iv_pctile": 0.622,
+    "ivk1_vol_pts": -0.85
+   },
+   "band": {
+    "iv_k1_pinball_pct": 1.0,
+    "p": 0.594,
+    "status": "fail"
+   },
+   "direction": {
+    "tw_diff_pct": 0.172,
+    "p": 0.1,
+    "spx_pre_fomc_since2012_pct": 0.027,
+    "wf_net_pct": -0.224,
+    "status": "fail"
+   },
+   "notes_zh": "美股當晚波動明顯放大；台股隔日波動略高於平常 (約第 57 百分位)，但現有選擇權機率帶已足夠涵蓋，不需調整。升息/降息/不變與台股隔日漲跌無關。"
+  },
+  "us_cpi": {
+   "name_zh": "美國 CPI",
+   "family": "macro",
+   "anchor": "台股反應日 = 公布隔日",
+   "grade_vol": "無(台股) / 弱(美股)",
+   "grade_dir": "無",
+   "vol": {
+    "spx_range_pctile": 0.547,
+    "spx_n": 391,
+    "tw_absret_pctile": 0.509,
+    "tw_n": 330,
+    "tw_2021_23_pctile": 0.526
+   },
+   "direction": {
+    "tw_diff_pct": -0.026,
+    "p": 0.75,
+    "status": "fail"
+   },
+   "notes_zh": "台股對 CPI 沒有可辨識反應 (連 2021~23 通膨期也沒有)。"
+  },
+  "us_nfp": {
+   "name_zh": "美國非農就業",
+   "family": "macro",
+   "anchor": "台股反應日 = 週一",
+   "grade_vol": "弱(台股) / 強(美股)",
+   "grade_dir": "無",
+   "vol": {
+    "spx_absret_pctile": 0.584,
+    "spx_range_pctile": 0.621,
+    "spx_n": 391,
+    "tw_absret_pctile": 0.54,
+    "tw_n": 295
+   },
+   "direction": {
+    "tw_diff_pct": 0.075,
+    "p": 0.44,
+    "status": "fail"
+   },
+   "notes_zh": "美股當天波動較大；台股週一影響很小。"
+  },
+  "tw_cbc": {
+   "name_zh": "央行理監事會",
+   "family": "macro",
+   "anchor": "台股反應日 = 會後隔日",
+   "grade_vol": "無",
+   "grade_dir": "無",
+   "vol": {
+    "tw_absret_pctile": 0.478,
+    "n": 114
+   },
+   "direction": {
+    "tw_diff_pct": 0.117,
+    "p": 0.41,
+    "status": "fail"
+   },
+   "notes_zh": "無可辨識效應。"
+  },
+  "tsmc_call": {
+   "name_zh": "台積電法說會",
+   "family": "macro",
+   "anchor": "台股反應日 = 法說隔日",
+   "grade_vol": "強(2330) / 中(0050 跳空)",
+   "grade_dir": "無",
+   "vol": {
+    "tw2330_absret_pctile": 0.75,
+    "tw2330_median_ratio": 1.89,
+    "n": 58,
+    "tsm_adr_absret_pctile": 0.805,
+    "gap0050_pctile": 0.658,
+    "taiex_range_pctile": 0.596,
+    "ivk_vol_pts": -1.57
+   },
+   "direction": {
+    "tw_diff_pct": -0.073,
+    "p": 0.73,
+    "tsm_adr_same_session_pct": 1.2,
+    "tsm_adr_p": 0.025,
+    "wf_net_pct": -0.676,
+    "status": "fail"
+   },
+   "notes_zh": "台積電隔日波動約平常 1.9 倍 (中位數)；0050 跳空偏大。操盤台 2330 的 1 日帶在法說當日收盤發布時放寬 1.8 倍 (證據中等)。ADR 當晚反應方向無法事先得知。"
+  },
+  "msci_rebalance": {
+   "name_zh": "MSCI 季度調整生效日",
+   "family": "macro",
+   "grade_vol": "無",
+   "grade_dir": "無",
+   "vol": {
+    "range_pctile": 0.587,
+    "vs_other_month_end_p": 0.34
+   },
+   "direction": {
+    "p": 0.12,
+    "status": "fail"
+   },
+   "notes_zh": "看似波動較大其實是月底效應 (其他月底同樣偏高)；11 月生效日常因感恩節提前，日期待 MSCI 公告。"
+  },
+  "tw_local_election": {
+   "name_zh": "台灣地方選舉 (九合一)",
+   "family": "tw_elections",
+   "anchor": "T0 = 投票後首個交易日 (週一)",
+   "grade_vol": "中(IV) / 弱(實現波動)",
+   "grade_dir": "弱",
+   "vol": {
+    "exhv1_x_all": 1.59,
+    "exhv1_x_since2010": 1.29,
+    "p_since2010": 0.116,
+    "local_exhv1_x": 1.62,
+    "iv5_dlog": -0.142,
+    "iv_band_breach_k1": "2/8",
+    "local_T0_move_over_iv": {
+     "2018": 1.43,
+     "2022": 1.65
+    }
+   },
+   "direction": {
+    "pre20_pct": 4.54,
+    "pre20_base_pct": 0.38,
+    "up": "9/10",
+    "n": 10,
+    "p": 0.027,
+    "bh": 0.23,
+    "wf": "= 恆多，無增量",
+    "r0_pct": 1.03,
+    "status": "weak",
+    "desc": "選前 20 日多上漲，但與同期 (11 月 MSCI/年底) 季節性重疊、未過校正"
+   },
+   "notes_zh": "選後首日以實現波動衡量約平常 1.3 倍 (2010 後不顯著)，以選擇權隱含波動衡量則正常；選後首日 5 日期 IV 平均下降約 13% (選前 IV 溢價越高降越多)。方向無可靠效應。"
+  },
+  "tw_presidential_election": {
+   "name_zh": "台灣總統大選",
+   "family": "tw_elections",
+   "anchor": "T0 = 投票後首個交易日",
+   "grade_vol": "中(IV) / 弱",
+   "grade_dir": "弱",
+   "vol": {
+    "exhv1_x": 1.9,
+    "z0": 1.88,
+    "note": "依賴 2004 (319 槍擊)"
+   },
+   "direction": {
+    "post1_20_pct": 5.6,
+    "base_pct": 1.2,
+    "up": "6/7",
+    "n": 7,
+    "p": 0.043,
+    "bh": 0.33,
+    "status": "weak"
+   },
+   "notes_zh": "下次為 2028-01 (日期未公告)。"
+  },
+  "cross_strait": {
+   "name_zh": "兩岸事件 / 解放軍演習 (非排程)",
+   "family": "tw_elections",
+   "grade_vol": "無",
+   "grade_dir": "無",
+   "vol": {
+    "z0": 0.8,
+    "base": 0.8,
+    "p": 0.91
+   },
+   "direction": {
+    "post5_ex_tariff_pct": -0.99,
+    "p": 0.17,
+    "drills_n": 8,
+    "status": "fail"
+   },
+   "extra": {
+    "tsm_minus_sox_pct": -1.68,
+    "n": 12,
+    "p": 0.0048,
+    "loo_p_max": 0.125,
+    "grade": "弱",
+    "desc": "僅事後描述；依賴 2000 白皮書"
+   },
+   "notes_zh": "非排程事件，不進行事前預判；歷史上加權指數無可辨識反應，演習後不自動放寬機率帶。"
+  },
+  "tw_inauguration": {
+   "name_zh": "5/20 就職",
+   "family": "tw_elections",
+   "grade_vol": "無",
+   "grade_dir": "無",
+   "direction": {
+    "r0_pct": -0.72,
+    "p": 0.12,
+    "n": 7,
+    "status": "fail"
+   },
+   "notes_zh": "無可辨識效應。"
+  },
+  "us_midterm": {
+   "name_zh": "美國期中選舉",
+   "family": "us_elections",
+   "anchor": "台北反應日 = 選舉隔日週三",
+   "grade_vol": "無",
+   "grade_dir": "無",
+   "vol": {
+    "spx_range_x": 1.09,
+    "spx_p": 0.78,
+    "taiex_range_x": 1.26,
+    "taiex_p": 0.16,
+    "n_taiex": 7,
+    "vix_post5_resid_pct": -5.7,
+    "vix_p": 0.17,
+    "taiex_rv_post_pre": 0.77,
+    "rv_status": "fail(均值回歸)"
+   },
+   "direction": {
+    "spx_pre20_pct": 3.6,
+    "spx_post60_pct": 6.4,
+    "spx_post60_since1990_p": 0.4,
+    "taiex_post20_pct": 3.6,
+    "taiex_post20_up": "7/7",
+    "taiex_post20_p": 0.25,
+    "fisher_p_raw": 0.047,
+    "cycle_12m_spx_pct": 18.1,
+    "cycle_since1990_p": 0.32,
+    "cycle_since2006_p": 0.67,
+    "status": "fail",
+    "desc": "期中選舉後的『總統週期』多頭來自 1990 年前，近 20 年消失"
+   },
+   "notes_zh": "反應日機率帶維持不變；期中選舉後 VIX 不一定下降。總統任期週期的歷史漲幅 1990 年後已不顯著。台股選後 20 日 7/7 上漲僅為描述 (與台灣 11-28 選舉、年底季節重疊)。"
+  },
+  "us_presidential": {
+   "name_zh": "美國總統大選",
+   "family": "us_elections",
+   "grade_vol": "弱",
+   "grade_dir": "無",
+   "vol": {
+    "spx_range_z": 1.6,
+    "n": 16,
+    "wf": "10/11",
+    "vix_post5_resid_pct": -10.9,
+    "taiex_range_x": 1.87,
+    "taiex_n": 7,
+    "taiex_ex2016": 1.33
+   },
+   "direction": {
+    "all_p_ge": 0.29,
+    "status": "fail"
+   },
+   "notes_zh": "下次 2028-11-07；S&P 反應日區間約 1.3~1.5 倍 (候選)，台股 IV 帶已定價。"
+  }
+ },
+ "calendar_upcoming": [
+  {
+   "date": "2026-09-28",
+   "tw_session": "2026-09-29",
+   "event_type": "post_closure_session",
+   "title_zh": "中秋 + 教師節連假後復市 (休 2 個平日，含 3 個美股交易日 09-24/25/28)",
+   "date_confidence": "confirmed",
+   "source": "TWSE holidaySchedule API",
+   "n_us": 3.0,
+   "band": {
+    "range_levels_k1_factor": 1.732,
+    "desk_iv": 1.0
+   },
+   "gap": {
+    "forecast": "beta×Σ SOX (09-24,25,28)；研究試算 (正常日 beta) 約 +0.2~0.3% 未含 09-28"
+   },
+   "iv": {
+    "ivk5_expected_dlog": -0.084
+   }
+  },
+  {
+   "date": "2026-10-02",
+   "tw_session": "2026-10-05",
+   "event_type": "us_nfp",
+   "title_zh": "美國 9 月非農 (台股反應 10-05 週一)",
+   "date_confidence": "scheduled",
+   "source": "bls.gov schedule",
+   "n_us": 1.0
+  },
+  {
+   "date": "2026-10-08",
+   "tw_session": "2026-10-08",
+   "event_type": "pre_holiday_session",
+   "title_zh": "國慶連假前最後交易日",
+   "date_confidence": "confirmed",
+   "source": "TWSE holidaySchedule API",
+   "n_us": 1.0,
+   "band": {
+    "candidate_range_factor": 0.87,
+    "enabled": false
+   }
+  },
+  {
+   "date": "2026-10-10",
+   "tw_session": "2026-10-12",
+   "event_type": "post_closure_session",
+   "title_zh": "國慶日後復市 (休 1 個平日，含 2 個美股交易日)",
+   "date_confidence": "confirmed",
+   "source": "TWSE holidaySchedule API",
+   "n_us": 2.0,
+   "band": {
+    "range_levels_k1_factor": 1.414,
+    "desk_iv": 1.0
+   },
+   "iv": {
+    "ivk5_expected_dlog": -0.084
+   }
+  },
+  {
+   "date": "2026-10-14",
+   "tw_session": "2026-10-15",
+   "event_type": "us_cpi",
+   "title_zh": "美國 9 月 CPI",
+   "date_confidence": "scheduled",
+   "source": "bls.gov schedule",
+   "n_us": 1.0
+  },
+  {
+   "date": "2026-10-15",
+   "tw_session": "2026-10-16",
+   "event_type": "tsmc_call",
+   "title_zh": "台積電 Q3 法說會 (估計，14:00 台北)",
+   "date_confidence": "estimated",
+   "source": "EDGAR 6-K 規則 (1 月/4 月/7 月/10 月 12 日後首個週四)；待 TSMC IR 確認",
+   "n_us": 1.0,
+   "band": {
+    "desk_2330_k1_lambda": 1.8,
+    "issued_on": "2026-10-15 收盤",
+    "index": 1.0
+   }
+  },
+  {
+   "date": "2026-10-23",
+   "tw_session": "2026-10-23",
+   "event_type": "pre_holiday_session",
+   "title_zh": "光復節連假前最後交易日",
+   "date_confidence": "confirmed",
+   "source": "TWSE holidaySchedule API",
+   "n_us": 1.0,
+   "band": {
+    "candidate_range_factor": 0.87,
+    "enabled": false
+   }
+  },
+  {
+   "date": "2026-10-25",
+   "tw_session": "2026-10-27",
+   "event_type": "post_closure_session",
+   "title_zh": "光復節 (10-26 補假) 後復市 (含 2 個美股交易日)",
+   "date_confidence": "confirmed",
+   "source": "TWSE holidaySchedule API",
+   "n_us": 2.0,
+   "band": {
+    "range_levels_k1_factor": 1.414,
+    "desk_iv": 1.0
+   },
+   "iv": {
+    "ivk5_expected_dlog": -0.084
+   }
+  },
+  {
+   "date": "2026-10-28",
+   "tw_session": "2026-10-29",
+   "event_type": "fomc",
+   "title_zh": "FOMC 決策 (09-16 升息 1 碼後)",
+   "date_confidence": "scheduled",
+   "source": "federalreserve.gov fomccalendars",
+   "n_us": 1.0
+  },
+  {
+   "date": "2026-11-03",
+   "tw_session": "2026-11-04",
+   "event_type": "us_midterm",
+   "title_zh": "美國期中選舉 (台北 11-04 週三計票中交易)",
+   "date_confidence": "scheduled",
+   "source": "選舉日規則 (11 月第一個週一後的週二)",
+   "n_us": 1.0,
+   "band": {
+    "desk_iv": 1.0,
+    "range_levels": 1.0
+   }
+  },
+  {
+   "date": "2026-11-06",
+   "tw_session": "2026-11-09",
+   "event_type": "us_nfp",
+   "title_zh": "美國 10 月非農",
+   "date_confidence": "scheduled",
+   "source": "bls.gov schedule",
+   "n_us": 1.0
+  },
+  {
+   "date": "2026-11-10",
+   "tw_session": "2026-11-11",
+   "event_type": "us_cpi",
+   "title_zh": "美國 10 月 CPI",
+   "date_confidence": "scheduled",
+   "source": "bls.gov schedule",
+   "n_us": 1.0
+  },
+  {
+   "date": "2026-11-26",
+   "tw_session": "2026-11-27",
+   "event_type": "us_holiday_no_session",
+   "title_zh": "美國感恩節 (台股 11-27 前一晚無美股)",
+   "date_confidence": "scheduled",
+   "source": "NYSE 規則",
+   "n_us": 0.0,
+   "gap": {
+    "gap_size_factor": 0.76
+   },
+   "also": "us_thanksgiving: S&P 11-27 黑色星期五半日盤區間約 0.56 倍"
+  },
+  {
+   "date": "2026-11-27",
+   "tw_session": "2026-11-27",
+   "event_type": "tw_local_election",
+   "title_zh": "九合一選前最後交易日 (T-1)：當日收盤發布的機率帶涵蓋投票週末，寫入 band_ledger 事後檢查",
+   "date_confidence": "confirmed",
+   "source": "中選會",
+   "n_us": 0.0,
+   "band": {
+    "desk_iv": 1.0,
+    "ledger_tag": "tw_local_2026_T-1"
+   }
+  },
+  {
+   "date": "2026-11-28",
+   "tw_session": "2026-11-30",
+   "event_type": "tw_local_election",
+   "title_zh": "九合一地方選舉 (週六投票)；T0 = 11-30 週一",
+   "date_confidence": "confirmed",
+   "source": "中選會",
+   "n_us": 1.0,
+   "band": {
+    "desk_iv": 1.0,
+    "range_levels_candidate": 1.28,
+    "enabled": false,
+    "ledger_tag": "tw_local_2026_T0"
+   },
+   "iv": {
+    "iv5_expected_dlog_range": [
+     -0.2,
+     -0.1
+    ],
+    "condition": "看 11-27 收盤 iv5 / 20 日均；>=1.2 才預期大降"
+   },
+   "confounders": [
+    "MSCI 11 月調整生效日 (待公告；可能因感恩節提前)",
+    "11-27 為美國感恩節後半日盤"
+   ]
+  },
+  {
+   "date": "2026-11-30",
+   "tw_session": "2026-11-30",
+   "event_type": "msci_rebalance",
+   "title_zh": "MSCI 11 月季度調整生效 (規則估計，可能提前至 11-24)",
+   "date_confidence": "low",
+   "source": "規則：11 月最後交易日；近年感恩節年份提前",
+   "n_us": 1.0
+  },
+  {
+   "date": "2026-12-04",
+   "tw_session": "2026-12-07",
+   "event_type": "us_nfp",
+   "title_zh": "美國 11 月非農",
+   "date_confidence": "scheduled",
+   "source": "bls.gov schedule",
+   "n_us": 1.0
+  },
+  {
+   "date": "2026-12-09",
+   "tw_session": "2026-12-10",
+   "event_type": "fomc",
+   "title_zh": "FOMC 決策 + 經濟預測 (SEP)",
+   "date_confidence": "scheduled",
+   "source": "federalreserve.gov fomccalendars",
+   "n_us": 1.0
+  },
+  {
+   "date": "2026-12-10",
+   "tw_session": "2026-12-11",
+   "event_type": "us_cpi",
+   "title_zh": "美國 11 月 CPI",
+   "date_confidence": "scheduled",
+   "source": "bls.gov schedule",
+   "n_us": 1.0
+  },
+  {
+   "date": "2026-12-17",
+   "tw_session": "2026-12-18",
+   "event_type": "tw_cbc",
+   "title_zh": "央行第四季理監事會 (16:00 後公布)",
+   "date_confidence": "scheduled",
+   "source": "cbc.gov.tw 2026 行事曆",
+   "n_us": 1.0
+  },
+  {
+   "date": "2026-12-24",
+   "tw_session": "2026-12-24",
+   "event_type": "pre_holiday_session",
+   "title_zh": "行憲紀念日連假前最後交易日 / 美股聖誕夜半日盤",
+   "date_confidence": "confirmed",
+   "source": "TWSE holidaySchedule API",
+   "n_us": 1.0,
+   "band": {
+    "candidate_range_factor": 0.87,
+    "enabled": false
+   }
+  },
+  {
+   "date": "2026-12-24",
+   "tw_session": "2026-12-24",
+   "event_type": "tw_yearend_last5",
+   "title_zh": "台股年底最後 5 個交易日 (12-24、12-28~12-31)",
+   "date_confidence": "confirmed",
+   "source": "TWSE holidaySchedule API",
+   "n_us": 1.0,
+   "band": {
+    "candidate_range_factor": 0.8,
+    "enabled": false
+   },
+   "window": [
+    "2026-12-24",
+    "2026-12-28",
+    "2026-12-29",
+    "2026-12-30",
+    "2026-12-31"
+   ]
+  },
+  {
+   "date": "2026-12-25",
+   "tw_session": "2026-12-28",
+   "event_type": "post_closure_session",
+   "title_zh": "行憲紀念日後復市 (美股 12-25 亦休市 → 只含 1 個美股交易日)",
+   "date_confidence": "confirmed",
+   "source": "TWSE holidaySchedule API",
+   "n_us": 1.0,
+   "band": {
+    "range_levels_k1_factor": 1.0,
+    "desk_iv": 1.0
+   },
+   "note": "因美股同步休市，實際不放寬"
+  },
+  {
+   "date": "2026-12-31",
+   "tw_session": "2026-12-31",
+   "event_type": "tw_yearend_last_day",
+   "title_zh": "台股年度最後交易日",
+   "date_confidence": "confirmed",
+   "source": "TWSE holidaySchedule API",
+   "n_us": 1.0
+  },
+  {
+   "date": "2027-01-01",
+   "tw_session": "2027-01-04",
+   "event_type": "post_closure_session",
+   "title_zh": "元旦後首個交易日 (美股 01-01 亦休市 → 1 個美股交易日)",
+   "date_confidence": "estimated",
+   "source": "2027 TWSE 行事曆未公布；平日規則",
+   "n_us": 1.0,
+   "band": {
+    "range_levels_k1_factor": 1.0,
+    "desk_iv": 1.0
+   }
+  },
+  {
+   "date": "2027-01-08",
+   "tw_session": "2027-01-11",
+   "event_type": "us_nfp",
+   "title_zh": "美國 12 月非農 (估計)",
+   "date_confidence": "estimated",
+   "source": "規則：月初第一個週五；待 BLS 2027 行事曆",
+   "n_us": 1.0
+  },
+  {
+   "date": "2027-01-13",
+   "tw_session": "2027-01-14",
+   "event_type": "us_cpi",
+   "title_zh": "美國 12 月 CPI (估計)",
+   "date_confidence": "estimated",
+   "source": "待 BLS 2027 行事曆",
+   "n_us": 1.0
+  },
+  {
+   "date": "2027-01-14",
+   "tw_session": "2027-01-15",
+   "event_type": "tsmc_call",
+   "title_zh": "台積電 Q4 法說會 (估計)",
+   "date_confidence": "estimated",
+   "source": "EDGAR 6-K 規則；待 TSMC IR",
+   "n_us": 1.0,
+   "band": {
+    "desk_2330_k1_lambda": 1.8,
+    "issued_on": "2027-01-14 收盤",
+    "index": 1.0
+   }
+  },
+  {
+   "date": "2027-01-18",
+   "tw_session": "2027-01-19",
+   "event_type": "us_holiday_no_session",
+   "title_zh": "美國 MLK 日 (台股 01-19 前一晚無美股)",
+   "date_confidence": "scheduled",
+   "source": "NYSE 規則",
+   "n_us": 0.0,
+   "gap": {
+    "gap_size_factor": 0.76
+   }
+  },
+  {
+   "date": "2027-01-27",
+   "tw_session": "2027-01-28",
+   "event_type": "fomc",
+   "title_zh": "FOMC 決策 (暫定)",
+   "date_confidence": "scheduled",
+   "source": "federalreserve.gov fomccalendars (tentative)",
+   "n_us": 1.0
+  },
+  {
+   "date": "2027-02-01",
+   "tw_session": "2027-02-01",
+   "event_type": "lny_fengguan",
+   "title_zh": "農曆年封關日 (估計)",
+   "date_confidence": "estimated",
+   "source": "2027 TWSE 行事曆未公布；農曆規則",
+   "n_us": 1.0,
+   "band": {
+    "desk_iv_k1_candidate": 2.4,
+    "enabled": false,
+    "ledger_tag": "lny2027_fengguan"
+   },
+   "beyond_horizon": true
+  },
+  {
+   "date": "2027-02-06",
+   "tw_session": "2027-02-11",
+   "event_type": "lny_reopen",
+   "title_zh": "農曆年開紅盤 (估計；休 7 個平日，含 8 個美股交易日)",
+   "date_confidence": "estimated",
+   "source": "2027 TWSE 行事曆未公布；農曆規則",
+   "n_us": 8.0,
+   "band": {
+    "range_levels_k1_factor": 2.828,
+    "desk_iv": 1.0
+   },
+   "gap": {
+    "forecast": "beta×Σ SOX (8 個美股交易日)"
+   },
+   "iv": {
+    "ivk5_expected_dlog": -0.216
+   },
+   "beyond_horizon": true
+  }
+ ],
+ "calendar_sources": {
+  "tw_trading_days": {
+   "primary": "TWSE holidaySchedule API https://www.twse.com.tw/rwd/zh/holidaySchedule/holidaySchedule?response=json&date=YYYY0101 (queryYear 無效)",
+   "refresh": "每月 1 日 + 每年 10~12 月每週 (等下一年度公告)",
+   "fallback": "平日規則 + 內建國定假日規則 (元旦/228/清明/勞動節/端午/中秋/國慶/光復/行憲 + 農曆表)，date_confidence='estimated'"
+  },
+  "us_trading_days": {
+   "primary": "內建 NYSE 假日規則 (MLK、總統日、耶穌受難日、陣亡將士、六一九、獨立、勞動、感恩、聖誕、元旦；週末順延)",
+   "check": "過去日期以 ^GSPC 缺日驗證",
+   "fallback": "同規則"
+  },
+  "fomc": {
+   "primary": "內建表 (federalreserve.gov/monetarypolicy/fomccalendars.htm 手動抄錄；已含 2027 暫定)",
+   "refresh": "每年 6 月後手動更新下一年；可選 fetch 解析",
+   "fallback": "無 (缺年份不產生事件)"
+  },
+  "us_cpi_nfp": {
+   "primary": "內建表 (bls.gov/schedule/news_release/cpi.htm、empsit.htm)",
+   "fallback": "NFP=月第一個週五、CPI=月 10~15 日週中 → estimated"
+  },
+  "tsmc_call": {
+   "primary": "TSMC IR 公告 (手動或 fetch)",
+   "fallback": "1/4/7/10 月 12 日後首個週四 (EDGAR 6-K 規則) → estimated",
+   "confirmed": {
+    "2026-10-15": "TSMC IR financial calendar / teleconference 頁 (2026-09-27 查核)：3Q26 法說 10-15 14:00~15:30 台北"
+   }
+  },
+  "tw_cbc": {
+   "primary": "內建表 (cbc.gov.tw 年度理監事會日程)",
+   "fallback": "3/6/9/12 月第三個週四 → estimated"
+  },
+  "elections": {
+   "primary": "內建表 (中選會公告；美國選舉日規則)",
+   "next": {
+    "tw_local": "2026-11-28",
+    "tw_presidential": "2028-01 (未公告)",
+    "us_midterm": "2026-11-03",
+    "us_presidential": "2028-11-07"
+   }
+  },
+  "msci": {
+   "primary": "MSCI 季度調整公告 (手動)",
+   "fallback": "2/5/8/11 月最後交易日，11 月遇感恩節可能提前 → low"
+  },
+  "unscheduled": "兩岸事件/演習不進行事前預判，不收錄"
+ }
+}

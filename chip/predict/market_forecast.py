@@ -245,6 +245,18 @@ def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, sign
                 notes.append(rn)
         except Exception as e:  # noqa: BLE001
             log.warning("range_levels: %s", e)
+    # 0c) 事件預判 (2026-09-27, events)：休市/選舉/總經/法說的歷史統計 + 已驗證的寬度/跳空/IV 預期；方向投票權重固定 0 (不影響叫牌)
+    try:
+        from . import events as EV
+        _last = dt.datetime.now(config.TZ).date().isoformat() if live else str(fc.get("date"))[:10]
+        _nu = bool(not live and _ST_nf(snap))          # 對齊的完整夜盤存在 (最多涵蓋前一交易日晚上的 1 個美股日)
+        _tw = scored[["date", "close"]] if scored is not None else None
+        fc["events"] = EV.for_forecast(EV.build(ctx={"last_td": _last, "night_used": _nu, "twii": _tw}))
+        _ns = (fc["events"] or {}).get("next_session") or {}
+        if _ns.get("why"):
+            notes.append(f"事件預判 {_ns.get('date')}：{_ns['why']} (歷史統計，非買賣訊號)")
+    except Exception as e:  # noqa: BLE001
+        log.warning("events: %s", e)
     # 1) 夜盤跳空
     tn = snap.get("tx_night")
     gap = None

@@ -182,6 +182,15 @@ def prices(sid: str, days: int = 1100, split_adjust: bool = True) -> pd.DataFram
     return df[["date", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
 
 
+def _exdiv_0050(frames: dict, exd: dict) -> list[str]:
+    """事件跳空卡的 0050 除息日：β_gap 用 px_band (約 2,200 天) 估計 → 除息日要取同一範圍 (divs_band)，不能用切到 1,100 天的 divs；
+    另加 TWSE 已公告、尚未除息的日期 (復市日剛好除息 → 不預估)。"""
+    f50 = frames.get("0050") or {}
+    out = [d_["date"] for d_ in (f50.get("divs_band") or f50.get("divs") or [])]
+    out += [u.get("ex_date") for u in (((exd or {}).get("0050") or {}).get("upcoming") or []) if u.get("ex_date")]
+    return sorted(set(out))
+
+
 def dividends(sid: str, start: str) -> list[dict]:
     try:
         dv = finmind.fetch("TaiwanStockDividendResult", sid, start)
@@ -1181,11 +1190,46 @@ def opt_block(feat: dict, hist: list[dict], last_trading: str | None, ev: dict) 
     return out
 
 
+# ------------------------------------------------------------------ 事件：台積電法說日 2330 k=1 帶 ×λ
+def _event_2330(rng: dict, issue_date: str, close: float) -> None:
+    """法說日期經 TSMC IR 確認、且為法說當日收盤發布 (ADR 收盤前) 的 2330 k=1 帶：四分位對稱 ×λ (event_params，λ=1.8，證據中)。
+    k≥2 與指數帶不套；原值保留在 pct_base / px_base 供帳本同日比對。"""
+    try:
+        from ..predict import events as EV
+        t = EV.tsmc_2330_k1(issue_date)
+    except Exception as e:  # noqa: BLE001
+        log.debug("tsmc event: %s", e)
+        return
+    if t.get("call_date"):
+        rng["event"] = {k: t.get(k) for k in ("call_date", "q", "date_confidence", "lambda", "factor", "applied", "why", "grade")}
+    if not t.get("applied"):
+        return
+    f = float(t["factor"])
+    row = (rng.get("levels") or {}).get("1") or {}
+    for q in QS:
+        c = row.get(q) or {}
+        if c.get("pct") is None:
+            continue
+        c["pct_base"], c["px_base"] = c["pct"], c.get("px")
+        c["pct"] = _r(c["pct"] * f, 2)
+        c["px"] = _r(close * (1 + c["pct"] / 100), 2)
+    rng["event_factor"] = {"1": f}
+
+
 # ------------------------------------------------------------------ 機率帶上線帳本 (真正的樣本外追蹤)
-def ledger_add(ledger: list[dict], sid: str, date: str, close: float, rng: dict) -> None:
-    """記下 date 收盤發布的 k 日帶 (k ∈ LEDGER_KS)。同 (date, sid, k) 只留最新一筆。"""
+EVENT_LEDGER_CANDS = {   # 事件候選 (enabled=false，只寫帳本，事後同日比對基準帶 vs 候選帶)：目標交易日標籤 → (規則, event_params 鍵)
+    "lny_reopen": ("fengguan_iv_k1_widen", "fengguan_iv_k1_widen"),
+    "pre_holiday_session": ("pre_pre_holiday_iv_k1_narrow", "pre_pre_holiday_iv_k1_narrow"),
+}
+
+
+def ledger_add(ledger: list[dict], sid: str, date: str, close: float, rng: dict, ev_tags=None, ev_params: dict | None = None) -> None:
+    """記下 date 收盤發布的 k 日帶 (k ∈ LEDGER_KS)。同 (date, sid, k) 只留最新一筆；
+    例外：已記錄的事件放寬帶 (event_factor_applied ≠ 1，例如法說當日收盤的 2330 k=1 ×1.8) 不被之後未放寬的重算覆蓋。
+    ev_tags(date, end) → 窗口 (date, end] 的事件標籤 (chip/predict/events)；ev_params = event_params (候選規則)。"""
     lv = (rng or {}).get("levels") or {}
     ends = (rng or {}).get("ends") or {}
+    efac = (rng or {}).get("event_factor") or {}
     for k in LEDGER_KS:
         row = lv.get(str(k)) or {}
         levels = {q: (row.get(q) or {}).get("px") for q in QS if (row.get(q) or {}).get("px") is not None}
@@ -1194,9 +1238,29 @@ def ledger_add(ledger: list[dict], sid: str, date: str, close: float, rng: dict)
         rec = {"date": date, "sid": sid, "k": k, "close": _r(close, 2), "end": ends[str(k)], "levels": levels, "mver": (rng or {}).get("mver") or "unknown"}
         if (rng or {}).get("exdiv"):
             rec["exdiv"] = True
+        try:
+            tags = list(ev_tags(date, ends[str(k)]) or []) if ev_tags else []
+        except Exception:  # noqa: BLE001
+            tags = []
+        rec["event_tags"] = tags
+        rec["event_factor_applied"] = float(efac.get(str(k), 1.0))
+        if rec["event_factor_applied"] != 1.0:
+            rec["levels_base"] = {q: (row.get(q) or {}).get("px_base") for q in QS if (row.get(q) or {}).get("px_base") is not None}
+        if k == 1 and sid == "TWII" and ev_params:
+            cands = []
+            for tag, (rule, key) in EVENT_LEDGER_CANDS.items():
+                cr = ((ev_params.get("band_rules") or {}).get(key) or {})
+                if tag in tags and cr.get("candidate_factor") and not cr.get("enabled"):
+                    f = float(cr["candidate_factor"])
+                    wb = {q: _r(close * (1 + (row.get(q) or {}).get("pct") * f / 100), 0) for q in QS if (row.get(q) or {}).get("pct") is not None}
+                    cands.append({"rule": rule, "factor": f, "would_be_levels": wb})
+            if cands:
+                rec["cand"] = cands
         for i in range(len(ledger) - 1, -1, -1):
             x = ledger[i]
             if x.get("date") == date and x.get("sid") == sid and x.get("k") == k:
+                if float(x.get("event_factor_applied") or 1.0) != 1.0 and rec["event_factor_applied"] == 1.0:
+                    break                          # 保留收盤發布的事件放寬帶 (ADR 收盤後重算不覆蓋)
                 ledger[i] = rec
                 break
         else:
@@ -1322,7 +1386,7 @@ def build(prev_archive: dict | None = None) -> tuple[dict, dict]:
             keep = (px_all["date"] >= (dt.date.today() - dt.timedelta(days=days)).isoformat()).values
             px, adj = px_all[keep].reset_index(drop=True), adj_all[keep].reset_index(drop=True)      # 含息因子只依賴之後的股利 → 切片與只抓 days 相同
             divs = [d for d in divs_all if d["date"] >= str(px["date"].iloc[0])]
-            frames[sid] = {"px": px, "adj": adj, "divs": divs, "px_band": px_all, "adj_band": adj_all}
+            frames[sid] = {"px": px, "adj": adj, "divs": divs, "px_band": px_all, "adj_band": adj_all, "divs_band": divs_all}
         except Exception as e:  # noqa: BLE001
             log.warning("desk prices %s: %s", sid, e)
     for meta in DESK:                                  # 價格失敗的標的仍更新八大歸檔 (HiStock 不依賴價格)
@@ -1394,6 +1458,8 @@ def build(prev_archive: dict | None = None) -> tuple[dict, dict]:
             except Exception:  # noqa: BLE001
                 cal_s = cal
             rec["range"] = range_block(meta, close, b, idio, feat, ev, cal_s, live=bool(live.get(sid)))
+            if sid == "2330" and rec["range"]:
+                _event_2330(rec["range"], str(dates.iloc[-1]), close)
             ev_x = exdiv.rebase(exd.get(sid) or {}, str(dates.iloc[-1]))
             exd_i[sid] = ev_x
             ups = [u for u in (ev_x.get("upcoming") or []) if not u.get("suspicious")]
@@ -1528,15 +1594,29 @@ def build(prev_archive: dict | None = None) -> tuple[dict, dict]:
     except Exception as e:  # noqa: BLE001
         log.warning("desk warrant: %s", e)
     desk["order"] = [m["id"] for m in DESK] + [WARRANT["id"]]
+    # 事件預判 (2026-09-27, chip/predict/events)：下一交易日的休市寬度 / 0050 跳空預估 / IV 預期 + 未來 120 天事件 (方向權重 0；失敗不影響其他區塊)
+    ev_tags, ev_params = None, None
+    try:
+        from ..predict import events as EV
+        ev_params = EV.load_params()
+        exd50 = _exdiv_0050(frames, exd)
+        desk["events"] = EV.build(ctx={"last_td": (desk.get("index") or {}).get("date") or last_td,
+                                       "px0050": (frames.get("0050") or {}).get("px_band"), "exdiv_0050": exd50,
+                                       "twii": tw[["date", "close"]] if len(tw) else None, "opt_hist": ohist, "night_used": True})
+        _cal = EV.refresh_calendar(write=False)
+        ev_tags = lambda d0, d1: EV.tags_for_window(d0, d1, _cal)  # noqa: E731
+    except Exception as e:  # noqa: BLE001
+        log.warning("desk events: %s", e)
+        desk["events"] = {"error": str(e)[:200]}
     # 機率帶上線帳本：記錄今天發布的 1/5/20 日帶，評估已到期的 (實際高低價)
     try:
         led = list(prev_archive.get("band_ledger") or [])
         if not feat.get("_carried") and not feat.get("calendar_fallback"):
             if desk.get("index", {}).get("range") and not desk["index"].get("stale"):
-                ledger_add(led, "TWII", desk["index"]["date"], desk["index"]["close"], desk["index"]["range"])
+                ledger_add(led, "TWII", desk["index"]["date"], desk["index"]["close"], desk["index"]["range"], ev_tags, ev_params)
             for sid, r in desk["instruments"].items():
                 if r.get("range") and not r.get("stale") and not (r["range"].get("date_mismatch")):
-                    ledger_add(led, sid, r["date"], r["close"], r["range"])
+                    ledger_add(led, sid, r["date"], r["close"], r["range"], ev_tags, ev_params)
         keep = sorted({x["date"] for x in led})[-LEDGER_MAX_DAYS:]
         led = [x for x in led if x["date"] in set(keep)]
         archive["band_ledger"] = led

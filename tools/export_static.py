@@ -158,7 +158,7 @@ def main() -> None:
             for x in fc.get("next_days") or []:
                 r = (pb.get("k") or {}).get(str(x.get("n")))
                 _mode = (x.get("range_mode") or "")
-                _ok = (r or {}).get("use_model") and x.get("buy_at") and ((_mode.startswith("base") and r.get("variant") == "base") or (_mode.startswith("night") and r.get("variant") == "night"))   # 變體要與 range_levels 模式一致
+                _ok = (r or {}).get("use_model") and x.get("buy_at") and ((_mode.startswith("base") and not _mode.startswith("base_event") and r.get("variant") == "base") or (_mode.startswith("night") and r.get("variant") == "night"))   # 變體要與 range_levels 模式一致；休市後首日 (base_event，√n_US 放寬) 不以未經事件驗證的回落模型覆寫
                 if _ok:
                     x["buy_at_sigma"], x["stop_sigma"] = x["buy_at"], x.get("stop")
                     x["buy_at"], x["stop"], x["buy_src"] = r["buy_model"], min(r["stop_model"], r["buy_model"]), "model"

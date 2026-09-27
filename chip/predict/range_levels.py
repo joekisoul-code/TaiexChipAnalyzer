@@ -293,8 +293,38 @@ def attach_to_next_days(nd: list[dict], scored: pd.DataFrame, snapshot: dict | N
     approx = live or (snap.get("phase") == "night" and night is None)     # 夜盤進行中 (無 final 旗標) 屬近似
     fr = scored.tail(400)
     sf = float(sigma_factor) if sigma_factor and np.isfinite(sigma_factor) else 1.0    # 線上自學：近期觸及率校準 (learn.touch_factor)
+    # 事件 (2026-09-27, chip/predict/events)：休市後首日 k=1 寬度 × √n_US。研究驗證的帶不含美股資訊 → n_US ≥ 2 時退回 base
+    # ('base_event')，不與夜盤 β 混用 (夜盤最多只涵蓋前一交易日晚上那 1 個美股日)。只在驗收 A 通過 (event_params) 時套用。
+    ev = None
+    try:
+        from . import events as EV
+        prev = dt.datetime.now(config.TZ).date().isoformat() if live else str(scored["date"].iloc[-1])[:10]
+        cal = EV.refresh_calendar(write=False)
+        ev = EV.session_factor(str(nd[0]["date"]), {"used": night is not None}, prev=prev, cal=cal)
+        ev["enabled"] = EV.range_levels_enabled()
+        ev["tags_by_date"] = {str(x["date"]): EV.session_tags(str(x["date"]), cal) for x in nd}
+    except Exception as e:  # noqa: BLE001
+        log.warning("events session_factor: %s", e)
+    ev_on = bool(ev and ev.get("enabled") and ev["range_k1"] > 1 and int(nd[0].get("n") or 0) == 1)
+    night_dropped = bool(ev_on and night is not None)
+    why_kn = why
+    if night_dropped:          # √n_US 只放寬 k=1；k≥2 只是一起改 base 模式 (不含夜盤)，不能寫成「× √n_US」
+        why = f"休市期間 {ev['n_us']} 個美股交易日 (夜盤只涵蓋其中 1 個) → 改用 base 模式 × √n_US"
+        why_kn = "休市後首日不含夜盤模式 (改用 base 模式)；k≥2 不放寬"
+        night = None
     for x in nd:
         r = range_levels(fr, x["n"], night_ret=night, base_px=base_px, path=path)
+        ef = float(ev["range_k1"]) if (ev_on and int(x["n"]) == 1) else 1.0
+        if ef != 1.0:              # 四個分位對稱放寬 (相對基準價的距離 × factor)
+            for q in QUANTS:
+                r[q] = round(r[q] * ef, 2)
+            px_ = lambda v: int(round(float(base_px) * (1 + v / 100)))  # noqa: E731
+            r.update(buy_at=px_(r["low20"]), stop=px_(r["low10"]), sell_at=px_(r["high80"]), target=px_(r["high90"]),
+                     level_lo=px_(r["low20"]), level_hi=px_(r["high80"]), mode="base_event")
+            r["note"] = (f"{r['k']} 日路徑約兩成機率跌到 {r['buy_at']:,} (一成: {r['stop']:,})、約兩成機率漲到 {r['sell_at']:,} (一成: {r['target']:,})；"
+                         f"sigma {r['sigma']:.2f}%；{ev['why']}")
+        x["event_tags"] = list(((ev or {}).get("tags_by_date") or {}).get(str(x["date"])) or [])
+        x["event_range_factor"] = round(ef, 4)
         if abs(sf - 1.0) > 1e-6:   # 依乘數放寬/收窄四個水準 (相對基準價的距離)
             bp = float(base_px)
             for k_ in ("buy_at", "sell_at", "stop", "target", "level_lo", "level_hi"):
@@ -307,8 +337,29 @@ def attach_to_next_days(nd: list[dict], scored: pd.DataFrame, snapshot: dict | N
         x["path_low10"], x["path_low20"], x["path_high80"], x["path_high90"] = r["low10"], r["low20"], r["high80"], r["high90"]
         suffix = "_intraday_approx" if live else ("_night_pending" if approx else "")   # 2026-09-24：夜盤進行中另標 (舊版與盤中同標「盤中近似」)
         x["range_sigma"], x["range_mode"], x["touch_prob"] = r["sigma"], r["mode"] + suffix, TOUCH_PROB
-        x["range_note"] = r["note"] + (f"；{why}" if why and not live else "") + ("；盤中近似值" if live else "")
+        w_ = why if int(x["n"]) == 1 else why_kn
+        x["range_note"] = r["note"] + (f"；{w_}" if w_ and not live else "") + ("；盤中近似值" if live else "")
+    if ev_on:   # 路徑單調：k 日路徑極值不可能比 1 日窄 → k=2/3 至少與放寬後的 k=1 一樣寬 (k≥2 本身不放寬)
+        k1 = next((x for x in nd if int(x["n"]) == 1), None)
+        for x in nd:
+            if k1 is None or int(x["n"]) == 1:
+                continue
+            bp = float(base_px)
+            chg = False
+            for q, side in (("path_low10", min), ("path_low20", min), ("path_high80", max), ("path_high90", max)):
+                v = side(x[q], k1[q])
+                if v != x[q]:
+                    x[q], chg = v, True
+            if chg:
+                pxs = lambda v: int(round(bp * (1 + v * sf / 100)))  # noqa: E731   (含自學乘數，與上面一致)
+                x["stop"], x["buy_at"] = pxs(x["path_low10"]), pxs(x["path_low20"])
+                x["sell_at"], x["target"] = pxs(x["path_high80"]), pxs(x["path_high90"])
+                x["level_lo"], x["level_hi"] = x["buy_at"], x["sell_at"]
+                x["range_note"] = (x.get("range_note") or "") + "；已依路徑單調性不窄於放寬後的 1 日帶"
     return (f"買賣點改用路徑型水準 (sigma {nd[0]['range_sigma']:.2f}%/日"
-            + ("，含完整夜盤 " + format(night, "+.2f") + "%" if night is not None else ("，" + why if why else "，不含夜盤")) + ")："
+            + ("，含完整夜盤 " + format(night, "+.2f") + "%" if night is not None else
+               ("，休市後首日不含夜盤 (夜盤只涵蓋 1 個美股交易日，改用 base 模式)；只有 1 日帶 × √n_US，k≥2 不放寬" if night_dropped else
+                ("，" + why if why else "，不含夜盤"))) + ")："
             + "；".join(f"{x['label']} 拉回 {x['buy_at']:,} 買 (停損 {x['stop']:,})、反彈 {x['sell_at']:,} 賣 (目標 {x['target']:,})" for x in nd)
-            + "。約兩成機率觸及 (以加權指數計，2014~ 樣本外逐年 15~29%)，為校準機率帶而非方向訊號；台指期觸及會比指數多約 15~20%")
+            + "。約兩成機率觸及 (以加權指數計，2014~ 樣本外逐年 15~29%)，為校準機率帶而非方向訊號；台指期觸及會比指數多約 15~20%"
+            + (f"。隔天為休市後首日：{ev['why']}，1 日帶已放寬 (驗收回測 2014+ 116 次休市：pinball −11%)" if ev_on else ""))
