@@ -1,5 +1,5 @@
 {
- "trained_at": "2026-09-24 08:46:20",
+ "trained_at": "2026-09-27 08:28:11",
  "gap": {
   "edges": [
    -1.5,
@@ -126,24 +126,24 @@
    "2|bull": {
     "label": "小幅開低 (-0.5~-0.15%)",
     "regime": "多頭 (前收在月線上)",
-    "n": 388,
-    "p_fill": 0.446,
-    "p_cont": 0.611,
-    "p_hold": 0.768,
+    "n": 389,
+    "p_fill": 0.445,
+    "p_cont": 0.612,
+    "p_hold": 0.769,
     "intra_mean": -0.163,
     "intra_med": -0.135,
     "intra_p20": -0.6,
-    "intra_p80": 0.36,
-    "ret_mean": -0.446,
-    "p_up_close": 0.232,
+    "intra_p80": 0.35,
+    "ret_mean": -0.445,
+    "p_up_close": 0.231,
     "range_mean": 0.94,
     "cont_yr_cons": 0.82,
     "years": 17,
     "hold_yr_min": 0.58,
     "hold_yr_max": 0.93,
     "hold_years": 17,
-    "hold_recent": 0.78,
-    "n_recent": 82,
+    "hold_recent": 0.783,
+    "n_recent": 83,
     "dip_hold_q20": -1.08,
     "dip_hold_q50": -0.59,
     "pop_hold_q50": 0.14,
@@ -334,8 +334,8 @@
   },
   "night_beta": {
    "beta": 0.526,
-   "beta_recent": 0.357,
-   "n": 2279,
+   "beta_recent": 0.356,
+   "n": 2280,
    "resid_sd": 0.367,
    "r2": 0.557,
    "by_year": {
@@ -351,21 +351,21 @@
     "2026": 0.313
    },
    "dir_agree_big": 0.958,
-   "n_big": 850
+   "n_big": 851
   }
  },
  "calendar": {
   "base": {
    "p_up": 0.544,
    "mean": 0.049,
-   "n": 4099
+   "n": 4100
   },
   "settle": {
    "name": "期貨結算日",
    "n": 201,
    "p_up": 0.532,
    "mean": 0.137,
-   "t": 1.2,
+   "t": 1.21,
    "yr_cons": 0.53,
    "years": 17,
    "valid": false,
@@ -389,7 +389,7 @@
    "n": 201,
    "p_up": 0.517,
    "mean": 0.039,
-   "t": -0.13,
+   "t": -0.12,
    "yr_cons": 0.47,
    "years": 17,
    "valid": false,
@@ -425,7 +425,7 @@
    "n": 66,
    "p_up": 0.636,
    "mean": 0.141,
-   "t": 0.67,
+   "t": 0.68,
    "yr_cons": 0.69,
    "years": 16,
    "valid": false,
@@ -473,7 +473,7 @@
    "n": 798,
    "p_up": 0.511,
    "mean": 0.007,
-   "t": -1.07,
+   "t": -1.06,
    "yr_cons": 0.65,
    "years": 17,
    "valid": false,
