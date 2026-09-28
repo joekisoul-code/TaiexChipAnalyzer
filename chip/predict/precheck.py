@@ -2,6 +2,8 @@
 
 A. 開盤跳空預判 (gap)：跳空幅度 (開盤 vs 前收) × 多空狀態 (前收 vs 月線) → 當日回補機率、續走機率 (收盤高於開盤/低於開盤)、
    日內 (開→收) 平均與中位、收盤仍守住跳空的機率、當日振幅。今日估計跳空：盤中用實際開盤；夜盤收後用 β × 夜盤；否則不預判。
+   復市日 (2026-09-28 r2m reopen_us_move (i))：夜盤只涵蓋前一交易日晚上的美股 → 再加「其餘休市期間美股日費半累積 × β_gap」(gap.us_add)；
+   美股尚未全部收盤時維持夜盤估計並標「暫定」(gap.provisional='us_pending'，learn 記 prov、判斷總結不計票)。
 B. 日曆效應 (calendar)：結算日/結算前一日/後一日、月初第一個交易日/月底最後交易日、季底、長假前/後、週一/週五 →
    隔天收盤漲跌的上漲率、平均、n、逐年一致性 (各年同號比例)、t 值；valid = n≥40 且 一致性≥0.65 且 |t|≥2。
 """
@@ -131,7 +133,39 @@ def train(scored: pd.DataFrame, write: bool = True, verbose: bool = True) -> dic
     return out
 
 
-def build(scored: pd.DataFrame, snap: dict | None, fc: dict | None) -> dict | None:
+def _us_add(scored: pd.DataFrame, nd: list[dict], us_px, now=None) -> dict | None:
+    """復市日 (r2m reopen_us_move (i))：夜盤未涵蓋的美股交易日 (休市期間扣掉 prev 當晚那一個) 的費半累積 × β_gap (TAIEX 開盤跳空 vs
+    前一美股日 SOX，前 750 個正常日、無截距；SOX 不齊改 TSM ADR 與其 β)。沒有未涵蓋美股日 → None (與舊版相同)。
+    us_px = {"sox","tsm","px"(長 TAIEX date/open/close)} 或回傳該 dict 的函式；None → events.reopen_inputs()。"""
+    from . import events as EV
+    if not nd:
+        return None
+    td = str(nd[0]["date"])[:10]
+    prev = str(scored["date"].iloc[-1])[:10]
+    unc = [u for u in EV.us_sessions(prev, td) if u != prev]
+    if not unc:
+        return None
+    rule = ((EV.load_params().get("gap_rules") or {}).get("precheck_us_add") or {})
+    if not rule.get("enabled"):
+        return None
+    px = us_px() if callable(us_px) else (us_px if us_px is not None else EV.reopen_inputs(prev, td))
+    px = px or {}
+    mv = EV.us_move(prev, td, px.get("sox"), px.get("tsm"), sessions=unc, now=now or px.get("now"))
+    out = {"status": mv["status"], "n_unc": len(unc), "sessions": unc, "src": mv["src"], "sum_pct": None, "beta": None, "beta_n": None, "add_pct": None}
+    if mv["status"] != "ready":
+        return out
+    base = px.get("px") if px.get("px") is not None else scored
+    b, n_b, _ = EV.gap_beta(base[["date", "open", "close"]], mv["xret"], td)
+    out.update(sum_pct=round(mv["sum_logret"] * 100, 2), beta_n=n_b)
+    if b is None or not np.isfinite(b):
+        out["status"] = "no_beta"            # 正常日 < 250 → 維持夜盤估計 (資料已齊，非暫定)
+        return out
+    out.update(beta=round(float(b), 3), add_pct=round(float(b) * mv["sum_logret"] * 100, 3))
+    return out
+
+
+def build(scored: pd.DataFrame, snap: dict | None, fc: dict | None, us_px=None, now=None) -> dict | None:
+    """us_px / now：復市日未涵蓋美股的輸入 (測試注入用；省略 → events.reopen_inputs() 與現在時間)。"""
     st = M.load_json("precheck")
     if not st:
         return None
@@ -141,6 +175,7 @@ def build(scored: pd.DataFrame, snap: dict | None, fc: dict | None) -> dict | No
     out = {"date": str(d["date"].iloc[-1])[:10], "gap": None, "calendar": []}
     # --- A. 跳空 ---
     est = src = None
+    ua, prov = None, None
     tx = snap.get("taiex") or {}
     live = bool(fc.get("intraday"))
     if live and tx.get("open") and tx.get("prev"):
@@ -156,6 +191,23 @@ def build(scored: pd.DataFrame, snap: dict | None, fc: dict | None) -> dict | No
         bu = nb.get("beta_recent") or nb.get("beta")   # 2026-09-24：β 逐年 0.31~0.68 (2026 只 0.31)，改用近 250 日 β
         if nv is not None and bu is not None:
             est, src = bu * float(np.clip(nv, -8, 8)), f"夜盤 {nv:+.2f}% × 近一年 β {bu} (全期 {nb.get('beta')}，R² {nb.get('r2')})"
+            # 復市日 (2026-09-28 reopen_us_move (i))：完整且對齊的夜盤只涵蓋 prev 當晚的美股 → 加上其餘美股日費半 × β_gap (MSE 1.201 → 0.429，n=67)
+            try:
+                ua = _us_add(scored, nd, us_px, now)
+            except Exception as e:  # noqa: BLE001
+                log.warning("precheck us_add: %s", e)
+                ua = None
+            if ua is not None:
+                ua["est_night_only"] = round(est, 3)
+                lbl = "費半" if ua.get("src") == "SOX" else "台積電ADR"
+                if ua["status"] == "ready":
+                    ua["text"] = f"＋夜盤未涵蓋的 {ua['n_unc']} 個美股交易日{lbl}累積 {ua['sum_pct']:+.2f}% × β {ua['beta']:.2f} = {ua['add_pct']:+.2f}%"
+                    est, src = est + ua["add_pct"], src + ua["text"]
+                elif ua["status"] == "no_beta":
+                    ua["text"] = f"夜盤未涵蓋的 {ua['n_unc']} 個美股交易日：正常日樣本不足 ({ua.get('beta_n')} < 250)，只用夜盤估計"
+                else:   # 美股未全部收盤 / 資料缺 → 夜盤估計 + 暫定 (learn 記 prov，復市日清晨 ready 後才以 final 入帳)
+                    ua["text"] = f"夜盤未涵蓋的 {ua['n_unc']} 個美股交易日 ({'、'.join(u[5:] for u in ua['sessions'])}) 尚未全部收盤"
+                    src, prov = src + " (暫定：休市期間美股尚未全部收盤)", "us_pending"
         else:
             tn = snap.get("tx_night") or {}
             if tn.get("change_pct") is not None and bu is not None and snap.get("phase") == "night":
@@ -183,6 +235,10 @@ def build(scored: pd.DataFrame, snap: dict | None, fc: dict | None) -> dict | No
             elif dn and cell["p_hold"] >= 0.6:
                 txt += " → 開低後續弱，反彈到前收附近是減碼點"
             out["gap"] = {"est": round(est, 2), "source": src, "bucket": cell["label"], "regime": cell["regime"], "stats": cell, "text": txt, "live": live}
+            if ua is not None:
+                out["gap"]["us_add"] = ua
+            if prov:
+                out["gap"]["provisional"] = prov
     # --- B. 日曆效應 (以預測目標日 = next_days[0].date；盤中則為今日) ---
     try:
         cal = fc.get("calendar") or []

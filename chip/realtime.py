@@ -43,6 +43,8 @@ def session_phase(t: dt.datetime | None = None) -> str:
     """'pre' 08:30-09:00 / 'open' 09:00-13:30 / 'post' 13:30-15:00 / 'night' 15:00-05:00 / 'closed'"""
     t = t or now_tw()
     tm = t.time()
+    if t.weekday() == 5 and tm < dt.time(5, 0):   # 週五夜盤交易到週六 05:00 (之前一律判 closed → 半場夜盤被當成已收盤)
+        return "night"
     if t.weekday() >= 5:
         return "closed"
     if dt.time(8, 30) <= tm < SESSION_OPEN:

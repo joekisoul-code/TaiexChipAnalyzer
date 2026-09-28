@@ -429,6 +429,41 @@ def rebase(ev: dict, d_last: str | None) -> dict:
             "upcoming": [ups[k] for k in sorted(ups)], "rebased_to": d_last}
 
 
+def upcoming_market(asof: str, get_json: Callable[..., object], *, today: str | None = None) -> dict[str, list[dict]]:
+    """全市場已公告未除息 (App pullbackLocal 用，r2m 3a)：TWT48U rwd (備援 openapi TWT48U_ALL) + TWT49U 次日列 (精確金額)。
+    請求參數與 load_all 相同 → 同一次執行走快取。不做 15% 過濾 (匯出時沒有全市場收盤價，交給 App 用收盤判斷)；TPEx 無來源。
+    回傳 {代號: [{ex_date, cash (None = 待公告), est (金額未定), kind}]}，只含 ex_date > asof。"""
+    today = today or dt.date.today().isoformat()
+    t48: dict = {}
+    try:
+        t48 = parse_twt48u_rwd(get_json(f"{TWSE_RWD}/exRight/TWT48U", params={"response": "json"}))
+    except Exception:  # noqa: BLE001
+        pass
+    if not t48:
+        try:
+            t48 = parse_twt48u_open(get_json(f"{TWSE_OPEN}/exchangeReport/TWT48U_ALL"))
+        except Exception:  # noqa: BLE001
+            pass
+    t49: dict = {}
+    try:
+        s = (dt.date.fromisoformat(asof) - dt.timedelta(days=120)).strftime("%Y%m%d")
+        e_ = (dt.date.fromisoformat(today) + dt.timedelta(days=10)).strftime("%Y%m%d")
+        t49 = parse_twt49u(get_json(f"{TWSE_RWD}/exRight/TWT49U", params={"startDate": s, "endDate": e_, "response": "json"}))
+    except Exception:  # noqa: BLE001
+        pass
+    out: dict[str, dict[str, dict]] = {}
+    for code, evs in t48.items():
+        for e in evs:
+            if e["ex_date"] > asof:
+                out.setdefault(code, {})[e["ex_date"]] = {"ex_date": e["ex_date"], "cash": e["cash"], "est": e["cash"] is None, "kind": e.get("kind")}
+    for code, evs in t49.items():                              # 除息前一晚才有：精確金額覆蓋預告
+        for e in evs:
+            if e["ex_date"] > asof:
+                u = out.setdefault(code, {}).get(e["ex_date"], {})
+                out[code][e["ex_date"]] = {**u, "ex_date": e["ex_date"], "cash": e["cash"], "est": False, "kind": u.get("kind") or "息"}
+    return {c: [v[d] for d in sorted(v)] for c, v in sorted(out.items())}
+
+
 def load_all(sids: list[str], asof: str, get_json: Callable[..., object], *, archive: dict | None = None, today: str | None = None) -> dict:
     """每個來源獨立 try；全部公告源都失敗時沿用 archive (上次成功) 並標 carried。回傳 {sid: events}。"""
     today = today or dt.date.today().isoformat()

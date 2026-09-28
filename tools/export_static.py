@@ -58,6 +58,56 @@ def copy_shell() -> None:
     (SITE / "sw.js").write_text(sw, encoding="utf-8")
 
 
+def apply_pullback(nd: list[dict], pb: dict) -> None:
+    """回落模型覆寫 next_days 的 buy_at/stop (就地)：變體要與 range_levels 模式一致；休市後首日 (base_event，√n_US 放寬) 不以未經事件驗證的回落模型覆寫。
+    X1 (2026-09-28)：range_sigma_src == 'txo_iv' 時 base 變體改看 use_model_iv (對 IV 公式只好 1.0%/0.0%，未達 3% → 預期不覆寫)，
+    原值仍寫 buy_at_sigma/stop_sigma、模型值另存 buy_at_pullback/stop_pullback 供參考卡片；IV 缺/過期回 ATR 時照舊依 use_model。"""
+    for x in nd:
+        r = (pb.get("k") or {}).get(str(x.get("n")))
+        _mode = (x.get("range_mode") or "")
+        _match = bool(r) and ((_mode.startswith("base") and not _mode.startswith("base_event") and r.get("variant") == "base") or (_mode.startswith("night") and r.get("variant") == "night"))
+        _iv = _match and x.get("range_sigma_src") == "txo_iv" and r.get("variant") == "base"
+        if _iv:
+            r["use_model_atr"] = bool(r.get("use_model"))
+            r["use_model"] = bool(r.get("use_model_iv"))      # 參考卡片的「已採用/參考」依實際覆寫與否
+        if (r or {}).get("use_model") and x.get("buy_at") and _match:
+            x["buy_at_sigma"], x["stop_sigma"] = x["buy_at"], x.get("stop")
+            x["buy_at"], x["stop"], x["buy_src"] = r["buy_model"], min(r["stop_model"], r["buy_model"]), "model"
+            if x.get("level_lo") == x["buy_at_sigma"]:
+                x["level_lo"] = x["buy_at"]
+        elif _iv and x.get("buy_at"):
+            x["buy_at_sigma"], x["stop_sigma"] = x["buy_at"], x.get("stop")
+            x["buy_at_pullback"], x["stop_pullback"] = r["buy_model"], min(r["stop_model"], r["buy_model"])
+
+
+def watchlist_asof(slim: dict, fallback: str) -> str:
+    """追蹤清單最後收盤日 (除息事件切分 已除息/未除息 用；r2m spec_fix 1：此處原本沒有字串型 asof)。無有效日期 → fallback。"""
+    ds = [str(a.get("date"))[:10] for a in (slim or {}).values() if isinstance(a, dict) and "error" not in a and len(str(a.get("date") or "")) >= 10 and str(a.get("date"))[:4].isdigit()]
+    return max(ds) if ds else str(fallback)[:10]
+
+
+def night_patch_watchlist(wl: dict, nv, night_for: str | None, ivk_live: dict | None = None, exdiv_map: dict | None = None, build=None) -> int:
+    """fast 模式 (r2m §6.2)：完整夜盤 (_night_final 非 None) 時以個股夜盤變體重算帶回的 watchlist.json 回落區塊。
+    variant=='night' 才取代 stocks[sid].pullback (保留 pullback_table)；任何失敗都保留原 base 區塊。回傳取代檔數；nv 為 None → 不動。"""
+    if nv is None or not night_for or not isinstance(wl, dict) or not isinstance(wl.get("stocks"), dict):
+        return 0
+    if build is None:
+        from chip.predict import stock_pullback as _sp
+        build = _sp.build
+    n = 0
+    for sid, s in wl["stocks"].items():
+        if not isinstance(s, dict) or "error" in s:
+            continue
+        try:
+            r = build(sid, night_ret=nv, night_for=night_for, ivk_live=ivk_live, exdiv_ev=(exdiv_map.get(sid) or {}) if exdiv_map is not None else None)
+            if r and r.get("variant") == "night":
+                s["pullback"] = r
+                n += 1
+        except Exception as e:  # noqa: BLE001
+            print(f"  night pullback {sid} failed:", e)
+    return n
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--fast", action="store_true")
@@ -77,7 +127,26 @@ def main() -> None:
             print("  trend7:")
             trend7.train(verbose=True)
             print("  range_levels:")
-            range_levels.fit_multipliers(backtest.load_long(), short_term._night_hist(), verbose=True)
+            try:   # TXO IV sigma (2026-09-28 r2m rl_ivk_sigma)：種子在前、歸檔 opt_hist 在後 (同日歸檔優先；歸檔已排除 calendar_fallback)
+                _ivk_hist = range_levels.ivk_history()
+            except Exception as e:  # noqa: BLE001
+                print("  ivk history failed:", e)
+                _ivk_hist = None
+            range_levels.fit_multipliers(backtest.load_long(), short_term._night_hist(), verbose=True, ivk_hist=_ivk_hist)
+            try:   # 休市後首日 1 日帶寬度比 (reopen_us_move CAND2)：2000~ 全部復市事件 → event_params.band_rules.post_closure_centre_shift.width_ratio
+                from chip.predict import events as _ev
+                from chip.sources import finmind as _fm0, global_markets as _gm0
+                _us = {}
+                for _k, _sym in (("sox", "^SOX"), ("tsm", "TSM")):
+                    try:
+                        _us[_k] = _gm0.history_since(_sym, "2000-01-01")
+                    except Exception as e:  # noqa: BLE001
+                        print(f"  {_sym} long history failed:", e)
+                        _us[_k] = None
+                _cs = _ev.fit_centre_shift(_fm0.taiex_price("2000-01-01"), _us.get("sox"), _us.get("tsm"))
+                print(f"  centre shift width_ratio: {_cs} → {'updated' if _ev.save_centre_shift(_cs) else 'kept previous (樣本不足或起點太晚)'}")
+            except Exception as e:  # noqa: BLE001
+                print("  centre shift fit failed:", e)
             from chip.predict import confidence, patterns as _pt
             _pat = _pt.build(short_term.build_matrix(backtest.load_long("2010-01-01"), None), write=True)
             confidence.train(short_term.build_matrix(backtest.load_long("2010-01-01"), short_term._night_hist()), _pat, write=True, verbose=True)
@@ -86,9 +155,12 @@ def main() -> None:
             from chip.predict import logic as _lg   # 漲跌邏輯：決策規則走動式驗證 (2026-09-23)
             _lg.train(short_term.build_matrix(backtest.load_long("2010-01-01"), short_term._night_hist()), write=True, verbose=True)
             from chip.predict import pullback as _pb   # 回落進場點：條件式分位模型 + 支撐止跌率 + 最低點時段 (2026-09-23)
-            _pb.train(backtest.load_long("2010-01-01"), write=True, verbose=True)
-            from chip.predict import stock_pullback as _sp   # 個股回落模型 (pooled) + 止跌機率 + 前端查表 (2026-09-23)
-            _sp.train(write=True, verbose=True)
+            _pb.train(backtest.load_long("2010-01-01"), write=True, verbose=True, ivk_hist=_ivk_hist)   # 夜盤變體以對齊合併重訓 (B1)；IV 基準 (X1)
+            try:   # 個股回落模型 (pooled) + 止跌機率 + 前端查表 (2026-09-23)；r2m 2026-09-28：價格清洗 + 夜盤變體 (_night 模型、公式 F) + IV 映射 (_iv 模型) 一起重訓
+                from chip.predict import stock_pullback as _sp
+                _sp.train(write=True, verbose=True)
+            except Exception as e:  # noqa: BLE001
+                print("  stock_pullback train failed:", e)
             from chip.predict import precheck as _pc   # 預判邏輯：開盤跳空條件統計 + 日曆效應驗證 (2026-09-23)
             _pc.train(backtest.load_long("2010-01-01"), write=True, verbose=True)
             from chip.predict import infomap as _im   # 預測邏輯總表：所有資訊 × 視野 vs 歷史漲跌 (2026-09-24)
@@ -141,35 +213,46 @@ def main() -> None:
     from chip.sources import finmind
     learn_prev = learn.published()
     learn_summary = {"market": learn_prev.get("market") or {}, "stocks": learn_prev.get("stocks") or {}}
+    try:   # TXO IV (2026-09-28 rl_ivk_sigma)：range_levels sigma 用；有快取 (taifex:opt_daily)，稍後 desk.build 重用。失敗 → {} (ATR 路徑)
+        from chip.sources import taifex_opt
+        ivk_live = taifex_opt.features(expect=str(scored["date"].iloc[-1])[:10]) or {}
+    except Exception as e:  # noqa: BLE001
+        print("  ivk_live failed:", e)
+        ivk_live = {}
+    _reopen_cache: dict = {}
+
+    def _reopen_px() -> dict:
+        """休市後首日中心移 / precheck 未涵蓋美股所需的 SOX/TSM/長 TAIEX (只在復市日才載入，一次)。"""
+        if "v" not in _reopen_cache:
+            from chip.predict import events as _ev2
+            _nd0 = ((fc.get("next_days") if isinstance(fc, dict) else None) or [{}])[0]
+            _reopen_cache["v"] = _ev2.reopen_inputs(str(scored["date"].iloc[-1])[:10], str(_nd0.get("date") or "")[:10] or None)
+        return _reopen_cache["v"]
     try:   # 近五日精修：夜盤跳空 β、隔天用小時模型、5 日規則覆蓋 (+ 自學的買賣點水準乘數)
-        fc = market_forecast.refine_short_term(fc, hr if not hr.get("error") else None, snap, sg if "error" not in sg else None, scored, learn_summary)
+        fc = market_forecast.refine_short_term(fc, hr if not hr.get("error") else None, snap, sg if "error" not in sg else None, scored, learn_summary,
+                                               ivk_live=ivk_live, us_px=_reopen_px)
     except Exception as e:  # noqa: BLE001
         print("  refine_short_term failed:", e)
+    _nv, _night_for = None, None     # 完整夜盤 (已收盤且日期對齊) → 大盤 pullback 與個股回落夜盤變體共用 (不看 tm_hour，spec_fix 2)
+    try:
+        from chip.predict import range_levels as _RL
+        _nv, _ = _RL._night_final(snap, fc.get("next_days") or [], scored)
+        if _nv is not None:
+            _night_for = str((fc.get("next_days") or [{}])[0].get("date") or "")[:10] or None
+    except Exception:  # noqa: BLE001
+        _nv, _night_for = None, None
     try:   # 回落進場點 (2026-09-23)：模型 (走動式驗證優於 sigma 乘數的視野) 取代 buy_at/stop，原值保留為 buy_at_sigma/stop_sigma；支撐清單與最低點時段給前端
         from chip.predict import pullback
         _bp = (fc.get("intraday") or {}).get("price") or fc.get("close")
-        try:
-            from chip.predict import range_levels as _RL
-            _nv, _ = _RL._night_final(snap, fc.get("next_days") or [], scored)
-        except Exception:  # noqa: BLE001
-            _nv = None
         pb = pullback.build(scored, _bp, night_ret=_nv)
         if pb:
-            for x in fc.get("next_days") or []:
-                r = (pb.get("k") or {}).get(str(x.get("n")))
-                _mode = (x.get("range_mode") or "")
-                _ok = (r or {}).get("use_model") and x.get("buy_at") and ((_mode.startswith("base") and not _mode.startswith("base_event") and r.get("variant") == "base") or (_mode.startswith("night") and r.get("variant") == "night"))   # 變體要與 range_levels 模式一致；休市後首日 (base_event，√n_US 放寬) 不以未經事件驗證的回落模型覆寫
-                if _ok:
-                    x["buy_at_sigma"], x["stop_sigma"] = x["buy_at"], x.get("stop")
-                    x["buy_at"], x["stop"], x["buy_src"] = r["buy_model"], min(r["stop_model"], r["buy_model"]), "model"
-                    if x.get("level_lo") == x["buy_at_sigma"]:
-                        x["level_lo"] = x["buy_at"]
+            apply_pullback(fc.get("next_days") or [], pb)
             fc["pullback"] = pb
     except Exception as e:  # noqa: BLE001
         print("  pullback failed:", e)
     try:   # 預判邏輯 (2026-09-23)：明日開盤跳空預判 (實際開盤 / 夜盤 β) + 目標日日曆效應
         from chip.predict import precheck
-        fc["precheck"] = precheck.build(scored, snap, fc)
+        fc["precheck"] = precheck.build(scored, snap, fc, us_px=_reopen_px)
     except Exception as e:  # noqa: BLE001
         print("  precheck failed:", e)
     # 追蹤清單個股 ML 預測 (5/10/20 日相對大盤)：full 與 fast 都算 (每檔 <1 秒，走快取)，供 watchlist.json / 自學帳本
@@ -264,12 +347,22 @@ def main() -> None:
             if fl is not None and hasattr(fl, "tail"):   # 近 60 日各路資金 (主力/籌碼集中度 有玩股網時才有)
                 slim[sid]["flows_tail"] = fl.tail(60)[[c for c in ("date", "close", "foreign", "trust", "dealer", "main", "skp5", "skp20", "gov8", "margin_chg") if c in fl]]
         # 個股回落模型 (2026-09-23)：追蹤清單每檔的模型買點/停損/止跌機率/支撐；離線查表給前端套用到任何股票
-        _pb_tbl = None
+        # r2m 2026-09-28：除息扣除 (3a)、完整夜盤時夜盤變體 (3b)、IV 映射 σ (3c)
+        _pb_tbl, _exd_up = None, None
+        _ok_ids = [s for s in slim if "error" not in slim[s]]
+        asof_px = watchlist_asof(slim, str(scored["date"].iloc[-1])[:10])
+        _exd = None
+        try:
+            from chip.sources import exdiv as _xd
+            _exd = _xd.load_all(_ok_ids, asof_px, _xd.get_json)          # 每檔約 2 次 FinMind，快取 2 小時
+            _exd_up = _xd.upcoming_market(asof_px, _xd.get_json)          # 全市場已公告除息 (App pullbackLocal；不做 15% 過濾)
+        except Exception as e:  # noqa: BLE001
+            print("  exdiv for pullback failed:", e)
         try:
             from chip.predict import stock_pullback as _sp2
             for sid in list(slim.keys()):
                 try:
-                    r = _sp2.build(sid)
+                    r = _sp2.build(sid, exdiv_ev=(_exd.get(sid) or {}) if _exd is not None else {}, night_ret=_nv, night_for=_night_for, ivk_live=ivk_live)
                     if r:
                         slim[sid]["pullback"] = r
                 except Exception as e:  # noqa: BLE001
@@ -277,7 +370,7 @@ def main() -> None:
             _pb_tbl = _sp2.client_table()
         except Exception as e:  # noqa: BLE001
             print("  stock_pullback failed:", e)
-        dump("watchlist", {"updated": time.strftime("%Y-%m-%d %H:%M:%S"), "stocks": slim, "pullback_table": _pb_tbl})
+        dump("watchlist", {"updated": time.strftime("%Y-%m-%d %H:%M:%S"), "stocks": slim, "pullback_table": _pb_tbl, "exdiv_upcoming": _exd_up, "exdiv_asof": asof_px})
         dump("global", {"global": global_study.load_report(), "cross": cross_market.load_report()})
     else:
         # fast 模式不重算追蹤清單/國際研究；Pages 部署是整站覆蓋 (force_orphan)，若不把上次發布的檔案帶回來，
@@ -291,6 +384,31 @@ def main() -> None:
                         print(f"  carried over {name}.json from Pages")
                 except Exception as e:  # noqa: BLE001
                     print(f"  carry {name} failed:", e)
+        # 個股回落夜盤變體 (r2m §6.2)：夜盤 05:00 收盤後的 fast (05:40 / 07:00 排程) 以完整夜盤重算帶回的 watchlist.json，
+        # 避免要等到下一次 full 才有夜盤水準；進行中的夜盤 _night_final 已擋 (_nv 為 None → 完全不動)
+        try:
+            from chip.predict import model as _M5
+            _st5 = _M5.load_json("stock_pullback") or {}
+            _night_ok = any((v or {}).get("use_model") for v in ((_st5.get("night") or {}).get("k") or {}).values())
+        except Exception:  # noqa: BLE001
+            _night_ok = False
+        if _nv is not None and _night_ok and (DATA / "watchlist.json").exists():   # 沒有通過閘門的夜盤模型 → 不抓除息、不重算
+            try:
+                _wl = json.loads((DATA / "watchlist.json").read_text(encoding="utf-8"))
+                _map = None
+                try:
+                    from chip.sources import exdiv as _xd2
+                    _ids = [s for s, v in (_wl.get("stocks") or {}).items() if isinstance(v, dict) and "error" not in v]
+                    _map = _xd2.load_all(_ids, watchlist_asof(_wl.get("stocks") or {}, str(scored["date"].iloc[-1])[:10]), _xd2.get_json)
+                except Exception as e:  # noqa: BLE001
+                    print("  exdiv for night pullback failed:", e)
+                    _map = {}
+                _n = night_patch_watchlist(_wl, _nv, _night_for, ivk_live=ivk_live, exdiv_map=_map)
+                if _n:
+                    dump("watchlist", _wl)
+                    print(f"  watchlist pullback → night variant ({_n} stocks, night {_nv:+.2f}% for {_night_for})")
+            except Exception as e:  # noqa: BLE001
+                print("  night pullback patch failed:", e)
     # 八大行庫監測：全市場序列 (累積) + 排行 (連續上榜) + 追蹤清單各行庫張數；fast 模式追蹤清單沿用上次發布
     try:
         dump("gov8", gov8.build(scored, res))

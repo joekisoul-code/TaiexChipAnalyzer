@@ -156,7 +156,7 @@ def cmd_train(args):
         trend7.train(verbose=True)
         print("\n═══ 擬合路徑型買賣點乘數 range_levels (sigma 波動縮放 + 夜盤位移；全歷史分位數) ═══")
         from chip.analysis import backtest
-        range_levels.fit_multipliers(backtest.load_long(), short_term._night_hist(), verbose=True)
+        range_levels.fit_multipliers(backtest.load_long(), short_term._night_hist(), verbose=True, ivk_hist=range_levels.ivk_history())   # + TXO IV 乘數
     if args.intraday or args.intraday_only or not only:
         print("\n═══ 訓練小時模型 (Yahoo ^TWII 小時 K 近 2 年 + 前日籌碼 + 夜盤；逐月 walk-forward) ═══")
         for tm, m in intraday.train().items():

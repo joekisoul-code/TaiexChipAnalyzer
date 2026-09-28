@@ -101,7 +101,7 @@
    "not_applies_to": [
     "chip/analysis/desk_bands.py 選擇權 IV 帶 (IV 已定價休市；加寬使 pinball 變差 +7~20%)"
    ],
-   "formula": "factor = sqrt(max(1, n_us_uncovered))；n_us_uncovered = 上一台股交易日收盤後、本交易日開盤前已收盤且未被『對齊的完整夜盤』涵蓋的美股交易日數",
+   "formula": "factor = sqrt(max(1, n_us))；n_us = 上一台股交易日收盤後、本交易日開盤前已收盤的美股交易日數 (全部，含夜盤涵蓋的那一個；程式 session_factor 用 n_us_between 總數，n_us ≥ 2 時退回 base 模式、不與夜盤混用)",
    "k": [
     1
    ],
@@ -341,6 +341,64 @@
     ],
     "mode": "base_event (n_US ≥ 2 時退回 base 模式，不與夜盤 β 混用)"
    }
+  },
+  "post_closure_centre_shift": {
+   "grade": "強",
+   "verified_status": "pass",
+   "enabled": true,
+   "finding_ids": [
+    "r2m:reopen_us_move:ii:CAND2"
+   ],
+   "applies_to": [
+    "chip/predict/range_levels.py attach_to_next_days base_event k=1 (k2/k3 經路徑單調規則)"
+   ],
+   "formula": "level_q = m_q × sigma × √n_US × width_ratio + c；c = β_cc × Σ log(SOX) 於休市期間全部美股交易日 (缺 SOX → TSM ADR 與其 β)",
+   "width_ratio": 0.79,
+   "width_ratio_walkforward_range": [
+    0.792,
+    0.857
+   ],
+   "width_ratio_fit": {
+    "n": 188,
+    "from": "2001-03-01",
+    "to": "2026-07-13",
+    "raw": 0.7923,
+    "note": "events.fit_centre_shift (研究 panel 重現 live_constants 0.7923/188)；每週 --train 以 FinMind 加權 2000~ + Yahoo 費半/TSM 2000~ 重擬 (n<150 或起點晚於 2005 不更新)"
+   },
+   "beta": "TAIEX close-to-close vs SOX, prior 750 normal days, no intercept",
+   "touch_prob": 0.15,
+   "verified": {
+    "n": 104,
+    "pinball_rel_vs_base_event": -0.314,
+    "ci95": [
+     -0.395,
+     -0.233
+    ],
+    "year_cluster_ci95": [
+     -0.411,
+     -0.217
+    ],
+    "touch_low20": 0.144,
+    "touch_high80": 0.154,
+    "k2_pin": [
+     1.698,
+     1.398
+    ],
+    "k3_pin": [
+     1.937,
+     1.723
+    ],
+    "holdout_2006_2013": {
+     "n": 51,
+     "delta": -0.29,
+     "ci95": [
+      -0.44,
+      -0.16
+     ]
+    }
+   },
+   "sigma_factor": "休市後首日 k1~3 不套 learn 自學乘數 (事件帶在 sf=1 下驗證)",
+   "when": "只在休市期間最後一個美股交易日收盤後 (台北 +1 日 05:30) 才平移；之前維持 √n_US 放寬 (BASE)"
   },
   "desk_iv_bands": {
    "grade": "無",
@@ -781,10 +839,43 @@
    "residual_mean": "≈0 (|t|<0.7)",
    "when": "只在美股休市期間各交易日都已收盤後 (復市當天清晨) 才輸出；封關日/休市前一日只顯示『待美股』",
    "band_centre_shift": {
-    "enabled": false,
-    "note": "以 beta×累積移動平移 range_levels 中心、寬度改殘差 rms：研究建議但未做帶寬 pinball 測試 → ledger 測試"
+    "enabled": true,
+    "note": "已驗證 (r2m reopen_us_move (ii) CAND2，2014~ 104 次 pinball −31%)；實作參數見 band_rules.post_closure_centre_shift"
    },
    "caveat": "0050 除息日若與復市日重疊須剔除；TAIEX 開盤價不可靠，跳空一律以 0050 計"
+  },
+  "precheck_us_add": {
+   "enabled": true,
+   "grade": "強",
+   "verified_status": "pass",
+   "formula": "est = β_recent × clip(夜盤, ±8) + β_gap × Σ log(SOX) 於夜盤未涵蓋的美股交易日 (休市期間扣掉 prev_td 當晚)；β_gap = TAIEX 開盤跳空 vs 前一美股日 SOX，前 750 個正常日無截距 (缺 SOX → TSM)",
+   "verified": {
+    "n": 67,
+    "mse": [
+     1.201,
+     0.429
+    ],
+    "ci95": [
+     -1.403,
+     -0.319
+    ],
+    "holm_ci975": [
+     -1.498,
+     -0.275
+    ],
+    "sign_hit_big": [
+     0.833,
+     0.942
+    ],
+    "years_better": "8/9"
+   },
+   "provisional": "休市期間美股未全部收盤 → 維持夜盤估計並標「暫定」(gap.provisional='us_pending'，learn 記 prov)",
+   "no_night_fallback": {
+    "enabled": false,
+    "mse": 0.53,
+    "mse_zero": 1.651,
+    "note": "復市日沒有完整夜盤時 β_gap × 休市期間全部美股費半；未驗證為上線行為，預設關閉 (未實作)"
+   }
   },
   "no_us_session_gap": {
    "grade": "強",

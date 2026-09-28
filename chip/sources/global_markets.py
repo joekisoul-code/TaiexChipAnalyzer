@@ -75,8 +75,9 @@ def history(symbol: str, range_: str = "20y") -> pd.DataFrame:
     return pd.DataFrame(cached(f"yahoo:{symbol}:1d:{range_}", config.TTL_DAILY, load))
 
 
-def history_closed(symbol: str, range_: str = "20y") -> pd.DataFrame:
-    """同 history，但抓取當下若常規盤仍在交易，丟掉進行中的那根 bar (快取 6 小時內不會把盤中價當收盤)。"""
+def history_closed(symbol: str, range_: str = "20y", tag: str | None = None, ttl: int | None = None) -> pd.DataFrame:
+    """同 history，但抓取當下若常規盤仍在交易，丟掉進行中的那根 bar (快取 6 小時內不會把盤中價當收盤)。
+    tag / ttl：另用快取 key (例：復市日美股收盤後 'after2026-09-28'，10 分鐘) → 收盤前抓的舊快取不會蓋住剛收盤的那根 bar。"""
     def load():
         j = get_json(URL.format(sym=symbol), params={"interval": "1d", "range": range_, "events": "div,splits"}, timeout=60)
         res = j["chart"]["result"][0]
@@ -92,7 +93,32 @@ def history_closed(symbol: str, range_: str = "20y") -> pd.DataFrame:
             d = dt.datetime.fromtimestamp(t, dt.UTC) + dt.timedelta(seconds=off)
             rows.append({"date": d.strftime("%Y-%m-%d"), "open": q["open"][i], "high": q["high"][i], "low": q["low"][i], "close": q["close"][i]})
         return rows
-    return pd.DataFrame(cached(f"yahoo:{symbol}:1d:{range_}:closed", config.TTL_DAILY, load))
+    key = f"yahoo:{symbol}:1d:{range_}:closed" + (f":{tag}" if tag else "")
+    return pd.DataFrame(cached(key, ttl or config.TTL_DAILY, load))
+
+
+def history_since(symbol: str, start: str = "2000-01-01") -> pd.DataFrame:
+    """長歷史日 K (period1/period2；range=max 會回月 K、20y 只到 20 年前)。丟掉抓取當下仍在交易的 bar (同 history_closed)。
+    用途：每週重訓的休市後首日寬度比 (events.fit_centre_shift，2000~ 事件)。"""
+    import time as _t
+    p1 = int(dt.datetime.fromisoformat(start).replace(tzinfo=dt.UTC).timestamp())
+
+    def load():
+        j = get_json(URL.format(sym=symbol), params={"interval": "1d", "period1": p1, "period2": int(_t.time()), "events": "div,splits"}, timeout=60)
+        res = j["chart"]["result"][0]
+        ts, q = res["timestamp"], res["indicators"]["quote"][0]
+        off = res["meta"].get("gmtoffset", 0)
+        reg = (res["meta"].get("currentTradingPeriod") or {}).get("regular") or {}
+        now = dt.datetime.now(dt.UTC).timestamp()
+        cut = reg.get("start") if reg.get("start") and now < (reg.get("end") or 0) else None
+        rows = []
+        for i, t in enumerate(ts):
+            if q["close"][i] is None or (cut is not None and t >= cut - 6 * 3600):
+                continue
+            d = dt.datetime.fromtimestamp(t, dt.UTC) + dt.timedelta(seconds=off)
+            rows.append({"date": d.strftime("%Y-%m-%d"), "open": q["open"][i], "high": q["high"][i], "low": q["low"][i], "close": q["close"][i]})
+        return rows
+    return pd.DataFrame(cached(f"yahoo:{symbol}:1d:since:{start}:closed", config.TTL_DAILY, load))
 
 
 def all_markets(range_: str = "20y") -> dict[str, pd.DataFrame]:

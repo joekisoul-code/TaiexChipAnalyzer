@@ -189,8 +189,18 @@ NYSE_SPECIAL = {"2001-09-11": "911", "2001-09-12": "911", "2001-09-13": "911", "
                 "2025-01-09": "卡特國葬"}
 
 
+_NYSE_MEMO: dict[int, dict[str, str]] = {}
+
+
 def nyse_holidays(y: int) -> dict[str, str]:
-    """NYSE 休市日規則 (ISO → 名稱)。元旦逢週六不補 (12-31 照常交易)；其餘逢週六提前週五、逢週日順延週一。"""
+    """NYSE 休市日規則 (ISO → 名稱)。元旦逢週六不補 (12-31 照常交易)；其餘逢週六提前週五、逢週日順延週一。
+    純規則 → 依年度快取 (fit_centre_shift 對 2000~ 每個復市事件估 β，會呼叫數十萬次)。"""
+    if y not in _NYSE_MEMO:
+        _NYSE_MEMO[y] = _nyse_holidays(y)
+    return dict(_NYSE_MEMO[y])
+
+
+def _nyse_holidays(y: int) -> dict[str, str]:
     out: dict[str, str] = {}
 
     def obs(d: dt.date) -> dt.date:
@@ -742,20 +752,35 @@ def _logret_by_date(df: pd.DataFrame | None) -> dict[str, float]:
     return {k: float(v) for k, v in zip(d["date"], r) if np.isfinite(v)}
 
 
-def gap_beta(px0050: pd.DataFrame, xret: dict[str, float], before: str, exdiv_dates=(), win: int = 750, min_n: int = 250) -> tuple[float | None, int, float | None]:
+def gap_beta(px0050: pd.DataFrame, xret: dict[str, float], before: str, exdiv_dates=(), win: int = 750, min_n: int = 250,
+             target: str = "gap") -> tuple[float | None, int, float | None]:
     """β_gap：前 win 個『正常日』(前一台股日與當日間無休市平日、恰 1 個美股交易日) 的 0050 開盤跳空 log 對前一美股日 x 報酬
-    無截距 OLS (研究 h3 Model A)。剔除除息日、開盤 = 前收 (缺開盤)、|跳空| > 15% (分割未還原)。回傳 (β, n, 殘差 sd%)。"""
-    d = px0050[["date", "open", "close"]].copy()
+    無截距 OLS (研究 h3 Model A)。剔除除息日、開盤 = 前收 (缺開盤)、|跳空| > 15% (分割未還原)。回傳 (β, n, 殘差 sd%)。
+    target='cc' (2026-09-28 reopen_us_move)：y = log(收盤/前收)，不做開盤過濾 (β_cc，休市後首日 1 日帶中心移用)。
+    非有限的 open/close/前收列在迴圈前剔除；β 非有限 → (None, n, None) (spec_fix 3)。"""
+    cc = target == "cc"
+    cols = ["date", "close"] + ([] if cc else ["open"])
+    d = px0050[cols].copy()
     d["date"] = d["date"].astype(str).str[:10]
     d = d.drop_duplicates("date", keep="last").sort_values("date").reset_index(drop=True)
+    for c_ in cols[1:]:
+        d[c_] = pd.to_numeric(d[c_], errors="coerce").astype(float)
     d["pdate"], d["pclose"] = d["date"].shift(1), d["close"].shift(1)
-    d = d[(d["date"] < before) & d["pdate"].notna()].tail(win * 2 + 200)
+    fin = np.isfinite(d["close"]) & np.isfinite(d["pclose"]) & (True if cc else np.isfinite(d["open"]))
+    d = d[(d["date"] < before) & d["pdate"].notna() & fin].tail(win * 2 + 200)
     exd = {str(x)[:10] for x in exdiv_dates or ()}
     rows = []
     for r in d.itertuples():
-        if r.date in exd or not r.open or not r.pclose or float(r.open) == float(r.pclose):
+        if r.date in exd or not r.pclose:
             continue
-        y = math.log(float(r.open) / float(r.pclose))
+        if cc:
+            if not r.close:
+                continue
+            y = math.log(float(r.close) / float(r.pclose))
+        else:
+            if not r.open or float(r.open) == float(r.pclose):
+                continue
+            y = math.log(float(r.open) / float(r.pclose))
         if abs(y) > 0.15:
             continue
         pv, cur = _d(r.pdate), _d(r.date)
@@ -770,7 +795,133 @@ def gap_beta(px0050: pd.DataFrame, xret: dict[str, float], before: str, exdiv_da
         return None, len(rows), None
     x, y = np.array(rows).T
     b = float((x * y).sum() / (x * x).sum())
+    if not np.isfinite(b):
+        return None, len(rows), None
     return b, len(rows), float(np.std(y - b * x) * 100)
+
+
+def us_move(prev: str, td: str, sox: pd.DataFrame | None = None, tsm: pd.DataFrame | None = None, sessions: list[str] | None = None,
+            now: dt.datetime | None = None) -> dict:
+    """休市期間 (或指定 sessions) 的美股累積 log 報酬：{status ('none'|'pending_us'|'ready'), src ('SOX'|'TSM'|None), sessions, sum_logret, xret}。
+    sessions 預設 us_sessions(prev, td)；空 → 'none'。只在台北 (最後一個美股日 + 1 日) 05:30 之後才可能 ready (與 gap_forecast 同規則)；
+    每個 session 都有 SOX → SOX，否則都有 TSM ADR → TSM，再不然 'pending_us'。xret = 該來源全部日 log 報酬 (給 gap_beta 估 β)。"""
+    ss = [str(u)[:10] for u in (us_sessions(prev, td) if sessions is None else sessions)]
+    out = {"status": "none", "src": None, "sessions": ss, "sum_logret": None, "xret": {}}
+    if not ss:
+        return out
+    out["status"] = "pending_us"
+    now = now or dt.datetime.now(config.TZ)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=config.TZ)
+    if now < dt.datetime.combine(_d(ss[-1]) + dt.timedelta(days=1), dt.time(5, 30), tzinfo=config.TZ):
+        return out                       # 最後一個美股日尚未收盤：即使資料列存在也可能是盤中價
+    sx, tx = _logret_by_date(sox), _logret_by_date(tsm)
+    src, xr = ("SOX", sx) if all(u in sx for u in ss) else ("TSM", tx) if all(u in tx for u in ss) else (None, None)
+    if src is None:
+        return out
+    out.update(status="ready", src=src, xret=xr, sum_logret=float(sum(xr[u] for u in ss)))
+    return out
+
+
+def reopen_inputs(prev: str | None = None, td: str | None = None, px_start: str = "2010-01-01", now: dt.datetime | None = None) -> dict:
+    """復市日中心移 / precheck 未涵蓋美股所需資料：{"sox": ^SOX 5y、"tsm": TSM 20y (與 build() 同來源，已收盤 bar)、
+    "px": FinMind 加權 date/open/close (px_start 起；β 需要前 750 個正常日，market.run 的 scored 只有約 400 日曆天)}。各自失敗 → None。
+    給 prev/td 且已過最後一個美股日收盤 (台北 +1 日 05:30) → 美股改用收盤後專用快取 (10 分鐘)，不會拿到收盤前抓的 6 小時舊快取。"""
+    out: dict = {}
+    tag = None
+    try:
+        ss = us_sessions(prev, td) if (prev and td) else []
+        now = now or dt.datetime.now(config.TZ)
+        if ss and now >= dt.datetime.combine(_d(ss[-1]) + dt.timedelta(days=1), dt.time(5, 30), tzinfo=config.TZ):
+            tag = f"after{ss[-1]}"
+    except Exception:  # noqa: BLE001
+        tag = None
+    try:
+        from ..sources import global_markets
+        for key, sym, rg in (("sox", "^SOX", "5y"), ("tsm", "TSM", "20y")):
+            try:
+                out[key] = global_markets.history_closed(sym, rg, tag=tag, ttl=config.TTL_INTRADAY if tag else None)
+            except Exception as e:  # noqa: BLE001
+                log.info("reopen_inputs %s: %s", sym, e)
+                out[key] = None
+    except Exception as e:  # noqa: BLE001
+        log.info("reopen_inputs global_markets: %s", e)
+    try:
+        from ..sources import finmind
+        px = finmind.taiex_price(px_start)
+        out["px"] = px[["date", "open", "close"]] if px is not None and len(px) else None
+    except Exception as e:  # noqa: BLE001
+        log.info("reopen_inputs TAIEX: %s", e)
+        out["px"] = None
+    return out
+
+
+def fit_centre_shift(scored: pd.DataFrame, sox: pd.DataFrame | None, tsm: pd.DataFrame | None, min_prior: int = 20) -> dict | None:
+    """休市後首日 1 日帶寬度比 (reopen_us_move CAND2，spec_fix 6)：對資料內所有「中間有休市平日且 n_US ≥ 2」的復市事件，
+    用各事件之前的資料算 c = β_cc × Σ log(SOX/TSM) (休市期間全部美股日) 與 σ (range_levels.sigma_series)，
+    width_ratio = sqrt(Σ((y_cc−c)/σ)² / Σ(y_cc/σ)²)，y_cc = 復市日收盤對前收 log%。
+    scored：TAIEX date/open/high/low/close (建議 2000~；β 需 250 個正常日)。回傳 {width_ratio, n, date_from, date_to, walkforward_range_2014plus} 或 None。"""
+    from . import range_levels as RL
+    tx = scored[["date", "open", "high", "low", "close"]].copy()
+    tx["date"] = tx["date"].astype(str).str[:10]
+    for c_ in ("open", "high", "low", "close"):
+        tx[c_] = pd.to_numeric(tx[c_], errors="coerce").astype(float)
+    tx = tx.dropna(subset=["close"]).drop_duplicates("date", keep="last").sort_values("date").reset_index(drop=True)
+    if len(tx) < 500:
+        return None
+    sig = RL.sigma_series(tx).values
+    tg = RL.path_targets(tx)
+    ok1 = np.isfinite(tg["pathLow1"].values) & np.isfinite(tg["pathHigh1"].values) & np.isfinite(sig) & (sig > 0)
+    sx, tsx = _logret_by_date(sox), _logret_by_date(tsm)
+    dates, cl = tx["date"].tolist(), tx["close"].values
+    ev = []
+    for t in range(len(tx) - 1):
+        prev, td = dates[t], dates[t + 1]
+        a, b = _d(prev), _d(td)
+        if not ok1[t] or not any((a + dt.timedelta(days=i)).weekday() < 5 for i in range(1, (b - a).days)):
+            continue                                       # 中間沒有休市平日 → 不是復市日
+        us = us_sessions(prev, td)
+        if len(us) < 2:
+            continue
+        src, xr = ("SOX", sx) if all(u in sx for u in us) else ("TSM", tsx) if all(u in tsx for u in us) else (None, None)
+        if src is None:
+            continue
+        bb, _, _ = gap_beta(tx[["date", "open", "close"]], xr, td, target="cc")
+        if bb is None:
+            continue
+        s = sum(xr[u] for u in us)
+        ev.append({"td": td, "c": bb * s * 100, "sig": float(sig[t]), "y": math.log(cl[t + 1] / cl[t]) * 100})
+    if len(ev) < min_prior:
+        return None
+    e = pd.DataFrame(ev)
+    z, zr = e["y"] / e["sig"], (e["y"] - e["c"]) / e["sig"]
+    wr = float(np.sqrt((zr ** 2).sum() / (z ** 2).sum()))
+    wf = []
+    for i in range(len(e)):
+        if e["td"].iloc[i] >= "2014-01-01" and i >= min_prior:
+            wf.append(float(np.sqrt((zr.iloc[:i] ** 2).sum() / (z.iloc[:i] ** 2).sum())))
+    return {"width_ratio": round(wr, 4), "n": int(len(e)), "date_from": str(e["td"].iloc[0]), "date_to": str(e["td"].iloc[-1]),
+            "walkforward_range_2014plus": [round(min(wf), 3), round(max(wf), 3)] if wf else None}
+
+
+def save_centre_shift(fit: dict | None, path: Path | str | None = None, min_n: int = 150, max_from: str = "2005-12-31") -> bool:
+    """把 fit_centre_shift 結果寫回 event_params.json band_rules.post_closure_centre_shift (width_ratio / width_ratio_fit)。
+    樣本不足 (n < min_n) 或起點晚於 max_from (長歷史抓不到時只剩 2008~ 事件，定義會變) → 不更新，維持上次值。"""
+    if not fit or fit.get("n", 0) < min_n or str(fit.get("date_from") or "9999") > max_from:
+        return False
+    p = Path(path or PARAMS_PATH)
+    P = json.loads(p.read_text(encoding="utf-8"))
+    rule = (P.get("band_rules") or {}).get("post_closure_centre_shift")
+    if not isinstance(rule, dict):
+        return False
+    rule["width_ratio"] = round(float(fit["width_ratio"]), 2)
+    rule["width_ratio_fit"] = {"n": fit["n"], "from": fit["date_from"], "to": fit["date_to"], "raw": fit["width_ratio"],
+                               "fitted_at": dt.datetime.now(config.TZ).strftime("%Y-%m-%d")}
+    if fit.get("walkforward_range_2014plus"):
+        rule["width_ratio_walkforward_range"] = fit["walkforward_range_2014plus"]
+    p.write_text(json.dumps(P, ensure_ascii=False, indent=1), encoding="utf-8")
+    _P_CACHE.clear()
+    return True
 
 
 def gap_forecast(td: str, prev: str | None = None, px0050: pd.DataFrame | None = None, sox: pd.DataFrame | None = None,

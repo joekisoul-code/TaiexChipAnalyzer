@@ -7,8 +7,12 @@
 2. 支撐止跌統計：價格回落到 5 日線 / 月線 / 季線 / 昨日低點 / 20 日低點 附近時，歷史上多常在那裡止跌 (hold) 並反彈；
    → 今日現價下方 3% 內的支撐清單，附「止跌率」與「止跌後 3 日平均反彈」。
 3. 最低點時段：小時 K (Yahoo ^TWII 60m 730d) 統計當日最低價落在哪個時段，分「開低 / 開高」→ 拉回買點的時間窗。
-4. 含夜盤變體 (2026-09-23 強化)：特徵 + 前晚夜盤台指期，訓練集含 2010~ (夜盤缺值由 LGB 處理)，2021~ 逐年走動式 vs range_levels 夜盤公式：
-   pinball k1 0.304 vs 0.365 (改善 16%)、k2 0.421 vs 0.459 (8%)、k3 0.514 vs 0.545 (6%)，觸及率 20~22%。夜盤收後 buy_at/stop 改用此模型。
+4. 含夜盤變體：特徵 + 夜盤台指期，訓練集含 2010~ (夜盤缺值由 LGB 處理)，2021~ 逐年走動式 vs range_levels 夜盤公式。
+   2026-09-28 修正 (r2m B1)：舊版以 date==D 合併，拿到的是「D 開盤前那一晚」(FinMind after_market 的 date = 夜盤準備的隔一交易日)，
+   上線卻餵 D 收盤後的夜盤 → 舊的「k1 改善 16%、k2 8%、k3 6%」是錯位造成的假象。改用 range_levels._night_aligned (列 D = D 收盤後、
+   D+1 開盤前的夜盤) 並加回歸守門 (夜盤與隔日跳空相關 > 0.5)：對齊重訓後與公式打平 (pinball 0.232/0.364/0.454 vs 0.227/0.361/0.453，−2.2/−1.0/−0.2%)，不採用 (use_model=False)，
+   夜盤收後的 buy_at/stop 由 range_levels 夜盤公式產生；模型只留作參考卡片。json 沒有 night.aligned 旗標 (舊模型) 時夜盤變體一律不覆寫。
+   同理 X1：range_levels 改用 TXO IV sigma 時，base k1/k2 對 IV 公式只好約 1% (未達 3%) → IV 生效時看 use_model_iv (預期 False)。
 5. 盤中低點判斷 (小時 K 查表)：時間點 × 開盤跳空 (開低/平盤/開高) × 開盤後已回檔 (≥0.5σ / <0.5σ) → 「今日低點已出現」機率、最終低點 (相對現價) 兩成/五成分位。
    10:00 整體 58%、11:00 70%、12:00 77%、13:00 86%；開低且已回檔 ≥0.5σ 的日子在 10:00 只有 48%、最終低點 q20 −1.3%。
 """
@@ -162,11 +166,60 @@ def _hour_of_low() -> dict:
     return res
 
 
-def train(scored: pd.DataFrame, write: bool = True, verbose: bool = True) -> dict:
+ALIGN_MIN_CORR = 0.5     # 夜盤 (列 D) 與隔日開盤跳空 (open[D+1]/close[D]−1) 的相關下限；錯位 (date==D) 時約 −0.07
+
+
+def _align_guard(mn: pd.DataFrame) -> float:
+    """回歸守門 (r2m B1)：列 D 的 night_chg_pct 必須是 D 收盤後的夜盤 → 與隔日跳空 gap_next = open[D+1]/close[D]−1 高度相關 (實測 0.76)；
+    date==D 錯位合併時與 gap_next 約 −0.07 (與當日跳空才相關)。不成立 → raise。回傳相關係數。"""
+    o, c = pd.to_numeric(mn["open"], errors="coerce").astype(float), pd.to_numeric(mn["close"], errors="coerce").astype(float)
+    gap_next = o.shift(-1) / c - 1
+    z = pd.DataFrame({"n": pd.to_numeric(mn["night_chg_pct"], errors="coerce"), "g": gap_next}).dropna()
+    corr = float(z["n"].corr(z["g"])) if len(z) >= 30 else float("nan")
+    if not (np.isfinite(corr) and corr > ALIGN_MIN_CORR):
+        raise ValueError(f"pullback 夜盤對齊守門失敗：corr(夜盤, 隔日跳空) = {corr:.3f} (n={len(z)})，需 > {ALIGN_MIN_CORR}")
+    return corr
+
+
+def _night_merge(m: pd.DataFrame, nh: pd.DataFrame) -> tuple[pd.DataFrame, float]:
+    """列 D 的 night_chg_pct = D 收盤後、D+1 開盤前的夜盤 (range_levels._night_aligned，與上線 build(night_ret=完整夜盤) 一致)；
+    |夜盤| > 8% 剔除 (缺值保留，交給 LGB)。m 依日期排序、date 為字串；末列 NaN 無妨。回傳 (mn, 守門相關)。"""
+    from . import range_levels as RL
+    mn = m.copy()
+    mn["night_chg_pct"] = RL._night_aligned(mn, nh).values
+    corr = _align_guard(mn)
+    mn = mn[(mn["night_chg_pct"].isna()) | (mn["night_chg_pct"].abs() <= 8)]
+    return mn, corr
+
+
+def _iv_baseline(k: int, d: pd.DataFrame, ev: pd.Series, pb: pd.Series, siv: pd.DataFrame | None, mult: dict) -> dict:
+    """spec_fix 8：range_levels 有 base_iv 時的 IV 基準 = base_iv 乘數 × sigma_iv_k (只用有 ivk 的 OOS 列；與 sigma 基準同為全樣本乘數)。
+    回傳 {iv: {...}, improve_vs_iv, use_model_iv} (門檻與 use_model 相同：≥3% 且模型觸及 0.15~0.26)；不可算 → {}。"""
+    biv = (mult.get("base_iv") or {}).get(str(k)) or {}
+    if siv is None or not biv or "low20" not in biv:
+        return {}
+    s = siv[k][ev].values
+    y = (d.loc[ev, f"yLow{k}"] * d.loc[ev, "sigma_range"]).values           # 目標 %
+    qm = (pb[ev] * d.loc[ev, "sigma_range"]).values                        # 模型 q20 %
+    ok = np.isfinite(s) & (s > 0) & np.isfinite(y) & np.isfinite(qm)
+    if ok.sum() < 250:
+        return {}
+    qi = float(biv["low20"]) * s[ok]
+    pin_m, pin_i = _pinball(y[ok], qm[ok], Q_BUY), _pinball(y[ok], qi, Q_BUY)
+    tm = float((y[ok] <= qm[ok]).mean())
+    imp = round(1 - pin_m / pin_i, 3)
+    return {"iv": {"n": int(ok.sum()), "pinball20_model": round(pin_m, 4), "pinball20_iv": round(pin_i, 4), "touch20_model": round(tm, 3),
+                   "touch20_iv": round(float((y[ok] <= qi).mean()), 3), "from": str(d.loc[ev, "date"].values[ok][0])},
+            "improve_vs_iv": imp, "use_model_iv": bool(imp >= 0.03 and 0.15 <= tm <= 0.26)}
+
+
+def train(scored: pd.DataFrame, write: bool = True, verbose: bool = True, ivk_hist: list[dict] | None = None) -> dict:
+    """ivk_hist (range_levels.ivk_history()) → 另算 IV 基準 (improve_vs_iv / use_model_iv)；None → 與舊版相同。"""
     from . import range_levels as RL
     m, feats = _frame(scored)
     m["year"] = m["date"].str[:4].astype(int)
     mult = RL.load_multipliers() or {}
+    use_ivb = bool(ivk_hist and mult.get("base_iv"))
     out = {"trained_at": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M:%S"), "features": feats, "k": {}, "supports": _support_stats(m), "hour_of_low": _hour_of_low()}
     for k in KS:
         d = m.dropna(subset=[f"yLow{k}", "sigma_range"]).reset_index(drop=True)
@@ -200,6 +253,13 @@ def train(scored: pd.DataFrame, write: bool = True, verbose: bool = True) -> dic
         if "model" in res and "sigma" in res:
             res["improve_pinball"] = round(1 - res["model"]["pinball20"] / res["sigma"]["pinball20"], 3)
             res["use_model"] = bool(res["improve_pinball"] >= 0.03 and 0.15 <= res["model"]["touch20"] <= 0.26)
+        if use_ivb:
+            try:
+                siv = RL.sigma_iv_frame(d["date"], ivk_hist)
+                siv.loc[d["date"].astype(str).str[:10] < RL.IV_START, :] = np.nan
+                res.update(_iv_baseline(k, d, ev, pb, siv, mult))
+            except Exception as e:  # noqa: BLE001
+                log.warning("pullback IV baseline k%s: %s", k, e)
         fb = _qfit(X, y, Q_BUY); fs = _qfit(X, y, Q_STOP)
         imp = np.mean([mm.feature_importances_ for mm in fb], axis=0); imp = imp / imp.sum()
         res["importance"] = sorted(({"f": f, "w": round(float(w), 3)} for f, w in zip(feats, imp) if w > 0.02), key=lambda x: -x["w"])
@@ -207,15 +267,17 @@ def train(scored: pd.DataFrame, write: bool = True, verbose: bool = True) -> dic
         M.save(f"pullback_k{k}", {"buy": fb, "stop": fs, "features": feats, "trained_at": out["trained_at"]}) if write else None
         if verbose:
             mo, sg_ = res.get("model", {}), res.get("sigma", {})
-            print(f"  pullback k{k}: pinball20 模型 {mo.get('pinball20')} vs sigma {sg_.get('pinball20')} (改善 {res.get('improve_pinball')})；觸及率 模型 {mo.get('touch20')} (年 {mo.get('touch20_yr_min')}~{mo.get('touch20_yr_max')}) vs sigma {sg_.get('touch20')}；最低點誤差 {mo.get('mae_low')} vs {sg_.get('mae_low')}%；use_model={res.get('use_model')}")
+            print(f"  pullback k{k}: pinball20 模型 {mo.get('pinball20')} vs sigma {sg_.get('pinball20')} (改善 {res.get('improve_pinball')})；觸及率 模型 {mo.get('touch20')} (年 {mo.get('touch20_yr_min')}~{mo.get('touch20_yr_max')}) vs sigma {sg_.get('touch20')}；最低點誤差 {mo.get('mae_low')} vs {sg_.get('mae_low')}%；use_model={res.get('use_model')}"
+                  + (f"｜vs IV 公式 {res['iv']['pinball20_iv']} (n={res['iv']['n']}) 改善 {res.get('improve_vs_iv')} → use_model_iv={res.get('use_model_iv')}" if res.get("iv") else ""))
     # 含夜盤變體：feats + night_chg_pct (訓練含無夜盤年份，缺值交給 LGB)，2021~ 逐年走動式 vs range_levels 夜盤公式
+    # 2026-09-28 (B1)：列 D 對齊「D 收盤後」的夜盤 (舊版 date==D 合併拿到前一晚 → 假改善 16/8/6%)；守門失敗 → raise → 本變體不輸出
     try:
         from . import short_term as ST
         nh = ST._night_hist()
-        mn = m.drop(columns=[c for c in m.columns if c == "night_chg_pct"]).merge(nh[["date", "night_chg_pct"]], on="date", how="left")
-        mn = mn[(mn["night_chg_pct"].isna()) | (mn["night_chg_pct"].abs() <= 8)]
+        mn, acorr = _night_merge(m, nh)
         featsN = feats + ["night_chg_pct"]
-        out["night"] = {"features": featsN, "k": {}}
+        out["night"] = {"features": featsN, "k": {}, "aligned": True, "align_corr": round(acorr, 3),
+                        "align_note": "列 D = D 收盤後、D+1 開盤前的夜盤 (range_levels._night_aligned)；守門 corr(夜盤, 隔日跳空) > 0.5"}
         for k in KS:
             d = mn.dropna(subset=[f"yLow{k}", "sigma_range"]); d = d[d["sigma_range"] > 0].reset_index(drop=True)
             te_all = d["night_chg_pct"].notna() & (d["year"] >= 2021)
@@ -266,6 +328,7 @@ def build(scored: pd.DataFrame, base_px: float | None = None, night_ret: float |
            "k": {}, "supports": [], "hour_of_low": st.get("hour_of_low") or {}, "hour_low_table": st.get("hour_low_table") or {}}
     if use_night:
         row["night_chg_pct"] = float(np.clip(float(night_ret), -8, 8))
+    night_ok = bool((st.get("night") or {}).get("aligned"))      # B1 停損 (0a)：只有對齊重訓後的夜盤模型才可能覆寫 buy_at/stop
     for k in KS:
         if use_night:
             b = M.load(f"pullback_k{k}_night"); r = ((st.get("night") or {}).get("k") or {}).get(str(k)) or {}
@@ -277,9 +340,16 @@ def build(scored: pd.DataFrame, base_px: float | None = None, night_ret: float |
             continue
         q20 = float(_qpred(b["buy"], row[b["features"]])[0]) * sg; q10 = float(_qpred(b["stop"], row[b["features"]])[0]) * sg
         q10 = min(q10, q20)
+        var = "night" if (use_night and "night_chg_pct" in (b.get("features") or [])) else "base"
         out["k"][str(k)] = {"buy_model": int(round(px0 * (1 + q20 / 100))), "stop_model": int(round(px0 * (1 + q10 / 100))), "low20_pct": round(q20, 2), "low10_pct": round(q10, 2),
-                            "use_model": bool(r.get("use_model")), "variant": "night" if (use_night and "night_chg_pct" in (b.get("features") or [])) else "base",
+                            "use_model": bool(r.get("use_model")) and (var != "night" or night_ok), "variant": var,
                             "oos": {kk: r.get(kk) for kk in ("improve_pinball",)} | {"model": r.get("model"), "sigma": r.get("sigma") or r.get("formula")}}
+        if var == "night":      # 舊 (未對齊) 夜盤模型的改善數字是錯位假象 → 不輸出，前端顯示「待重訓」
+            out["k"][str(k)]["night_aligned"] = night_ok
+            if not night_ok:
+                out["k"][str(k)]["oos"]["improve_pinball"] = None
+        if var == "base" and "use_model_iv" in r:     # X1：IV 公式生效時的覆寫依據 (export_static 在 range_sigma_src=txo_iv 時改看這個)
+            out["k"][str(k)].update(use_model_iv=bool(r["use_model_iv"]), oos_iv={"improve_vs_iv": r.get("improve_vs_iv"), **(r.get("iv") or {})})
     for key, name in SUPPORTS.items():
         s = float(row[key].iloc[0]) if key in row and pd.notna(row[key].iloc[0]) else None
         if s is None or not (s < px0 and s > px0 * 0.95):

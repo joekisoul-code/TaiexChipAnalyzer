@@ -131,7 +131,10 @@ def night_gap_beta() -> tuple[float, float, int]:
     return _GAP_CACHE[key]
 
 
-def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, signals_res: dict | None, scored: pd.DataFrame | None = None, learn_summary: dict | None = None) -> dict:
+def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, signals_res: dict | None, scored: pd.DataFrame | None = None, learn_summary: dict | None = None,
+                      ivk_live: dict | None = None, us_px=None) -> dict:
+    """ivk_live = taifex_opt.features() (失敗為 {}) → range_levels 的 TXO IV sigma；us_px = 休市後首日中心移的美股 / 長 TAIEX
+    (dict 或回傳 dict 的函式，見 range_levels._reopen_shift；None → 不移)。兩者省略時行為與舊版相同。"""
     if not fc or fc.get("error") or not fc.get("next_days"):
         return fc
     fc = dict(fc)
@@ -240,7 +243,7 @@ def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, sign
                     sf = LRN.touch_factor(learn_summary, 1)
                 except Exception:  # noqa: BLE001
                     sf = 1.0
-            rn = RLV.attach_to_next_days(nd, scored, snap, base_px, live=live, sigma_factor=sf)
+            rn = RLV.attach_to_next_days(nd, scored, snap, base_px, live=live, sigma_factor=sf, ivk_live=ivk_live, us_px=us_px)
             if rn:
                 notes.append(rn)
         except Exception as e:  # noqa: BLE001
