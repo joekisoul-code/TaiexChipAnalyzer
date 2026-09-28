@@ -1,5 +1,5 @@
 {
- "trained_at": "2026-09-27 08:25:53",
+ "trained_at": "2026-09-28 17:14:30",
  "features": [
   "sigma_range",
   "vola_ratio",
@@ -54,6 +54,16 @@
    },
    "improve_pinball": 0.042,
    "use_model": true,
+   "iv": {
+    "n": 2370,
+    "pinball20_model": 0.2684,
+    "pinball20_iv": 0.271,
+    "touch20_model": 0.206,
+    "touch20_iv": 0.2,
+    "from": "2017-01-03"
+   },
+   "improve_vs_iv": 0.01,
+   "use_model_iv": false,
    "importance": [
     {
      "f": "hsi_r0",
@@ -155,6 +165,16 @@
    },
    "improve_pinball": 0.032,
    "use_model": true,
+   "iv": {
+    "n": 2369,
+    "pinball20_model": 0.376,
+    "pinball20_iv": 0.375,
+    "touch20_model": 0.195,
+    "touch20_iv": 0.2,
+    "from": "2017-01-03"
+   },
+   "improve_vs_iv": -0.003,
+   "use_model_iv": false,
    "importance": [
     {
      "f": "hsi_r0",
@@ -260,6 +280,16 @@
    },
    "improve_pinball": 0.027,
    "use_model": false,
+   "iv": {
+    "n": 2368,
+    "pinball20_model": 0.4624,
+    "pinball20_iv": 0.4546,
+    "touch20_model": 0.197,
+    "touch20_iv": 0.2,
+    "from": "2017-01-03"
+   },
+   "improve_vs_iv": -0.017,
+   "use_model_iv": false,
    "importance": [
     {
      "f": "vola_ratio",
@@ -455,61 +485,64 @@
    "1": {
     "n_oos": 1389,
     "model": {
-     "pinball20": 0.3047,
-     "touch20": 0.218,
-     "touch20_yr_min": 0.178,
-     "touch20_yr_max": 0.289,
-     "mae_low": 1.03
+     "pinball20": 0.2324,
+     "touch20": 0.174,
+     "touch20_yr_min": 0.153,
+     "touch20_yr_max": 0.205,
+     "mae_low": 0.804
     },
     "formula": {
-     "pinball20": 0.3645,
-     "touch20": 0.333,
-     "touch20_yr_min": 0.273,
-     "touch20_yr_max": 0.402,
-     "mae_low": 1.009
+     "pinball20": 0.227,
+     "touch20": 0.18,
+     "touch20_yr_min": 0.149,
+     "touch20_yr_max": 0.236,
+     "mae_low": 0.731
     },
-    "improve_pinball": 0.164,
-    "use_model": true
+    "improve_pinball": -0.024,
+    "use_model": false
    },
    "2": {
     "n_oos": 1388,
     "model": {
-     "pinball20": 0.4203,
-     "touch20": 0.2,
+     "pinball20": 0.365,
+     "touch20": 0.195,
      "touch20_yr_min": 0.146,
-     "touch20_yr_max": 0.301,
-     "mae_low": 1.374
+     "touch20_yr_max": 0.264,
+     "mae_low": 1.183
     },
     "formula": {
-     "pinball20": 0.4586,
-     "touch20": 0.276,
-     "touch20_yr_min": 0.231,
-     "touch20_yr_max": 0.366,
-     "mae_low": 1.361
+     "pinball20": 0.3606,
+     "touch20": 0.197,
+     "touch20_yr_min": 0.165,
+     "touch20_yr_max": 0.256,
+     "mae_low": 1.161
     },
-    "improve_pinball": 0.084,
-    "use_model": true
+    "improve_pinball": -0.012,
+    "use_model": false
    },
    "3": {
     "n_oos": 1387,
     "model": {
-     "pinball20": 0.5131,
-     "touch20": 0.224,
-     "touch20_yr_min": 0.172,
-     "touch20_yr_max": 0.317,
-     "mae_low": 1.632
+     "pinball20": 0.4545,
+     "touch20": 0.211,
+     "touch20_yr_min": 0.159,
+     "touch20_yr_max": 0.276,
+     "mae_low": 1.454
     },
     "formula": {
-     "pinball20": 0.545,
-     "touch20": 0.252,
-     "touch20_yr_min": 0.215,
-     "touch20_yr_max": 0.358,
-     "mae_low": 1.668
+     "pinball20": 0.4533,
+     "touch20": 0.204,
+     "touch20_yr_min": 0.169,
+     "touch20_yr_max": 0.264,
+     "mae_low": 1.481
     },
-    "improve_pinball": 0.059,
-    "use_model": true
+    "improve_pinball": -0.003,
+    "use_model": false
    }
-  }
+  },
+  "aligned": true,
+  "align_corr": 0.756,
+  "align_note": "列 D = D 收盤後、D+1 開盤前的夜盤 (range_levels._night_aligned)；守門 corr(夜盤, 隔日跳空) > 0.5"
  },
  "hour_low_table": {
   "n_days": 723,

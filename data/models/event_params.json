@@ -362,8 +362,8 @@
     "n": 188,
     "from": "2001-03-01",
     "to": "2026-07-13",
-    "raw": 0.7923,
-    "note": "events.fit_centre_shift (研究 panel 重現 live_constants 0.7923/188)；每週 --train 以 FinMind 加權 2000~ + Yahoo 費半/TSM 2000~ 重擬 (n<150 或起點晚於 2005 不更新)"
+    "raw": 0.7924,
+    "fitted_at": "2026-09-28"
    },
    "beta": "TAIEX close-to-close vs SOX, prior 750 normal days, no intercept",
    "touch_prob": 0.15,

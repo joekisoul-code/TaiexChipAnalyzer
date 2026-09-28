@@ -1,7 +1,7 @@
 {
- "generated": "2026-09-27 13:15:59",
+ "generated": "2026-09-28 17:24:11",
  "schema": "event_calendar/v1",
- "asof": "2026-09-27",
+ "asof": "2026-09-28",
  "params_version": "2026-09-27",
  "horizon_days": 120,
  "health": {
