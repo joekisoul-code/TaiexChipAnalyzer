@@ -1,7 +1,7 @@
 {
- "generated": "2026-09-28 17:24:11",
+ "generated": "2026-10-04 08:38:47",
  "schema": "event_calendar/v1",
- "asof": "2026-09-28",
+ "asof": "2026-10-04",
  "params_version": "2026-09-27",
  "horizon_days": 120,
  "health": {
@@ -20,28 +20,6 @@
   "us_calendar": "NYSE 規則 + ^GSPC 實際交易日 (過去)"
  },
  "events": [
-  {
-   "date": "2026-09-25",
-   "tw_session": "2026-09-29",
-   "prev_td": "2026-09-24",
-   "event_type": "post_closure_session",
-   "title_zh": "中秋節、教師節連假後復市 (休 2 個平日，含 3 個美股交易日)",
-   "date_confidence": "confirmed",
-   "source": "TWSE holidaySchedule API",
-   "n_us": 3,
-   "closed_weekdays": 2,
-   "range_k1_factor": 1.732,
-   "beyond_horizon": false
-  },
-  {
-   "date": "2026-10-02",
-   "tw_session": "2026-10-05",
-   "event_type": "us_nfp",
-   "title_zh": "美國 9 月非農就業",
-   "date_confidence": "scheduled",
-   "source": "bls.gov empsit schedule",
-   "beyond_horizon": false
-  },
   {
    "date": "2026-10-08",
    "tw_session": "2026-10-08",
@@ -353,7 +331,7 @@
    "title_zh": "FOMC 利率決策",
    "date_confidence": "scheduled",
    "source": "federalreserve.gov fomccalendars (暫定)",
-   "beyond_horizon": true
+   "beyond_horizon": false
   },
   {
    "date": "2027-02-01",
@@ -364,7 +342,7 @@
    "source": "2027 TWSE 行事曆未公布；平日規則 + 農曆表",
    "n_us": 1,
    "next_td": "2027-02-11",
-   "beyond_horizon": true
+   "beyond_horizon": false
   },
   {
    "date": "2027-02-02",

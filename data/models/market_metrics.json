@@ -1,16 +1,16 @@
 {
  "1": {
-  "n": 3106,
-  "rank_ic": 0.048,
+  "n": 3110,
+  "rank_ic": 0.049,
   "ic_year_mean": 0.053,
   "ic_positive_years": "10/13",
   "base_hit": 0.55,
   "base_mean": 0.06,
   "bin_hit": [
-   0.525,
-   0.548,
+   0.526,
+   0.547,
    0.543,
-   0.569,
+   0.571,
    0.564
   ],
   "bin_mean": [
@@ -120,26 +120,26 @@
    },
    {
     "year": 2026,
-    "n": 176.0,
-    "ic": 0.22,
+    "n": 180.0,
+    "ic": 0.224,
     "top_q_mean": 0.982,
     "bot_q_mean": 0.067,
-    "base_mean": 0.298
+    "base_mean": 0.296
    }
   ]
  },
  "2": {
-  "n": 3105,
+  "n": 3109,
   "rank_ic": 0.053,
-  "ic_year_mean": 0.072,
+  "ic_year_mean": 0.073,
   "ic_positive_years": "10/13",
   "base_hit": 0.562,
   "base_mean": 0.12,
   "bin_hit": [
-   0.535,
+   0.534,
    0.551,
-   0.544,
-   0.605,
+   0.543,
+   0.608,
    0.576
   ],
   "bin_mean": [
@@ -249,36 +249,36 @@
    },
    {
     "year": 2026,
-    "n": 175.0,
-    "ic": 0.205,
-    "top_q_mean": 1.223,
-    "bot_q_mean": -0.762,
-    "base_mean": 0.589
+    "n": 179.0,
+    "ic": 0.21,
+    "top_q_mean": 1.12,
+    "bot_q_mean": -0.681,
+    "base_mean": 0.583
    }
   ]
  },
  "3": {
-  "n": 3104,
+  "n": 3108,
   "rank_ic": 0.046,
-  "ic_year_mean": 0.067,
+  "ic_year_mean": 0.068,
   "ic_positive_years": "10/13",
   "base_hit": 0.565,
   "base_mean": 0.19,
   "bin_hit": [
-   0.531,
-   0.539,
+   0.532,
+   0.538,
    0.566,
-   0.607,
-   0.581
+   0.609,
+   0.58
   ],
   "bin_mean": [
    0.07,
    0.17,
    0.17,
-   0.37,
-   0.15
+   0.39,
+   0.13
   ],
-  "spread_top_bottom": 0.08,
+  "spread_top_bottom": 0.06,
   "by_year": [
    {
     "year": 2014,
@@ -378,16 +378,16 @@
    },
    {
     "year": 2026,
-    "n": 174.0,
-    "ic": 0.195,
-    "top_q_mean": 1.388,
-    "bot_q_mean": -0.739,
-    "base_mean": 0.866
+    "n": 178.0,
+    "ic": 0.203,
+    "top_q_mean": 1.425,
+    "bot_q_mean": -0.728,
+    "base_mean": 0.855
    }
   ]
  },
  "5": {
-  "n": 3102,
+  "n": 3106,
   "rank_ic": 0.052,
   "ic_year_mean": 0.075,
   "ic_positive_years": "10/13",
@@ -395,19 +395,19 @@
   "base_mean": 0.31,
   "bin_hit": [
    0.557,
-   0.592,
+   0.597,
    0.585,
-   0.619,
-   0.57
+   0.617,
+   0.571
   ],
   "bin_mean": [
    0.11,
-   0.38,
+   0.39,
    0.17,
-   0.59,
-   0.29
+   0.58,
+   0.3
   ],
-  "spread_top_bottom": 0.18,
+  "spread_top_bottom": 0.19,
   "by_year": [
    {
     "year": 2014,
@@ -507,36 +507,36 @@
    },
    {
     "year": 2026,
-    "n": 172.0,
-    "ic": 0.257,
-    "top_q_mean": 1.836,
-    "bot_q_mean": -1.214,
-    "base_mean": 1.429
+    "n": 176.0,
+    "ic": 0.259,
+    "top_q_mean": 1.804,
+    "bot_q_mean": -0.824,
+    "base_mean": 1.415
    }
   ]
  },
  "10": {
-  "n": 3097,
-  "rank_ic": 0.081,
-  "ic_year_mean": 0.11,
+  "n": 3101,
+  "rank_ic": 0.078,
+  "ic_year_mean": 0.108,
   "ic_positive_years": "11/13",
   "base_hit": 0.607,
-  "base_mean": 0.61,
+  "base_mean": 0.62,
   "bin_hit": [
    0.597,
-   0.606,
+   0.608,
    0.591,
    0.593,
    0.647
   ],
   "bin_mean": [
-   0.41,
-   0.58,
+   0.43,
+   0.57,
    0.46,
-   0.51,
+   0.52,
    1.1
   ],
-  "spread_top_bottom": 0.69,
+  "spread_top_bottom": 0.67,
   "by_year": [
    {
     "year": 2014,
@@ -636,36 +636,36 @@
    },
    {
     "year": 2026,
-    "n": 167.0,
-    "ic": 0.143,
-    "top_q_mean": 3.386,
-    "bot_q_mean": 1.668,
-    "base_mean": 2.756
+    "n": 171.0,
+    "ic": 0.117,
+    "top_q_mean": 3.421,
+    "bot_q_mean": 2.201,
+    "base_mean": 2.806
    }
   ]
  },
  "20": {
-  "n": 3087,
-  "rank_ic": 0.07,
-  "ic_year_mean": 0.181,
+  "n": 3091,
+  "rank_ic": 0.069,
+  "ic_year_mean": 0.18,
   "ic_positive_years": "12/13",
   "base_hit": 0.626,
-  "base_mean": 1.23,
+  "base_mean": 1.24,
   "bin_hit": [
-   0.594,
-   0.616,
-   0.655,
+   0.595,
+   0.618,
+   0.653,
    0.64,
-   0.623
+   0.624
   ],
   "bin_mean": [
-   1.05,
-   0.8,
-   1.23,
-   1.14,
+   1.07,
+   0.81,
+   1.21,
+   1.15,
    1.94
   ],
-  "spread_top_bottom": 0.89,
+  "spread_top_bottom": 0.87,
   "by_year": [
    {
     "year": 2014,
@@ -765,11 +765,11 @@
    },
    {
     "year": 2026,
-    "n": 157.0,
-    "ic": 0.374,
-    "top_q_mean": 10.415,
-    "bot_q_mean": 4.096,
-    "base_mean": 5.559
+    "n": 161.0,
+    "ic": 0.371,
+    "top_q_mean": 10.011,
+    "bot_q_mean": 4.336,
+    "base_mean": 5.513
    }
   ]
  }
