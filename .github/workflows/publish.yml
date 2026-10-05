@@ -29,6 +29,7 @@ jobs:
     env:
       TZ: Asia/Taipei
       FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+      TREASURE_BACKFILL_DAYS: "95"   # 挖寶雲端帳本：缺的日期自動回填 (已掃過的日期跳過，平常零成本；某天排程失敗也會補)
       CHIP_WATCHLIST: ${{ vars.CHIP_WATCHLIST }}
     steps:
       - uses: actions/checkout@v4
