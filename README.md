@@ -279,6 +279,16 @@ v2.1 樣本外：含夜盤 1 日叫牌命中 81.5% (**強叫牌 = 前後 15%：�
 歸檔 Pages 上一版 ∪ data/cache；`TREASURE_BACKFILL_DAYS=N` 可回填過去 N 天 (紀錄標 backfill；非當時真的發布)。首次回填 2026-07-01~10-02 (65 個交易日)：挖寶結案 171 筆命中 26%，**A+ 8 筆 88%、A 23 筆 61% 與回測相符，B+ 25% / B 14% 明顯低於回測 (42/39%)**；飆股 86 筆飆股率 35% (回測 33%)、出場規則勝率 62%。
 7 月大盤回檔 15% 期間推薦平均 −1.5%、8 月 +3.6%、9 月 −4.5% → 挖寶只看 A/A+，B 級當描述。
 
+**2026-10-05 pr2 (LC-04 pass / T5 559 檢定 BH 0 / 獨立驗證)：A/A+ 訊號級、B/B+ 描述級，預期值下修、帳本誠實化** (`tests/test_treasure_live_ledger.py`)：
+- 150 結案中 A/A+ 0.643 vs 其餘 0.148 (+0.495 日 cluster [+0.256,+0.717])，但 **0 筆真正發布的結案 (全是回填)、分數器 10-04 看過答案、th_A/th_Aplus 為同批分數的分位 (樣本內)**；以訓練 <2025-12-01 的 OOS 分數器重跑整個回填：A/A+ 0.568 [0.42,0.70] n=44 vs 0.197，平均 +7.7% (不是 +13.8%)，A+ 0.375 (n=8) ≠ A 0.611。
+  所有 A/A+ 集中在 07-20~08-04 九個掃描日 (加權月線下 1~10%)：閘門本身 (月線下不看 p) 就有 0.343 vs 0.150；同日前 40 池在 A 日命中 41.6%、A+ 日 52.5% → **大半優勢是「哪些日子」不是「哪支股票」** (A∪A+ 對同日池超額 +3.1pt CI 含 0)；p 在等級內無排序力 (Spearman 0.048)。
+- 顯示規則：`stats.treasure.by_tier[*].role` (`signal` A+/A、`descriptive` B+/B)、`expect: [0.55, 0.57]` 僅 A/A+ (回測 A 0.548 / A+ 0.638、OOS 重掃 0.568)；`signal` = A∪A+ 結案彙總 (成績板主數字)；
+  `drift` 只對訊號級且**真實發布**結案 ≥15 筆、命中低於 0.55 達 15pt 判定，B/B+ 不再產生「失準」(`below_bt` 只是資訊旗標、`note` 寫「描述級」)。B 的「相對命中 58%」不顯示 (同日池隨機股 62.5%，B 低於自己的池 −4.6pt [−6.0,−3.3] 5/5 年)。
+- 帳本：`record()` 每筆加 `model_ver` (掃描時 trained_at)、`th_A`/`th_Aplus`、`mkt_bias20`、`scan_src` (`live`|`backfill`)；`_eval_treasure()` 對停損列也追到第 21 日補 `fin21` (`cur` 仍為結案日報酬；91/150 回填列提早結案平均第 4.2 日，與回測 fin21 比平均報酬是蘋果比橘子)；
+  `stats` 加 `by_source {published, backfill}`、`agg.avg_fin21 / n_fin21 / win21 / n_published / n_backfill`、`by_month.avg_fin21 / n_A`、`roles / expect_AAplus / note_tiers / note_src`；`model` 區塊加 `expect_AAplus`、`note_tiers`、`roles`。
+- 警報：A/A+ 文案改「模型分 0.61 — 歷史統計：訊號日收盤起算 21 個交易日，A/A+ 命中約 55~57% (回測 55%/64%，2026 回填重算 57%)；大盤月線下的日子整體較佳。非買賣建議」，刪「命中機率 X%」與「進場/持有」；B/B+ 漂移警示移除，A/A+ (真實發布) 與飆股漂移保留。
+- 不採用：從實帳重設 th_A / 漂移閘當閘門 (走動式 0 命中、+0.104 CI 含 0)、飆股 ps 門檻調整 (走動式 −0.349 顯著有害)、限制雲端池 (用 170 檔正確定義 B 12.2% = 12.2%)、大盤狀態特徵/閘門/隱藏 B (= 擇時 #74)、目標函數/融合/候選池/成交值/前 3 檔 (559 檢定 BH 0)。門檻 0.5062 / 0.6362、th_top10 0.3977 維持；模型檔不動。
+
 
 App 挖寶雷達的命中 (30 天內收盤峰值 ≥+6% 或相對大盤 ≥+4pt、先跌 −8% 不算、結案仍 >0) 回測與強化。樣本：今日成交值前 170 檔上市 + 60 檔上櫃個股，2019~ FinMind 日 K (27 萬列)。
 
@@ -410,8 +420,36 @@ forecast.json `precheck`：`gap` (明日開盤跳空預判) 與 `calendar` (目�
   → 未叫牌且淨多 ≥4 給「偏多‧訊號共識」(`call_action=偏多`，行動比照偏多)，+3 只加註；空方共識不叫牌。
 - **規則**：模型無叫牌 → 中性 (列其他票多空比，淨多 ≥4 → 偏多‧訊號共識、+3 加註略偏多、空方共識不叫空)；有叫牌 → 淨票 ≥3「高共識」、≤−3「分歧 → 觀望、縮小部位」、其餘「一般」；行動建議結合 7 日閘門與路徑買賣點 (buy_at/sell_at/stop/target)。
 - `verdict.train()` 在每週全量訓練 (`--train`) 重算存 `data/models/verdict.json`；`build()` 在 `export_static` 的 learn 之後執行 (每次發布)。
+- **2026-10-05 pr2 (direction_stack DIAG)：夜盤模式票數只當資訊** — 夜盤 高共識 0.839/0.767/0.721 (h1/h2/h3，覆蓋 ~21%) 弱於已上線的信心分層 高 0.903@30% / 0.809@28% / 0.744@27%，h2 夜盤高共識 6/6 年低於模型排序；
+  夜盤 分歧 桶 n 29/26 命中 0.897/0.846 不是風險訊號。→ `build()` 輸出 `bucket_role` (`night` 變體 = `info`、其餘 `filter`)、`conf_tier`、`conf_hit`、`conf_oos` (`confidence.stats_for(1, variant, tier)`)；
+  夜盤模式 `verdict` 不加 ‧高共識/‧分歧 後綴、`head` 改為「模型{叫牌}{強度}；信心分層 {tier} (歷史 x%，覆蓋 y%)；其他 n 票 淨 ±k (夜盤模式下票數不加分，僅供參考)」、`action` 不再因 分歧 加「縮小部位/不追空」。
+  不含夜盤維持現行 (h1 高共識 +0.049 [+0.015,+0.088]，走動式規則重選仍成立；HIGH_NET=3 為全樣本選門檻、BH 0.09)。`verdict.json`/`confidence.json` 不重算。測試 `tests/test_verdict_role.py`。
+
+## 資料關係圖 (pr2 relations_map，2026-10-05)
+
+`data/models/relations_map.json` (由 `tools/relations_map.py <relations_map_app.json>` 驗證 schema 後安裝並蓋 `asof`；`--check` 只驗證) → `export_static` 每次 (full/fast) dump 成 Pages `data/relations_map.json` (~67KB)，App 畫「八層時間軸 + 等級徽章 + 無效面板」。靜態檔、不需每日重算。
+- 方法：研究者 798 檢定 (逐年 Spearman IC + 年 cluster t、BH 跨 798、門檻取前幾年走動式) → 獨立驗證者以自己的對齊重算；`grade` 為驗證後等級 (A 65 / B 6 / C 10)、`grade_researcher` 為原等級 (差異 = 驗證者降級 10 條，如 E03 夜盤→開盤後 0.298→0.092 是官方 09:00 失真開盤)。
+- 81 條有效邊 / 28 節點：隔夜層 17 (夜盤→0050 跳空 IC 0.819 β 1.01、→加權收收 0.573、費半 between 0.360、ES 04:00 0.536、ADR→2330 跳空 0.587 而開盤後 −0.017)、15:40 可用層 13 (恆生/KOSPI 同日 0.09/0.06、VIX 水準→5~20 日 0.16~0.26、恆生 5 日反向 −0.086、個股法人流量 0.025~0.032)、
+  指數→族群隔日輪動 6 (加權當日→小型股/中 beta/半導體隔日超額 0.13~0.15，Q5 +24 bps vs Q1 −13，8/8 年；新)、台股→美股當晚 15 (加權→ADR 0.344 27/27、→費半 0.170、2330→ADR 0.363、ADR 溢價→ADR −0.355；新、晚間解讀用)、
+  ETF 追蹤誤差回復 4 (0050 超額→超額 D+1 −0.198 19/19、00631L −0.365；原始報酬不可交易)、供應鏈同業 3 (C)、波動校準 4 (ivk5→RV5 0.356、ivk 對 ATR 增量 +0.12、方向邊全弱)、同日共變 19 (描述)。
+- 13 類無效 (`rejected[]`)：前一夜美股/ADR 1 日→隔日 (IC 0.006~0.03，資訊在同一台股交易日吸收完)、匯率/DXY/EWT、KOSPI 前日、市場寬度 (對 bias20/60 殘差化後 ≈ 0 = 指數乖離的等權版)、量能、池合計法人流量、族群→指數、同業→2330、IV 方向、ADR 5 日反向 (2000~09 反號)。
+- **沒有一條新邊能進模型**：adr5 / adr_close / breadth4 / above60 重訓 ΔIC ≤ +0.005 (CI 含 0)、叫牌命中不動、breadth4 短線 h1 −0.012 [−0.021,−0.002]。已在模型的 30 條 (`production: true`, `production_ref`) 只是地圖標示。所有邊 `tradable: false` (#74)；`kind` predictive/descriptive/calibration、`usable_at` 給時鐘標、`wf_hit` = [高檔上漲率, 低檔上漲率, 基準]。
+- 時點帳本 (P5，`chip/pit_ledger.py`)：gh-pages `force_orphan` 讓 forecast.json 沒有歷史 (`git log origin/gh-pages` 只有一個 commit) → 每次完整發布把 `{ts, date, next_days[*].{n,variant,call,call_strength,call_model,p_up,conf_tier,level,buy_at,sell_at,stop,target,range_mode}, horizons, verdict.{call,bucket,bucket_role,net}, five.call, treasure.AA}` 追加到 Pages `data/pit_ledger.jsonl` (每行 ~3KB)，
+  發布前 Pages 上一版 (備援 raw gh-pages) ∪ `data/cache/pit_ledger.jsonl` 備份 (在 Actions cache 內，同 treasure_live) ∪ 本機 (ts 去重、保留最後 400 行、寫回兩處)，fast 只帶回不追加；
+  抓取走 `chip.http.session()` (Retry 4 次)、逐行容錯解析、縮水保護 (不用 0 行覆蓋有內容的檔) → 單次 Pages 抓取失敗不會洗掉歷史。這是「真的顯示過什麼」的唯一可靠紀錄 (`tests/test_pr2_static.py`)。
 
 ## 線上自學 (`chip/predict/learn.py`，2026-09-22)
+
+> **2026-10-05 pr2 (live_calibration 430 檢定 + 獨立驗證)：三個大盤自適應全部停用、改為只顯示** (`DEGRADE_ENABLED / PLATT_ENABLED / TOUCH_FACTOR_ENABLED = False`，DO-NOT-REDO #85a)。
+> - 連敗降級 (LC-01)：2026 帳本走動式，被降級的叫牌反而命中更高 — 夜盤 保留 0.737 (n=422) vs 被降級 0.968 (n=31)，差 −0.231 [−0.312,−0.127]；不含夜盤 −0.105；長紀錄 206 檢定 0 pass、16 顯著有害。
+>   「命中序列均值回歸」不成立 (lag-1 自相關 ≈ 0)。→ `call` 不再改中性、不寫 `call_degraded`；`adjust.recent_flag` (below/above) + `learn_note`「近期命中 X% 低於長期 Y% (僅供參考，不改叫牌)」只顯示。
+> - 線上 Platt (LC-02)：Brier(raw)−Brier(adj) 夜盤 −0.0049 [−0.0087,−0.0014]、不含夜盤 −0.0043；不含夜盤 raw p_up 本身無斜率 (0.50~0.65 各桶實現 0.59~0.60)、夜盤 raw 已校準。→ 不寫 `p_up_adj` (App 自動回 raw p_up)；係數留在 `adjust.platt_diag`。
+> - 觸及率水準乘數 (LC-07)：加權走動式 pinball IV σ k1 −0.30% ns、k3 +0.99% 變差，乘數 sd 0.065 → `touch_factor()` 固定 1.0 (`touch.sigma_factor_raw` 留診斷)；`range_levels.attach_to_next_days(sigma_factor=)` 簽名不變。
+> - 加「同期上漲率」對照 (LC-08)：不含夜盤 1 日偏多叫牌日上漲率 0.557 ≈ 未叫牌日 0.560 (選日能力 0，但 ±6pt CI 含回測邊際 → 不停用)；forecast `next_days[].recent_up_rate`、learn_note「近期實際命中 X% (n=…)、同期上漲率 Y%」。
+> - 個股 (kind=stk) 的降級本輪未驗證 → `summarize()` 個股 by_h 以 `degrade_enabled=True` 維持現行；`level_bias` 水準偏誤修正未驗證、維持。
+> - 帳本可審計 (P5)：每列加 `call_model` (降級/覆蓋前原判)、`conf_tier`、`verdict_bucket` (1 日的判斷總結桶，verdict 算完後由 `annotate_ledger` 補寫；kind=gap 列既有的 `bucket` 是跳空幅度桶，故另取名)、`p_up_adj`、`recent_flag`；
+>   `market.by_h[h].n_published / n_backfill`、頂層 `n_published` 區分真實發布與回填 (2026-10-05 時真實列 245、回填 1,275)；`method` 帶三個旗標。預期效果 (LC-01 重放)：夜盤顯示命中 +1.6pt、覆蓋 0.64→0.69；不含夜盤 +2.8pt、覆蓋 0.32→0.43。
+> - 驗證時程：真實發布夜盤 h1 ≥60 筆 (約 6 個月) 後再評估是否恢復任何自適應。
 
 > 2026-09-24 更新：帳本依變體記錄 (`mode=close` 不含夜盤 15:40 版、`mode=night` 含夜盤版)，兩者各自首次回填今年 160 日樣本外預測 (`backfill(variant)`)；
 > 校準/降級只用同變體 ≥20 筆對帳。回填結果：不含夜盤 隔天 51~53%、2 日 58%、3 日 66%；含夜盤 隔天 81~84%、2 日 76~79%、3 日 68%。
@@ -419,7 +457,7 @@ forecast.json `precheck`：`gap` (明日開盤跳空預判) 與 `calendar` (目�
 
 - 每次 `export_static` 把當次預測記進帳本 (`data/learn.json`，Pages 累積)：大盤隔天/後天/第三天與 5/10/20 日的叫牌、p_up、買賣點水準、trend7；追蹤清單個股 5/10/20 日相對大盤 (`stock_forecast`，同時併入 `forecast.stocks` / `watchlist.stocks[].forecast`)。盤中 (live) 紀錄另標，不進統計。
 - 目標日收盤後對帳：方向命中、報酬 (個股為相對大盤)、買點/賣點/停損/目標是否被觸及、Brier。統計：近期命中 (指數衰減、半衰期 30 次)、近 20/60 次、全部、模型長期 call_hit、基準。
-- 自適應 (只用已對帳紀錄)：近期命中低於模型長期 5pt 以上 (n≥20) → 該視野 `call_degraded` 改中性 (原判存 `call_model`)；`p_up_adj` = 近期 Platt 校準 (20→80 筆逐步信任)；買賣點水準乘數 = sqrt(近 60 次觸及率/20%) 限 0.85~1.35 (`range_levels.attach_to_next_days(sigma_factor)`)。
+- 自適應 (只用已對帳紀錄；**2026-10-05 起三者停用、只顯示**，見上方 pr2 說明)：近期命中低於模型長期 5pt 以上 (n≥20) → 該視野 `call_degraded` 改中性 (原判存 `call_model`)；`p_up_adj` = 近期 Platt 校準 (20→80 筆逐步信任)；買賣點水準乘數 = sqrt(近 60 次觸及率/20%) 限 0.85~1.35 (`range_levels.attach_to_next_days(sigma_factor)`)。旗標設回 True 即恢復舊路徑 (`tests/test_learn_adjust_display_only.py`)。
 - 帳本一旦記下不改 (盤後正式版可覆蓋盤中近似版)，所以命中率是誠實的前瞻紀錄；`python cli.py` 無需額外指令，排程自動累積。
 - **即時學習修正 (2026-09-22)**：盤中每次發布把小時模型「現在→13:30」叫牌記成 kind='hr'，收盤後對帳，依時間點 (10:00/11:00/12:00/13:00) 統計近期命中 → forecast.json `hourly_learn`；預估收盤水準的近期帶號誤差 (指數衰減，半衰期 20 筆) 以 `level_adj`(偏誤×信任度×0.5) 修正下次 next_days.level (`level_model` 保留原值)。
 

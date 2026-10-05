@@ -265,9 +265,10 @@ def main() -> None:
                 pf = finmind.stock_price(sid, "2024-01-01"); stock_frames[sid] = pf[[c for c in ("date", "close", "high", "low") if c in pf]]
         except Exception as e:  # noqa: BLE001
             print(f"  stock_forecast {sid} failed:", e)
+    learn_out = None
     try:
         learn_out = learn.run(fc, snap, scored, stock_fc, stock_frames, prev=learn_prev, hourly=hr if not hr.get("error") else None)
-        fc = learn.adjust_forecast(fc, learn_out)
+        fc = learn.adjust_forecast(fc, learn_out)   # pr2：只寫 recent_hit / recent_up_rate / recent_flag，不改 call、不寫 p_up_adj
         for sid, sf in stock_fc.items():   # 個股預測也帶近期命中
             st = (learn_out.get("stocks") or {}).get(sid) or {}
             for h, r in (sf.get("horizons") or {}).items():
@@ -315,11 +316,18 @@ def main() -> None:
         fc["asia_dates"] = _st3.asia_last_dates()   # 亞股同日資料新鮮度 (2026-09-24：嚴格同日，缺就 NaN)
     except Exception as e:  # noqa: BLE001
         print("  infomap failed:", e)
-    try:   # 判斷總結 (2026-09-23)：模型叫牌 + 6 票獨立訊號的共識 → 一句可執行判斷 (含同狀況 OOS 命中率)
+    try:   # 判斷總結 (2026-09-23)：模型叫牌 + 6 票獨立訊號的共識 → 一句可執行判斷 (含同狀況 OOS 命中率)；pr2：夜盤模式 bucket_role=info、conf_tier 領頭
         from chip.predict import verdict
         fc["verdict"] = verdict.build(fc, hr if not hr.get("error") else None, snap, scored, learn_summary)
     except Exception as e:  # noqa: BLE001
         print("  verdict failed:", e)
+    try:   # pr2 P5：adjust_forecast / verdict 在 learn.run 之後才算 → 把 bucket / call_model / conf_tier / recent_flag 補進本次新列，重寫 learn.json
+        if learn_out is not None:
+            _na = learn.annotate_ledger(learn_out, fc, snap, resave=True)
+            dump("learn", learn_out)
+            print(f"  learn: annotated {_na} rows (bucket/call_model/conf_tier)")
+    except Exception as e:  # noqa: BLE001
+        print("  learn annotate failed:", e)
     dump("forecast", {"updated": time.strftime("%Y-%m-%d %H:%M:%S"), "forecast": fc, "hourly": hr, "stocks": stock_fc})
     try:   # 挖寶雷達樹模型 (前端算分)；模型檔在 repo (每週 --train 重訓)
         from chip.predict import model as _M
@@ -328,6 +336,13 @@ def main() -> None:
             dump("treasure_model", _tm)
     except Exception as e:  # noqa: BLE001
         print("  treasure_model dump failed:", e)
+    try:   # 資料關係圖 (pr2 P4，2026-10-05)：靜態檔 (tools/relations_map.py 安裝到 data/models)，full 與 fast 都 dump → Pages data/relations_map.json
+        from chip.predict import model as _M2
+        _rm = _M2.load_json("relations_map")
+        if _rm:
+            dump("relations_map", _rm)
+    except Exception as e:  # noqa: BLE001
+        print("  relations_map dump failed:", e)
     res = None
     if not args.fast:
         res = chips.assess_watchlist(chips.WATCHLIST, use_wantgoo=use_wg)
@@ -415,6 +430,7 @@ def main() -> None:
     except Exception as e:  # noqa: BLE001
         print("  gov8 failed:", e)
     # 挖寶/飆股雷達雲端追蹤 (2026-10-05)：盤後 (完整模式) 以 App 同款模型掃描 + 永久帳本對帳；fast 模式只帶回上次發布 (Pages 整站覆蓋)
+    _tlo = None
     try:
         from chip.predict import treasure_live as _tl
         if not args.fast:
@@ -435,6 +451,24 @@ def main() -> None:
                     (DATA / "treasure_live.json").write_text(r.text, encoding="utf-8"); print("  carried over treasure_live.json")
         except Exception as e2:  # noqa: BLE001
             print("  carry treasure_live failed:", e2)
+    # 時點帳本 (pr2 P5，2026-10-05)：force_orphan 讓 forecast.json 沒有歷史 → 每次完整發布追加一行「真的顯示過什麼」(叫牌/水準/verdict 桶/挖寶 A/A+)；
+    # 先把上一版帶回：Pages (備援 raw gh-pages) ∪ data/cache 備份 (在 Actions cache 內) ∪ 本機，ts 去重、保留最後 400 行、寫回兩處 → 單次抓取失敗不會洗掉歷史；
+    # fast 模式只帶回不追加
+    try:
+        from chip import pit_ledger as _pit
+        _pit_path = DATA / "pit_ledger.jsonl"
+        _pit_urls = (gov8.PAGES_URL.rstrip("/") + "/data/pit_ledger.jsonl", "https://raw.githubusercontent.com/joekisoul-code/TaiexChipAnalyzer/gh-pages/data/pit_ledger.jsonl")
+        _n0 = _pit.carry_over(_pit_path, _pit_urls)
+        if not args.fast:
+            _n1 = _pit.append(_pit_path, _pit.line_from(fc, _tlo, snap, mode="full"))
+            _kb = _pit_path.stat().st_size / 1024 if _pit_path.exists() else 0
+            print(f"  pit_ledger: carried {_n0} → {_n1} rows ({_kb:.0f} KB; cache {_pit.CACHE_PATH.name})")
+        elif _n0:
+            print(f"  pit_ledger: carried over {_n0} rows")
+        else:
+            print("  pit_ledger: no rows from Pages / cache / local (first run?) — nothing written")
+    except Exception as e:  # noqa: BLE001
+        print("  pit_ledger failed:", e)
     # 操盤台 (2026-09-25)：0050/00631L/00663L/00981A/2330/065423 的均線、選擇權回檔機率帶、高低點承接價、價位帶、回撤控制價位、
     # 資金防守、八大行庫歸檔、00981A 持股、權證、2330 ADR。完整模式重算；fast 模式在清晨/當天第一次 (ADR) 或資料落後最後交易日時重算，其餘沿用上次發布
     def _prev_desk() -> dict:

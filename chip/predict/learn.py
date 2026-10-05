@@ -10,6 +10,12 @@
    - 買賣點：近 60 次買點觸及率 vs 目標 20% → 水準乘數在 0.85~1.35 間調整 (觸及太多 → 放寬，太少 → 收窄)。
    - 個股：每檔追蹤股 5/10/20 日相對大盤方向的近期命中率；連續落後 → 提示「模型對此股近期不準」。
 所有調整都只用「已對帳」的紀錄，不看未來；調整值同時寫進 forecast.json (p_up_adj / recent_hit / learn_note) 與 learn.json。
+
+pr2 (2026-10-05)：上面三個大盤自適應以 2026 實帳 (走動式) 與 2016~2026 長紀錄驗證皆無益或有害 → **停用，只顯示不調整** (旗標 DEGRADE_ENABLED /
+PLATT_ENABLED / TOUCH_FACTOR_ENABLED，預設 False；診斷值仍算：adjust.recent_flag / platt_diag / touch.sigma_factor_raw)。forecast 改帶
+recent_hit (近期實際命中)、recent_up_rate (同期上漲率，LC-08 對照)、recent_flag (below/above)；p_up 顯示 raw。個股 (kind=stk) 的降級本輪未驗證、維持。
+帳本可審計 (P5)：每列加 call_model / conf_tier / verdict_bucket / recent_flag (kind=gap 列既有的 bucket 是跳空幅度桶，故判斷總結桶另取名)；
+summarize 的 by_h 加 n_published / n_backfill (真實發布 vs 回填)。
 """
 from __future__ import annotations
 
@@ -32,6 +38,11 @@ HALF_LIFE = 30          # 近期命中率的指數衰減半衰期 (以叫牌次�
 MIN_N_ADJ = 20          # 至少 20 筆已對帳才做調整
 DEGRADE_GAP = 0.05      # 近期命中低於長期 5 個百分點以上 → 降級
 TOUCH_TARGET = 0.20
+# pr2 (2026-10-05) 線上自學三個自適應以 2026 實帳 + 2016~2026 長紀錄驗證皆無益或有害 → 停用、只保留診斷/顯示 (DO-NOT-REDO #85a)；
+# DEGRADE_GAP / MIN_N_ADJ / TOUCH_TARGET 保留給診斷 (recent_flag、platt_diag、sigma_factor_raw)。
+DEGRADE_ENABLED = False        # LC-01 連敗降級：被降級的叫牌反而命中更高 (夜盤 0.968 vs 保留 0.737，差 −0.231 [−0.312,−0.127]；不含夜盤 −0.105)；206 檢定 0 pass、16 顯著有害
+PLATT_ENABLED = False          # LC-02 線上 Platt：Brier 變差 (夜盤 −0.0049 [−0.0087,−0.0014] p 0.0008；不含夜盤 −0.0043)；不含夜盤 raw p_up 本身無斜率、夜盤 raw 已校準
+TOUCH_FACTOR_ENABLED = False   # LC-07 觸及率 sigma 乘數：加權走動式 pinball IV σ k1 −0.30% ns、k3 +0.99% 變差；乘數平均 1.003、sd 0.065 → 固定 1.0
 BACKFILL_VER = "2026-09-24"   # 叫牌規則改變時換版本 → 舊回填紀錄 (僅 backfill=True) 移除並依新規則重算；真實發布紀錄永不改
 
 
@@ -93,7 +104,12 @@ def records_from_forecast(fc: dict, snap: dict | None) -> list[dict]:
                      "buy_at": _num(x.get("buy_at")), "sell_at": _num(x.get("sell_at")), "stop": _num(x.get("stop")), "target_px": _num(x.get("target")),
                      "range_mode": x.get("range_mode"), "trend7": (fc.get("trend7") or {}).get("state"), "realized": None,
                      "event_tags": x.get("event_tags") or [], "event_range_factor": _num(x.get("event_range_factor")),   # 事件 (2026-09-27)：事後分組評估
-                     "range_sigma_src": x.get("range_sigma_src")})   # 2026-09-28：sigma 來源 (txo_iv / atr_ewma)，日後分開看觸及 (iv_monitor 回滾依據)
+                     "range_sigma_src": x.get("range_sigma_src"),   # 2026-09-28：sigma 來源 (txo_iv / atr_ewma)，日後分開看觸及 (iv_monitor 回滾依據)
+                     # pr2 P5 (2026-10-05) 稽核欄位：模型原判 (降級/覆蓋前)、信心分層、判斷總結桶 (只有 1 日；取名 verdict_bucket，與 kind=gap 列的跳空幅度桶 bucket 區分)、
+                     # 舊 Platt 值 (停用後為 None)、近期旗標
+                     "call_model": x.get("call_model") or x.get("call") or "中性", "conf_tier": x.get("conf_tier"),
+                     "verdict_bucket": ((fc.get("verdict") or {}).get("bucket") if int(x.get("n") or 0) == 1 else None),
+                     "p_up_adj": _num(x.get("p_up_adj")), "recent_flag": x.get("recent_flag")})
     for h in (5, 10, 20):
         r = (fc.get("horizons") or {}).get(h) or (fc.get("horizons") or {}).get(str(h))
         if not r:
@@ -101,8 +117,37 @@ def records_from_forecast(fc: dict, snap: dict | None) -> list[dict]:
         rows.append({"kind": "mkt", "sid": "TAIEX", "as_of": as_of, "target": None, "h": h, "mode": "live" if live else "close", "phase": mode, "live": live, "base": base,
                      "p_up": _num(r.get("p_up")), "base_hit": _num(r.get("base_hit")), "call": (r.get("call_five") if (h == 5 and r.get("call_five")) else None) or r.get("call") or ("偏多" if (_num(r.get("p_up")) or 0) >= (_num(r.get("base_hit")) or 0.5) + 0.03 else "偏空" if (_num(r.get("p_up")) or 0) <= (_num(r.get("base_hit")) or 0.5) - 0.03 else "中性"),
                      "strength": r.get("call_strength") or "", "call_hit": _num(r.get("call_hit")), "variant": r.get("variant") or "daily", "level": None,
-                     "buy_at": None, "sell_at": None, "stop": None, "target_px": None, "range_mode": None, "trend7": (fc.get("trend7") or {}).get("state"), "realized": None})
+                     "buy_at": None, "sell_at": None, "stop": None, "target_px": None, "range_mode": None, "trend7": (fc.get("trend7") or {}).get("state"), "realized": None,
+                     "call_model": r.get("call_model") or r.get("call") or "中性", "conf_tier": r.get("conf_tier"), "verdict_bucket": None, "p_up_adj": _num(r.get("p_up_adj")), "recent_flag": r.get("recent_flag")})
     return rows
+
+
+def save_ledger_snapshot(rows: list[dict]) -> None:
+    """本機 sqlite 備份 (snapshots.pred_ledger，當日一份，INSERT OR REPLACE)；失敗只記 debug。"""
+    try:
+        store.save_snapshot(dt.datetime.now(config.TZ).strftime("%Y-%m-%d"), "pred_ledger", {"n": len(rows), "rows": rows[-400:]})
+    except Exception as e:  # noqa: BLE001
+        log.debug("ledger snapshot: %s", e)
+
+
+def annotate_ledger(out: dict, fc: dict, snap: dict | None, resave: bool = False) -> int:
+    """pr2 P5：發布流程中 adjust_forecast / verdict.build 在 run() 之後才跑 → 把本次新列缺的稽核欄位 (call_model/conf_tier/verdict_bucket/p_up_adj/recent_flag) 補上。
+    只補同 key、尚未對帳且該欄位仍為 None 的列；叫牌 (call) 與其他已記欄位一律不改 (kind=gap 列的 bucket 不在此列)。回傳補到的列數。
+    resave=True (發布流程)：有補到列時重寫當日 sqlite pred_ledger 快照。"""
+    idx = {_key(r): r for r in (out or {}).get("ledger") or []}
+    n = 0
+    for r in records_from_forecast(fc, snap):
+        old = idx.get(_key(r))
+        if old is None or old.get("realized"):
+            continue
+        hit = False
+        for k in ("call_model", "conf_tier", "verdict_bucket", "p_up_adj", "recent_flag"):
+            if old.get(k) is None and r.get(k) is not None:
+                old[k] = r[k]; hit = True
+        n += int(hit)
+    if resave and n:   # run() 已先存過未補欄位的當日快照 → 補完後覆寫，sqlite 與 learn.json 一致
+        save_ledger_snapshot(out["ledger"])
+    return n
 
 
 def records_from_hourly(hr: dict, snap: dict | None) -> list[dict]:
@@ -260,11 +305,16 @@ def _apply_platt(a: float, b: float, p: float) -> float:
     return 1 / (1 + math.exp(-(a * x + b)))
 
 
-def _group_stats(rs: list[dict]) -> dict:
+def _group_stats(rs: list[dict], *, degrade_enabled: bool | None = None, platt_enabled: bool | None = None) -> dict:
+    """一組帳本列的對帳統計 + 自適應診斷。pr2：市場組預設 (None → 讀模組旗標 DEGRADE_ENABLED / PLATT_ENABLED，皆 False) 只算 recent_flag / platt_diag；
+    個股組呼叫端傳 True 維持現行。旗標在呼叫時讀取，改旗標即可恢復舊路徑。"""
+    degrade_enabled = DEGRADE_ENABLED if degrade_enabled is None else degrade_enabled
+    platt_enabled = PLATT_ENABLED if platt_enabled is None else platt_enabled
     ev = [r for r in rs if r.get("realized")]
     calls = [r for r in ev if r["realized"].get("hit") is not None]
     hits = [bool(r["realized"]["hit"]) for r in calls]
     out = {"n_eval": len(ev), "n_calls": len(calls), "n_pending": len([r for r in rs if not r.get("realized")]),
+           "n_published": sum(1 for r in rs if not r.get("backfill")), "n_backfill": sum(1 for r in rs if r.get("backfill")),   # pr2 P5：真實發布 vs 回填
            "hit_all": round(float(np.mean(hits)), 3) if hits else None,
            "hit_ewm": round(_ewm_hit(hits), 3) if hits else None,
            "brier": round(float(np.mean([r["realized"]["brier"] for r in ev])), 4) if ev else None,
@@ -275,20 +325,28 @@ def _group_stats(rs: list[dict]) -> dict:
         hh = hits[-n:]
         out[f"hit{n}"] = round(float(np.mean(hh)), 3) if len(hh) >= 5 else None
         out[f"n{n}"] = len(hh)
-    # 自適應
-    adj = {"factor": 1.0, "platt": None, "degrade": False, "note": ""}
+    # 自適應 (pr2：platt / degrade 只在旗標開啟時生效；platt_diag / recent_flag / gap 一律計算供顯示與稽核)
+    adj = {"factor": 1.0, "platt": None, "platt_diag": None, "degrade": False, "recent_flag": None, "gap": None, "note": ""}
     if len(ev) >= MIN_N_ADJ:
         a, b = _platt([float(r["p_up"]) for r in ev], [1 if r["realized"]["up"] else 0 for r in ev])
         k = min(1.0, (len(ev) - MIN_N_ADJ) / 60.0)        # 樣本越多越信近期校準；20 筆 → 0，80 筆 → 1
-        adj["platt"] = [round(1 + (a - 1) * k, 3), round(b * k, 3), round(k, 2)]
+        adj["platt_diag"] = [round(1 + (a - 1) * k, 3), round(b * k, 3), round(k, 2)]
+        if platt_enabled:
+            adj["platt"] = adj["platt_diag"]
     ref = out["model_hit"] or out["base_hit"]
     if out["n_calls"] >= MIN_N_ADJ and out["hit_ewm"] is not None and ref is not None:
         gap = out["hit_ewm"] - ref
+        adj["gap"] = round(gap, 3)
         if gap <= -DEGRADE_GAP:
-            adj["degrade"] = True
-            adj["note"] = f"近期命中 {out['hit_ewm']:.0%} 低於模型長期 {ref:.0%}，此視野暫改中性"
+            adj["recent_flag"] = "below"
+            if degrade_enabled:
+                adj["degrade"] = True
+                adj["note"] = f"近期命中 {out['hit_ewm']:.0%} 低於模型長期 {ref:.0%}，此視野暫改中性"
+            else:
+                adj["note"] = f"近期命中 {out['hit_ewm']:.0%} 低於長期 {ref:.0%} (僅供參考，不改叫牌)"
         elif gap >= DEGRADE_GAP:
-            adj["note"] = f"近期命中 {out['hit_ewm']:.0%} 高於長期 {ref:.0%}"
+            adj["recent_flag"] = "above"
+            adj["note"] = f"近期命中 {out['hit_ewm']:.0%} 高於長期 {ref:.0%}" + ("" if degrade_enabled else " (僅供參考，不改叫牌)")
     out["adjust"] = adj
     return out
 
@@ -300,10 +358,18 @@ def _touch_stats(rs: list[dict]) -> dict:
     ev = ev[-60:]
     b = float(np.mean([r["realized"]["buy_touch"] for r in ev])); s = float(np.mean([r["realized"]["sell_touch"] for r in ev]))
     # 觸及率 vs 目標 20%：太常碰到 → 水準太近 → 放寬 (乘數 >1)；太少 → 收窄。以 sqrt 緩和，限制 0.85~1.35
-    fac = float(np.clip(math.sqrt(max(0.05, (b + s) / 2) / TOUCH_TARGET), 0.85, 1.35)) if len(ev) >= 20 else 1.0
+    # pr2 LC-07：乘數停用 (sigma_factor 固定 1.0)，原算值留在 sigma_factor_raw 供診斷
+    fac_raw = float(np.clip(math.sqrt(max(0.05, (b + s) / 2) / TOUCH_TARGET), 0.85, 1.35)) if len(ev) >= 20 else 1.0
+    fac = fac_raw if TOUCH_FACTOR_ENABLED else 1.0
+    if len(ev) < 20:
+        note = "樣本未達 20 次，未調整"
+    elif TOUCH_FACTOR_ENABLED:
+        note = "買賣點近期觸及率 %.0f%%/%.0f%% (目標 20%%) → 水準乘數 ×%.2f" % (b * 100, s * 100, fac)
+    else:
+        note = "觸及率 %.0f%%/%.0f%% (目標 20%%)；乘數停用 ×1.00 (pr2 LC-07，原算 ×%.2f)" % (b * 100, s * 100, fac_raw)
     return {"n": len(ev), "buy_touch": round(b, 3), "sell_touch": round(s, 3), "stop_hit": round(float(np.mean([r["realized"]["stop_hit"] for r in ev])), 3),
-            "target_hit": round(float(np.mean([r["realized"]["target_hit"] for r in ev])), 3), "sigma_factor": round(fac, 3),
-            "note": ("買賣點近期觸及率 %.0f%%/%.0f%% (目標 20%%) → 水準乘數 ×%.2f" % (b * 100, s * 100, fac)) if len(ev) >= 20 else "樣本未達 20 次，未調整"}
+            "target_hit": round(float(np.mean([r["realized"]["target_hit"] for r in ev])), 3), "sigma_factor": round(fac, 3), "sigma_factor_raw": round(fac_raw, 3),
+            "enabled": TOUCH_FACTOR_ENABLED, "note": note}
 
 
 def summarize(rows: list[dict]) -> dict:
@@ -354,7 +420,8 @@ def summarize(rows: list[dict]) -> dict:
                                 "p_up": r["p_up"], "ret": (r["realized"] or {}).get("ret"), "hit": (r["realized"] or {}).get("hit"), "variant": r.get("variant")} for r in rec][::-1]
     for sid in sorted({r["sid"] for r in rows if r.get("kind") == "stk"}):
         rs = [r for r in rows if r.get("kind") == "stk" and r["sid"] == sid]
-        o = {"by_h": {str(h): _group_stats([r for r in rs if r.get("h") == h]) for h in (5, 10, 20) if any(r.get("h") == h for r in rs)}}
+        # 個股降級本輪 (pr2) 未驗證 → 維持現行行為 (degrade/platt 照舊計算；export_static 只用 adjust.degrade)
+        o = {"by_h": {str(h): _group_stats([r for r in rs if r.get("h") == h], degrade_enabled=True, platt_enabled=True) for h in (5, 10, 20) if any(r.get("h") == h for r in rs)}}
         o["recent"] = [{"as_of": r["as_of"], "h": r["h"], "call": r["call"], "p_up": r["p_up"], "rel": (r["realized"] or {}).get("rel"), "hit": (r["realized"] or {}).get("hit")} for r in rs if r.get("call") != "中性"][-15:][::-1]
         out["stocks"][sid] = o
     ab = [r for r in rows if r.get("kind") == "stk" and r.get("abs_call") and (r.get("realized") or {}).get("abs_hit") is not None]
@@ -366,7 +433,9 @@ def summarize(rows: list[dict]) -> dict:
 
 # ------------------------------------------------------------------ 套用到本次預測
 def adjust_forecast(fc: dict, summary: dict) -> dict:
-    """依近期對帳結果把 p_up_adj / recent_hit / learn_note 寫進 next_days 與 horizons；降級時 call 改中性 (原 call 保留在 call_model)。"""
+    """依近期對帳結果把 recent_hit / recent_up_rate / recent_flag / learn_note 寫進 next_days 與 horizons (pr2：只顯示不調整)。
+    DEGRADE_ENABLED / PLATT_ENABLED 為 True 時才走舊路徑 (call 改中性並留 call_model、寫 p_up_adj)；預設不寫 p_up_adj、不設 call_degraded，
+    App 的 `p_up_adj ?? p_up` 自動回到 raw p_up。level_bias 水準偏誤修正本輪未驗證、維持。"""
     if not fc or fc.get("error"):
         return fc
     byh = (summary.get("market") or {}).get("by_h") or {}
@@ -381,22 +450,24 @@ def adjust_forecast(fc: dict, summary: dict) -> dict:
         if v and gv.get("n_calls", 0) >= MIN_N_ADJ:
             g = gv
         elif v and v not in ("base", "daily", ""):   # 同變體對帳不足 (含 n_calls=0)
-            x["recent_hit"] = g.get("hit_ewm"); x["recent_n"] = g.get("n_calls")
+            x["recent_hit"] = g.get("hit_ewm"); x["recent_n"] = g.get("n_calls"); x["recent_up_rate"] = g.get("up_rate")
             x["learn_note"] = f"近期對帳為不含夜盤紀錄 (命中 {g['hit_ewm']:.0%}，n={g['n_calls']})，不套用到含夜盤叫牌" if g.get("n_calls") else ""
             return
         adj = g.get("adjust") or {}
         p = _num(x.get("p_up"))
-        if p is not None and adj.get("platt"):
+        if PLATT_ENABLED and p is not None and adj.get("platt"):
             a, b, k = adj["platt"]
             x["p_up_adj"] = round(_apply_platt(a, b, p), 3)
         x["recent_hit"] = g.get("hit_ewm"); x["recent_n"] = g.get("n_calls"); x["recent_hit20"] = g.get("hit20")
+        x["recent_up_rate"] = g.get("up_rate")            # LC-08：同期上漲率對照 (不含夜盤 1~2 日叫牌 2026 命中 ≈ 上漲率)
+        x["recent_flag"] = adj.get("recent_flag")         # below / above / None：近期 vs 長期 (±DEGRADE_GAP)，只顯示不改叫牌
         note = adj.get("note") or ""
-        if adj.get("degrade") and x.get("call") not in (None, "中性"):
+        if DEGRADE_ENABLED and adj.get("degrade") and x.get("call") not in (None, "中性"):
             x["call_model"] = x.get("call"); x["call_strength_model"] = x.get("call_strength") or ""
             x["call"] = "中性"; x["call_strength"] = ""
             x["call_degraded"] = True
         if g.get("n_calls"):
-            note = (note + "；" if note else "") + f"近期實際命中 {g['hit_ewm']:.0%} (n={g['n_calls']})"
+            note = (note + "；" if note else "") + f"近期實際命中 {g['hit_ewm']:.0%} (n={g['n_calls']})" + (f"、同期上漲率 {g['up_rate']:.0%}" if g.get("up_rate") is not None else "")
         x["learn_note"] = note
     for x in fc.get("next_days") or []:
         apply(x, int(x.get("n") or 0))
@@ -417,11 +488,17 @@ def adjust_forecast(fc: dict, summary: dict) -> dict:
     if hr:
         fc["hourly_learn"] = {"all": {k: hr["all"].get(k) for k in ("n_calls", "hit_ewm", "hit20", "hit_all", "base_hit", "brier")}, "by_mark": {m: {k: v.get(k) for k in ("n_calls", "hit_ewm", "hit_all")} for m, v in (hr.get("by_mark") or {}).items()}}
     tt = (summary.get("market") or {}).get("touch") or {}
-    fc["learn"] = {"touch_sigma_factor": {h: v.get("sigma_factor") for h, v in tt.items()}, "note": "依近期對帳自適應：p_up_adj=近期 Platt 校準、call_degraded=近期失準改中性"}
+    fc["learn"] = {"touch_sigma_factor": {h: v.get("sigma_factor") for h, v in tt.items()},
+                   "flags": {"degrade": DEGRADE_ENABLED, "platt": PLATT_ENABLED, "touch_factor": TOUCH_FACTOR_ENABLED},
+                   "note": "依近期對帳只顯示不調整：recent_hit=近期實際命中、recent_up_rate=同期上漲率、recent_flag=近期相對長期 (below/above)；"
+                           "Platt (p_up_adj)/連敗降級 (call_degraded)/觸及率水準乘數 2026-10 起停用 (pr2 LC-01/02/07)；level_bias 水準偏誤修正本輪未驗證、維持"}
     return fc
 
 
 def touch_factor(summary: dict, h: int) -> float:
+    """range_levels 的 sigma 乘數；pr2 LC-07 停用 → 一律 1.0 (TOUCH_FACTOR_ENABLED 為 True 時才讀 touch.sigma_factor)。"""
+    if not TOUCH_FACTOR_ENABLED:
+        return 1.0
     try:
         return float((summary["market"]["touch"][str(h)] or {}).get("sigma_factor") or 1.0)
     except Exception:  # noqa: BLE001
@@ -511,12 +588,13 @@ def run(fc: dict, snap: dict | None, scored: pd.DataFrame, stock_forecasts: dict
     mclose = {str(r.date)[:10]: float(r.close) for r in scored.dropna(subset=["close"]).itertuples()}
     n_eval = evaluate(rows, frames, mclose)
     summ = summarize(rows)
-    try:
-        store.save_snapshot(dt.datetime.now(config.TZ).strftime("%Y-%m-%d"), "pred_ledger", {"n": len(rows), "rows": rows[-400:]})
-    except Exception as e:  # noqa: BLE001
-        log.debug("ledger snapshot: %s", e)
-    return {"generated": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M:%S"), "n_ledger": len(rows), "n_new": len(new), "n_evaluated_now": n_eval, "n_backfill": sum(1 for r in rows if r.get("backfill")),
+    save_ledger_snapshot(rows)
+    n_bf = sum(1 for r in rows if r.get("backfill"))
+    return {"generated": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M:%S"), "n_ledger": len(rows), "n_new": len(new), "n_evaluated_now": n_eval, "n_backfill": n_bf,
+            "n_published": len(rows) - n_bf,   # pr2 P5：真實發布列數 (回填列是事後以當年前模型重算，不是當時顯示過的)
             "market": summ["market"], "stocks": summ["stocks"], "stocks_abs": summ.get("stocks_abs"), "ledger": rows,
             "method": {"half_life": HALF_LIFE, "min_n_adj": MIN_N_ADJ, "degrade_gap": DEGRADE_GAP, "touch_target": TOUCH_TARGET,
-                       "desc": "帳本只記發布當下的預測，目標日收盤後對帳；近期命中以指數衰減加權 (半衰期 30 次)；p_up 以近期 Platt 校準 (樣本 20→80 筆逐步信任)；"
-                               "近期命中低於長期 5pt 以上的視野降為中性；買賣點水準依近 60 次觸及率調整乘數 (0.85~1.35)。個股為相對大盤方向。"}}
+                       "degrade_enabled": DEGRADE_ENABLED, "platt_enabled": PLATT_ENABLED, "touch_factor_enabled": TOUCH_FACTOR_ENABLED,
+                       "desc": "帳本只記發布當下的預測，目標日收盤後對帳；近期命中以指數衰減加權 (半衰期 30 次)；"
+                               "pr2 (2026-10-05) 起大盤的 Platt 校準 / 連敗降級 / 觸及率水準乘數停用，只顯示 recent_hit、recent_up_rate (同期上漲率) 與 recent_flag；"
+                               "個股為相對大盤方向 (降級維持現行)。每列另記 call_model / conf_tier / verdict_bucket 供稽核 (kind=gap 列的 bucket 為跳空幅度桶)；n_published / n_backfill 區分真實發布與回填。"}}
