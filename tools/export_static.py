@@ -414,6 +414,27 @@ def main() -> None:
         dump("gov8", gov8.build(scored, res))
     except Exception as e:  # noqa: BLE001
         print("  gov8 failed:", e)
+    # 挖寶/飆股雷達雲端追蹤 (2026-10-05)：盤後 (完整模式) 以 App 同款模型掃描 + 永久帳本對帳；fast 模式只帶回上次發布 (Pages 整站覆蓋)
+    try:
+        from chip.predict import treasure_live as _tl
+        if not args.fast:
+            _tlo = _tl.build(backfill_days=int(__import__("os").getenv("TREASURE_BACKFILL_DAYS", "0") or 0))
+            dump("treasure_live", _tlo)
+            print(f"  treasure_live: scan {(_tlo.get('scan') or {}).get('date')} ledger {len(_tlo['ledger']['treasure'])}/{len(_tlo['ledger']['surge'])} alerts {len(_tlo.get('alerts') or [])}")
+        elif not (DATA / "treasure_live.json").exists():
+            r = requests.get(_tl.PAGES, timeout=20)
+            if r.ok and r.text.strip().startswith("{"):
+                (DATA / "treasure_live.json").write_text(r.text, encoding="utf-8"); print("  carried over treasure_live.json from Pages")
+    except Exception as e:  # noqa: BLE001
+        print("  treasure_live failed:", e)
+        try:
+            if not (DATA / "treasure_live.json").exists():
+                from chip.predict import treasure_live as _tl2
+                r = requests.get(_tl2.PAGES, timeout=20)
+                if r.ok and r.text.strip().startswith("{"):
+                    (DATA / "treasure_live.json").write_text(r.text, encoding="utf-8"); print("  carried over treasure_live.json")
+        except Exception as e2:  # noqa: BLE001
+            print("  carry treasure_live failed:", e2)
     # 操盤台 (2026-09-25)：0050/00631L/00663L/00981A/2330/065423 的均線、選擇權回檔機率帶、高低點承接價、價位帶、回撤控制價位、
     # 資金防守、八大行庫歸檔、00981A 持股、權證、2330 ADR。完整模式重算；fast 模式在清晨/當天第一次 (ADR) 或資料落後最後交易日時重算，其餘沿用上次發布
     def _prev_desk() -> dict:
