@@ -54,6 +54,63 @@ ROLE = {"A+": "signal", "A": "signal", "B+": "descriptive", "B": "descriptive"}
 DRIFT_MIN_PUBLISHED = 15       # 訊號級漂移判定：真實發布結案 ≥15 筆且命中低於預期下限 15pt
 NOTE_TIERS = "A/A+ 為訊號級；B/B+ 為描述級 (回測即無選股力 #40/#84)"
 MAX_FIN21_WAIT_DAYS = 60       # 結案列補 fin21：日 K 已延伸 60 個日曆日仍湊不到 21 根 (下市/停牌) → 放棄
+WHY_TOP = 3                    # 10-06：A/A+ 原因 = 模型分下降最多的前 3 項
+# 特徵中文名與格式 (App learning.js TM_LABEL 同款；改這裡要一起改)
+FEAT_LABEL = {
+    "pct": ("當日漲幅", "s%"), "amp": ("當日振幅", "%"), "lval": ("成交金額", "amt"), "b5": ("距 5 日線", "s%"), "b10": ("距 10 日線", "s%"),
+    "b20": ("距月線", "s%"), "b60": ("距季線", "s%"), "align": ("均線", "align"), "ret5": ("近 5 日漲幅", "s%"), "ret20": ("近 20 日漲幅", "s%"),
+    "ret60": ("近 60 日漲幅", "s%"), "dd_hi20": ("距 20 日高點", "s%"), "dd_hi60": ("距 60 日高點", "s%"), "lo20_dist": ("距 20 日低點", "s%"),
+    "clv": ("收盤在當日高低區間", "clv"), "uw": ("上影線", "%"), "lw": ("下影線", "%"), "vol_ratio": ("量比 (對 20 日均量)", "x"),
+    "vola20": ("20 日波動", "%"), "streak": ("連續", "streak"), "lag": ("當日落後大盤", "pt"), "rs20": ("20 日相對大盤", "pt"),
+    "m_ret1": ("大盤當日", "s%"), "m_bias20": ("大盤月線乖離", "s%"),
+}
+
+
+def fmt_feat(f: str, v: float) -> str:
+    kind = FEAT_LABEL.get(f, (f, ""))[1]
+    if v is None or not np.isfinite(v):
+        return "—"
+    if kind == "s%":
+        return f"{v:+.1f}%"
+    if kind == "%":
+        return f"{v:.1f}%"
+    if kind == "pt":
+        return f"{v:+.1f}pt"
+    if kind == "x":
+        return f"{v:.1f} 倍"
+    if kind == "amt":
+        return f"{10 ** v / 1e8:.1f} 億"
+    if kind == "clv":
+        return f"{v * 100:.0f}% 位置"
+    if kind == "align":
+        return "多頭排列" if v > 0 else "空頭排列" if v < 0 else "糾結"
+    if kind == "streak":
+        return f"連漲 {int(v)} 天" if v > 0 else f"連跌 {int(-v)} 天" if v < 0 else "平"
+    return f"{v:.2f}"
+
+
+def explain(tm: dict, x: dict, med: dict, k: int = WHY_TOP) -> list[dict]:
+    """A/A+ 原因 (10-06)：逐項把特徵換成「今日候選池中位數」，看模型分掉多少 → 掉最多的前 k 項就是這檔「比同儕突出、模型最看重」的地方。
+    是模型怎麼看 (單項替換、不含交互作用的完整拆解)，不是因果。App learning.js tmExplain() 同演算法。"""
+    feats = tm["features"]; arr = [x.get(f, float("nan")) for f in feats]
+    p0 = 1 / (1 + math.exp(-T._eval(tm, arr)))
+    out = []
+    for i, f in enumerate(feats):
+        m = med.get(f)
+        if m is None or not np.isfinite(m) or not np.isfinite(arr[i]) or abs(arr[i] - m) < 1e-12:
+            continue
+        a2 = list(arr); a2[i] = m
+        d = p0 - 1 / (1 + math.exp(-T._eval(tm, a2)))
+        if d > 0.002:
+            lab = FEAT_LABEL.get(f, (f, ""))[0]
+            out.append({"f": f, "v": round(float(arr[i]), 3), "med": round(float(m), 3), "d": round(d, 4),
+                        "txt": f"{lab} {fmt_feat(f, arr[i])} (今日候選中位 {fmt_feat(f, m)})"})
+    out.sort(key=lambda z: -z["d"])
+    return out[:k]
+
+
+def gate_txt(tier: str, mb: float | None) -> str:
+    return (f"大盤在月線下 (乖離 {mb:+.1f}%)：A 級的必要條件" if mb is not None else "大盤在月線下：A 級的必要條件") + ("；分數達 A+ 門檻 (前 3%)" if tier == "A+" else "")
 
 
 # ------------------------------------------------------------------ 資料
@@ -219,6 +276,10 @@ def score_one(code: str, snap_row: dict, D: str, mkf: pd.DataFrame, tm: dict) ->
     if rows[-1]["date"] != D or len(rows) < 62:
         return None
     g = pd.DataFrame(rows)
+    # 10-06：近 60 日有單日 >11% 的跳動 = 減資/分割未還原的壞資料 (台股漲跌幅 10%)；例 6949 09-14「近 20 日 −94.7%」被評 A → 不評分
+    if (g["close"].astype(float).pct_change().abs().tail(61) > 0.11).any():
+        log.info("score %s: 近 60 日價格跳動 >11%%，疑似減資/分割未還原，略過", code)
+        return None
     g["amount"] = g["amount"].fillna(g["close"] * g["volume"])      # App：amount 只有 D 日有值，其餘以 close×volume (lval 只用 D 日)
     f = T.features(g, mkf, label=False).iloc[-1]
     x = {k: (float(f[k]) if k in f and pd.notna(f[k]) else float("nan")) for k in set(tm["features"]) | set((tm.get("surge") or {}).get("features") or [])}
@@ -236,7 +297,7 @@ def score_one(code: str, snap_row: dict, D: str, mkf: pd.DataFrame, tm: dict) ->
             ps = 1 / (1 + math.exp(-T._eval(sg, [x[k] if np.isfinite(x[k]) else None for k in sg.get("features") or tm["features"]])))
         except Exception as e:  # noqa: BLE001
             log.debug("surge eval %s: %s", code, e)
-    return {"p": round(p, 4), "tier": tier, "ps": round(ps, 4) if ps is not None else None, "m_bias20": round(x["m_bias20"], 3)}
+    return {"p": round(p, 4), "tier": tier, "ps": round(ps, 4) if ps is not None else None, "m_bias20": round(x["m_bias20"], 3), "_x": {f: x[f] for f in tm["features"]}}
 
 
 def scan(tm: dict, date: str | None = None) -> dict:
@@ -261,8 +322,17 @@ def scan(tm: dict, date: str | None = None) -> dict:
                 res[r["code"]] = s
         except Exception as e:  # noqa: BLE001
             errors += 1; log.debug("score %s: %s", r["code"], e)
-    tre = [{"code": r["code"], "name": r["name"], "close": r["close"], "pct": round(r["pct"], 2), "value": r["value"], "pbr": r.get("pbr"), **res[r["code"]]}
+    med = {f: float(np.nanmedian([v["_x"][f] for v in res.values()])) for f in tm["features"]} if res else {}
+    tre = [{"code": r["code"], "name": r["name"], "close": r["close"], "pct": round(r["pct"], 2), "value": r["value"], "pbr": r.get("pbr"),
+            **{k: v for k, v in res[r["code"]].items() if k != "_x"}}
            for r in pool[:TREASURE_POOL] if r["code"] in res and r["pct"] < 9.4]
+    for t in tre:   # 10-06：A/A+ 附原因 (模型分拆解 + 大盤閘門)
+        if t["tier"] in ("A", "A+"):
+            try:
+                t["why"] = [w["txt"] for w in explain(tm, res[t["code"]]["_x"], med)]
+                t["why_gate"] = gate_txt(t["tier"], t.get("m_bias20"))
+            except Exception as e:  # noqa: BLE001
+                log.debug("explain %s: %s", t["code"], e)
     tre.sort(key=lambda x: -x["p"])
     sg_k = int(((tm.get("surge") or {}).get("def") or {}).get("topk") or 3)
     sur = sorted([{"code": r["code"], "name": r["name"], "close": r["close"], "pct": round(r["pct"], 2), "ps": res[r["code"]]["ps"]} for r in pool if r["code"] in res and res[r["code"]]["ps"] is not None and r["pct"] < 9.4],
@@ -331,7 +401,8 @@ def record(prev: dict, sc: dict, tm: dict | None = None, scan_src: str = "live")
         if r["code"] in act_codes or r["code"] in recent_miss or (r["code"], D) in have:
             continue
         tre.append({"code": r["code"], "name": r["name"], "date": D, "entry": r["close"], "mktEntry": sc.get("mkt_close"), "p": r["p"], "tier": r["tier"], "ps": r.get("ps"),
-                    "pct": r["pct"], "status": "追蹤", "peak": 0.0, "trough": 0.0, "cur": 0.0, "rel": 0.0, "days": 0, **meta})
+                    "pct": r["pct"], "status": "追蹤", "peak": 0.0, "trough": 0.0, "cur": 0.0, "rel": 0.0, "days": 0, **meta,
+                    **({"why": r["why"]} if r.get("why") else {})})
         n += 1
     sur = led["surge"]
     for r in sc["surge"]:
@@ -542,8 +613,10 @@ def alerts(sc: dict, st: dict) -> list[dict]:
     D = sc.get("date") or ""
     for r in [x for x in sc.get("treasure") or [] if x["tier"] in ("A+", "A")][:4]:
         # pr2：p 在等級內無排序力 → 寫「模型分」不寫「命中機率」；預期值 55~57% (回測 A 55% / A+ 64%、2026 回填 OOS 重算 57%)
-        out.append({"level": "high", "kind": "treasure", "code": r["code"], "date": D, "tier": r["tier"], "p": r["p"],
-                    "msg": f"💎 挖寶 {r['tier']} ({D[5:]} 收盤)：{r['code']} {r['name']} 模型分 {r['p']:.2f} — 歷史統計：訊號日收盤起算 21 個交易日，A/A+ 命中約 55~57% (回測 55%/64%，2026 回填重算 57%)；大盤月線下的日子整體較佳。非買賣建議。"})
+        out.append({"level": "high", "kind": "treasure", "code": r["code"], "name": r["name"], "date": D, "tier": r["tier"], "p": r["p"],
+                    "why": r.get("why") or [], "why_gate": r.get("why_gate") or "",
+                    "msg": f"💎 挖寶 {r['tier']} ({D[5:]} 收盤)：{r['code']} {r['name']} 模型分 {r['p']:.2f}" + (f" — 原因：{'；'.join(r['why'])}" if r.get("why") else "")
+                           + " — 歷史統計：訊號日收盤起算 21 個交易日，A/A+ 命中約 55~57% (回測 55%/64%，2026 回填重算 57%)；大盤月線下的日子整體較佳。非買賣建議。"})
     for r in (sc.get("surge") or [])[:3]:
         if r.get("ps") is not None and r["ps"] >= ((((st or {}).get("surge") or {}).get("th_top10")) or 0.3977):
             out.append({"level": "mid", "kind": "surge", "code": r["code"], "date": D, "msg": f"🚀 飆股雷達 ({D[5:]})：{r['code']} {r['name']} 20 日內先漲 20% 機率 {round(r['ps'] * 100)}% (回測前 3 名約 33%；高風險)"})

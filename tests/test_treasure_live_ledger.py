@@ -228,6 +228,44 @@ def test_h_constant_matches_backtest():
     assert T.H == 21 and TL.EXPECT_AAPLUS == (0.55, 0.57)
 
 
+def _tiny_model():
+    """兩棵樹：特徵 0 > 5 加分、特徵 1 < 0 加分；其餘特徵不影響。"""
+    feats = ["ret20", "dd_hi60", "vola20"]
+    trees = [{"r": 0, "n": [[0, 5.0, -1, -2, 1]], "v": [0.0, 1.0]}, {"r": 0, "n": [[1, 0.0, -1, -2, 1]], "v": [0.6, 0.0]}]
+    return {"features": feats, "init": -0.5, "trees": trees}
+
+
+def test_explain_ranks_and_formats():
+    tm = _tiny_model()
+    x = {"ret20": 12.0, "dd_hi60": -20.0, "vola20": 3.0}
+    med = {"ret20": 2.0, "dd_hi60": 5.0, "vola20": 3.0}
+    w = TL.explain(tm, x, med)
+    assert [z["f"] for z in w] == ["ret20", "dd_hi60"], w          # 換成中位數掉分：ret20 (1.0) > dd_hi60 (0.6)；vola20 等於中位不列
+    assert w[0]["d"] > w[1]["d"] > 0
+    assert w[0]["txt"] == "近 20 日漲幅 +12.0% (今日候選中位 +2.0%)", w[0]["txt"]
+    assert "A 級的必要條件" in TL.gate_txt("A", -1.23) and "A+" in TL.gate_txt("A+", -1.0)
+
+
+def test_alert_carries_why():
+    sc = {"date": "2026-09-14", "treasure": [{"code": "2489", "name": "瑞軒", "tier": "A", "p": 0.56, "why": ["近 60 日漲幅 -22.5% (今日候選中位 +2.0%)"], "why_gate": "大盤在月線下"}], "surge": []}
+    a = TL.alerts(sc, {})[0]
+    assert a["name"] == "瑞軒" and a["why"] and "原因：近 60 日漲幅" in a["msg"] and "非買賣建議" in a["msg"]
+
+
+def test_score_one_skips_unadjusted_split():
+    """近 60 日有單日 >11% 跳動 (減資/分割未還原) → 不評分。"""
+    D = "2026-09-14"; days = pd.bdate_range(end=D, periods=80).strftime("%Y-%m-%d").tolist()
+    closes = [100.0] * 60 + [5.0] * 20                               # 一天 −95%
+    bars = [{"date": d, "open": c, "high": c, "low": c, "close": c, "volume": 1000} for d, c in zip(days, closes)]
+    old = TL.bars
+    try:
+        TL.bars = lambda code, years="2y": bars
+        row = {"open": 5.0, "high": 5.0, "low": 5.0, "close": 5.0, "volume": 1000, "value": 5000}
+        assert TL.score_one("6949", row, D, pd.DataFrame(), {"features": ["ret20"]}) is None
+    finally:
+        TL.bars = old
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):
