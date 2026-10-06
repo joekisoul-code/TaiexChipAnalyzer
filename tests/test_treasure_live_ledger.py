@@ -320,6 +320,25 @@ def test_pool_rows_restricts_to_training_universe():
     assert TL.RADAR_BT["pool"]["surge"] == 0.16, "原本「一般股票」基準率不可被覆蓋"
 
 
+def test_path_prob_and_weak_alert():
+    """10-06：推薦後第 k 天漲跌 → 歷史命中機率查表；第 3 天 ≤ −5% 的 A/飆股發「轉弱」提醒 (B 不發)。"""
+    p3 = TL.path_prob("A", 3, -6.0); assert p3["k"] == 3 and p3["bin"] == "−8~−5%" and p3["hit"] <= 0.1, p3
+    assert TL.path_prob("A", 4, 6.0)["k"] == 3 and TL.path_prob("A", 4, 6.0)["bin"] == "≥+5%"
+    assert TL.path_prob("S3", 0, 1.0) is None and TL.path_prob("S3", 12, -9)["k"] == 10
+    assert TL.path_prob("A", 3, 2.0)["bin"] == "−2~+2%" and TL.path_prob("A", 3, 5.0)["bin"] == "+2~+5%" and TL.path_prob("A", 3, -8.0)["bin"] == "≤−8%"
+    prev = {"ledger": {"treasure": [{"code": "1111", "name": "甲", "date": "2026-09-01", "tier": "A", "status": "追蹤", "days": 3, "cur": -6.2, "lastDate": "2026-09-04"},
+                                    {"code": "2222", "name": "乙", "date": "2026-09-01", "tier": "B", "status": "追蹤", "days": 3, "cur": -9.0},
+                                    {"code": "3333", "name": "丙", "date": "2026-09-01", "tier": "A", "status": "追蹤", "days": 4, "cur": -9.0}],
+                       "surge": [{"code": "9999", "name": "丁", "date": "2026-09-01", "status": "追蹤", "days": 3, "cur": -8.5}]}}
+    al = TL.weak_alerts(prev); codes = [a["code"] for a in al]
+    assert codes == ["1111", "9999"], codes
+    assert "第 3 天 -6.2%" in al[0]["msg"] and "非買賣建議" in al[0]["msg"] and al[0]["kind"] == "weak"
+    for a in al:
+        for w in ("進場", "持有", "買進", "賣出", "加碼", "減碼"):
+            assert w not in a["msg"], (w, a["msg"])
+    assert TL.RADAR_BT["path"]["A"]["3"] and TL.RADAR_BT["fail"]["early"]["A"]["exit"] < TL.RADAR_BT["fail"]["early"]["A"]["hold"]
+
+
 def _tiny_model():
     """兩棵樹：特徵 0 > 5 加分、特徵 1 < 0 加分；其餘特徵不影響。"""
     feats = ["ret20", "dd_hi60", "vola20"]

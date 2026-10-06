@@ -74,6 +74,7 @@ RADAR_BT = {
     # 10-06 候選池研究 (scratch radar_study2.py：全上市 1,030 檔 Yahoo 10y、兩模型逐年走動式、2022-01~2026-09 樣本外)
     # 模型只用約 170 檔大型股訓練，候選池卻是全上市 → 宇宙外 (中小型) 推薦每年都較差 (同日同模型：飆股勝率 35~48% vs 宇宙內 59~68%、A 48~75% vs 60~89%)；
     # 用全市場重訓也沒改善 (A 63%、飆股 49%)。→ 候選池限定訓練宇宙：A 勝率 62%→70%、A+ 71%→78%、飆股 47%→55% (5/5 年改善)、飆股最差一成 −20%→−15%。
+    "path": None, "fail": None,   # 10-06 失敗分析 (下方 RADAR_PATH / RADAR_FAIL，模組載入後填入)
     "pool_rule": {"rule": "候選池只用模型訓練過的股票 (約 170 檔大型股)", "since": "2026-10-06",
              "before": {"A": {"n": 577, "hit": 0.471, "win21": 0.617, "fin21": 6.02}, "A+": {"n": 275, "hit": 0.545, "win21": 0.709}, "S3": {"n": 1067, "surge": 0.299, "win21": 0.469, "fin21": 2.68, "q10": -20.43}, "B": {"win21": 0.458}},
              "after": {"A": {"n": 380, "hit": 0.547, "win21": 0.695, "fin21": 8.36}, "A+": {"n": 180, "hit": 0.656, "win21": 0.783}, "S3": {"n": 607, "surge": 0.308, "win21": 0.552, "fin21": 6.87, "q10": -15.49}, "B": {"win21": 0.51}},
@@ -83,6 +84,32 @@ RADAR_BT = {
              "S3": {"n": 41, "hit": 0.341, "surge": 0.317, "win21": 0.512, "fin21": 6.37},
              "B": {"n": 222, "hit": 0.311, "surge": 0.225, "win21": 0.514, "fin21": 1.91}},
 }
+# 10-06 失敗分析 (scratch radar_study3.py / radar_study4.py：訓練宇宙、兩模型逐年走動式、2022-01~2026-09 樣本外推薦 A 373 / 飆股 608)
+# 推薦後第 k 天收盤報酬 → 最後命中 / 期滿為正 / 期滿平均 (查表；走動式 Brier：A 0.247→0.166 @第 3 天、飆股 0.233→0.188，所有測試年都較好)
+RADAR_PATH = {"A": {"1": [{"bin": "≤−8%", "n": 11, "hit": 0.0, "pos": 0.545, "avg": 6.3}, {"bin": "−8~−5%", "n": 23, "hit": 0.304, "pos": 0.609, "avg": 5.27}, {"bin": "−5~−2%", "n": 61, "hit": 0.426, "pos": 0.639, "avg": 7.18}, {"bin": "−2~+2%", "n": 155, "hit": 0.529, "pos": 0.658, "avg": 4.33}, {"bin": "+2~+5%", "n": 75, "hit": 0.627, "pos": 0.72, "avg": 10.95}, {"bin": "≥+5%", "n": 48, "hit": 0.917, "pos": 0.958, "avg": 22.39}], "2": [{"bin": "≤−8%", "n": 16, "hit": 0.0, "pos": 0.375, "avg": 1.92}, {"bin": "−8~−5%", "n": 25, "hit": 0.2, "pos": 0.32, "avg": -4.75}, {"bin": "−5~−2%", "n": 54, "hit": 0.389, "pos": 0.685, "avg": 5.42}, {"bin": "−2~+2%", "n": 128, "hit": 0.469, "pos": 0.656, "avg": 3.89}, {"bin": "+2~+5%", "n": 73, "hit": 0.712, "pos": 0.767, "avg": 10.65}, {"bin": "≥+5%", "n": 77, "hit": 0.883, "pos": 0.909, "avg": 22.27}], "3": [{"bin": "≤−8%", "n": 22, "hit": 0.0, "pos": 0.318, "avg": -3.46}, {"bin": "−8~−5%", "n": 18, "hit": 0.056, "pos": 0.333, "avg": -4.38}, {"bin": "−5~−2%", "n": 50, "hit": 0.26, "pos": 0.56, "avg": -0.11}, {"bin": "−2~+2%", "n": 111, "hit": 0.486, "pos": 0.667, "avg": 5.59}, {"bin": "+2~+5%", "n": 81, "hit": 0.704, "pos": 0.778, "avg": 9.54}, {"bin": "≥+5%", "n": 91, "hit": 0.89, "pos": 0.912, "avg": 21.56}], "5": [{"bin": "≤−8%", "n": 38, "hit": 0.026, "pos": 0.316, "avg": -2.81}, {"bin": "−8~−5%", "n": 21, "hit": 0.095, "pos": 0.429, "avg": -2.63}, {"bin": "−5~−2%", "n": 41, "hit": 0.171, "pos": 0.512, "avg": 0.76}, {"bin": "−2~+2%", "n": 89, "hit": 0.506, "pos": 0.652, "avg": 4.64}, {"bin": "+2~+5%", "n": 59, "hit": 0.729, "pos": 0.814, "avg": 8.48}, {"bin": "≥+5%", "n": 125, "hit": 0.864, "pos": 0.904, "avg": 19.3}], "10": [{"bin": "≤−8%", "n": 47, "hit": 0.021, "pos": 0.191, "avg": -8.69}, {"bin": "−8~−5%", "n": 24, "hit": 0.083, "pos": 0.333, "avg": -2.76}, {"bin": "−5~−2%", "n": 29, "hit": 0.241, "pos": 0.448, "avg": -0.49}, {"bin": "−2~+2%", "n": 54, "hit": 0.37, "pos": 0.63, "avg": 3.18}, {"bin": "+2~+5%", "n": 47, "hit": 0.574, "pos": 0.723, "avg": 6.84}, {"bin": "≥+5%", "n": 172, "hit": 0.866, "pos": 0.948, "avg": 18.55}], "15": [{"bin": "≤−8%", "n": 42, "hit": 0.024, "pos": 0.048, "avg": -15.72}, {"bin": "−8~−5%", "n": 27, "hit": 0.0, "pos": 0.074, "avg": -5.4}, {"bin": "−5~−2%", "n": 21, "hit": 0.095, "pos": 0.333, "avg": -1.63}, {"bin": "−2~+2%", "n": 50, "hit": 0.36, "pos": 0.7, "avg": 1.9}, {"bin": "+2~+5%", "n": 46, "hit": 0.5, "pos": 0.739, "avg": 4.67}, {"bin": "≥+5%", "n": 187, "hit": 0.866, "pos": 0.968, "avg": 19.92}]}, "S3": {"1": [{"bin": "≤−8%", "n": 18, "hit": 0.0, "pos": 0.5, "avg": -5.59}, {"bin": "−8~−5%", "n": 48, "hit": 0.167, "pos": 0.458, "avg": 3.05}, {"bin": "−5~−2%", "n": 112, "hit": 0.232, "pos": 0.42, "avg": 3.58}, {"bin": "−2~+2%", "n": 247, "hit": 0.251, "pos": 0.494, "avg": 3.51}, {"bin": "+2~+5%", "n": 105, "hit": 0.457, "pos": 0.59, "avg": 12.31}, {"bin": "≥+5%", "n": 78, "hit": 0.564, "pos": 0.756, "avg": 17.75}], "2": [{"bin": "≤−8%", "n": 40, "hit": 0.025, "pos": 0.425, "avg": 1.29}, {"bin": "−8~−5%", "n": 66, "hit": 0.106, "pos": 0.333, "avg": -1.3}, {"bin": "−5~−2%", "n": 100, "hit": 0.2, "pos": 0.38, "avg": -0.28}, {"bin": "−2~+2%", "n": 177, "hit": 0.226, "pos": 0.503, "avg": 4.62}, {"bin": "+2~+5%", "n": 95, "hit": 0.442, "pos": 0.611, "avg": 10.34}, {"bin": "≥+5%", "n": 130, "hit": 0.6, "pos": 0.746, "avg": 17.33}], "3": [{"bin": "≤−8%", "n": 63, "hit": 0.0, "pos": 0.286, "avg": -6.04}, {"bin": "−8~−5%", "n": 71, "hit": 0.099, "pos": 0.366, "avg": -2.92}, {"bin": "−5~−2%", "n": 99, "hit": 0.202, "pos": 0.384, "avg": 2.1}, {"bin": "−2~+2%", "n": 137, "hit": 0.27, "pos": 0.54, "avg": 5.7}, {"bin": "+2~+5%", "n": 93, "hit": 0.333, "pos": 0.57, "avg": 8.68}, {"bin": "≥+5%", "n": 145, "hit": 0.641, "pos": 0.772, "avg": 19.2}], "5": [{"bin": "≤−8%", "n": 102, "hit": 0.01, "pos": 0.225, "avg": -6.97}, {"bin": "−8~−5%", "n": 68, "hit": 0.103, "pos": 0.397, "avg": -2.4}, {"bin": "−5~−2%", "n": 87, "hit": 0.138, "pos": 0.356, "avg": -0.04}, {"bin": "−2~+2%", "n": 107, "hit": 0.243, "pos": 0.505, "avg": 5.56}, {"bin": "+2~+5%", "n": 64, "hit": 0.344, "pos": 0.656, "avg": 9.12}, {"bin": "≥+5%", "n": 180, "hit": 0.667, "pos": 0.8, "avg": 20.5}], "10": [{"bin": "≤−8%", "n": 138, "hit": 0.014, "pos": 0.123, "avg": -11.35}, {"bin": "−8~−5%", "n": 42, "hit": 0.024, "pos": 0.333, "avg": -3.77}, {"bin": "−5~−2%", "n": 58, "hit": 0.069, "pos": 0.345, "avg": -2.54}, {"bin": "−2~+2%", "n": 98, "hit": 0.163, "pos": 0.5, "avg": 3.96}, {"bin": "+2~+5%", "n": 62, "hit": 0.29, "pos": 0.629, "avg": 7.05}, {"bin": "≥+5%", "n": 210, "hit": 0.7, "pos": 0.867, "avg": 23.99}], "15": [{"bin": "≤−8%", "n": 163, "hit": 0.012, "pos": 0.08, "avg": -12.59}, {"bin": "−8~−5%", "n": 42, "hit": 0.095, "pos": 0.238, "avg": -5.45}, {"bin": "−5~−2%", "n": 47, "hit": 0.043, "pos": 0.17, "avg": -4.48}, {"bin": "−2~+2%", "n": 59, "hit": 0.085, "pos": 0.458, "avg": 1.03}, {"bin": "+2~+5%", "n": 39, "hit": 0.231, "pos": 0.692, "avg": 6.62}, {"bin": "≥+5%", "n": 258, "hit": 0.643, "pos": 0.915, "avg": 23.89}]}}
+RADAR_FAIL = {
+    "n": {"A": 373, "S3": 608},
+    "pre_note": "推薦當天看得到的約 60 項訊號，輸家與贏家幾乎分不開 (多數 AUC 0.44~0.56)；模型已經用掉大部分資訊",
+    "A_market": {"lose_mvol": 1.37, "hit_mvol": 2.43, "lose_mb60": -2.9, "hit_mb60": -6.6, "yrs": "3/4", "note": "描述：A 級失敗多在大盤溫和下跌、波動低時；命中多在急跌恐慌後。走動式濾網年數不足，未採用"},
+    "S_ps": {"lose": 0.347, "hit": 0.377, "yrs": "5/5", "wf_dhit": 0.017, "note": "同為前 3 名，飆股分數較高的失敗較少；濾掉最低兩成只多 1~2pt"},
+    "early": {"A": {"rule": "第 3 天收盤 ≤ −5%", "share": 0.107, "hit": 0.025, "lose": 0.675, "hold": -3.87, "exit": -9.78},
+              "S3": {"rule": "第 3 天收盤 ≤ −5%", "share": 0.22, "hit": 0.052, "lose": 0.664, "hold": -4.39, "exit": -8.68}},
+}
+_PATH_EDGES = (-8, -5, -2, 2, 5)
+
+
+def path_prob(kind: str, days: int, cur: float) -> dict | None:
+    """追蹤中推薦：依第 k 天 (取 ≤ days 的最大 k) 收盤報酬查歷史 → 最後命中 / 期滿為正。kind = "A" | "S3"。"""
+    tb = RADAR_PATH.get(kind) or {}
+    ks = sorted(int(k) for k in tb if int(k) <= (days or 0))
+    if not ks or cur is None or not np.isfinite(cur):
+        return None
+    k = ks[-1]; i = next((j for j, e in enumerate(_PATH_EDGES) if cur <= e), len(_PATH_EDGES))
+    rows = tb[str(k)]; lab = ["≤−8%", "−8~−5%", "−5~−2%", "−2~+2%", "+2~+5%", "≥+5%"][i]
+    r = next((x for x in rows if x["bin"] == lab), None)
+    return {"k": k, **r} if r else None
+
+
 # 特徵中文名與格式 (App learning.js TM_LABEL 同款；改這裡要一起改)
 FEAT_LABEL = {
     "pct": ("當日漲幅", "s%"), "amp": ("當日振幅", "%"), "lval": ("成交金額", "amt"), "b5": ("距 5 日線", "s%"), "b10": ("距 10 日線", "s%"),
@@ -711,7 +738,26 @@ def stats(prev: dict, tm: dict) -> dict:
             "surge": surge}
 
 
+RADAR_BT["path"], RADAR_BT["fail"] = RADAR_PATH, RADAR_FAIL
 CLOSE_ALERT_DAYS = 4   # 10-06：最近幾個日曆日內結案的訊號級推薦發「結案」提醒 (A/A+ 與飆股；B 級描述級不發)
+
+
+def weak_alerts(prev: dict | None) -> list[dict]:
+    """10-06：追蹤中的 A/A+ 與飆股在第 3 天收盤 ≤ −5% → 「轉弱」提醒 (只在第 3 天發一次)，附歷史同樣情況的命中機率。"""
+    if not prev:
+        return []
+    led = prev.get("ledger") or {}; out = []
+    for kind, x in [("A", x) for x in led.get("treasure") or [] if x.get("tier") in ("A", "A+")] + [("S3", x) for x in led.get("surge") or []]:
+        if x.get("status") != "追蹤" or x.get("days") != 3 or x.get("cur") is None or x["cur"] > -5:
+            continue
+        pp = path_prob(kind, 3, float(x["cur"]))
+        if not pp:
+            continue
+        lab = f"💎 挖寶 {x['tier']}" if kind == "A" else "🚀 飆股"
+        out.append({"level": "mid", "kind": "weak", "code": x["code"], "name": x.get("name", ""), "date": x.get("lastDate") or x["date"], "radar": kind,
+                    "msg": f"⚠ {lab} 轉弱：{x['code']} {x.get('name', '')} ({x['date'][5:]} 推薦) 第 3 天 {x['cur']:+.1f}% — 過去同樣情況最後{'命中' if kind == 'A' else '飆'} {round(pp['hit'] * 100)}%、"
+                               f"期滿仍賺 {round(pp['pos'] * 100)}% ({pp['n']} 筆)；歷史上這時候離場平均比放到期滿差，降低期待即可。歷史統計，非買賣建議。"})
+    return out[:6]
 
 
 def close_alerts(prev: dict | None, ref: str | None = None) -> list[dict]:
@@ -755,9 +801,9 @@ def alerts(sc: dict, st: dict, prev: dict | None = None) -> list[dict]:
     if (st.get("surge") or {}).get("drift"):
         s = st["surge"]; out.append({"level": "mid", "kind": "drift", "code": "", "date": D, "msg": f"⚠ 飆股雷達上線飆股率 {round(s['rate'] * 100)}% (回測 {round(s['bt_hit'] * 100)}%，{s['done']} 筆)：實盤失準"})
     try:
-        out += close_alerts(prev)
+        out += close_alerts(prev) + weak_alerts(prev)
     except Exception as e:  # noqa: BLE001
-        log.debug("close alerts: %s", e)
+        log.debug("close/weak alerts: %s", e)
     return out
 
 
