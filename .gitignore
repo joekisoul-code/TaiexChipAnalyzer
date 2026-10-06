@@ -5,3 +5,4 @@ data/*.sqlite
 data/alerts.log
 site/data/
 .claude/
+research/radar5/*.parquet

@@ -167,14 +167,15 @@ def test_stats_sources_roles_and_drift():
     ts = st["treasure"]
     assert ts["all"]["n"] == 3 and ts["all"]["hit"] == 2 and ts["all"]["n_published"] == 3 and ts["all"]["n_backfill"] == 0
     assert ts["by_source"]["published"]["n"] == 3 and ts["by_source"]["backfill"] is None
-    assert ts["signal"]["n"] == 2 and ts["signal"]["rate"] == 1.0 and ts["signal"]["expect"] == [0.55, 0.57] and ts["signal"]["role"] == "signal" and ts["signal"]["drift"] is False
+    assert ts["signal"]["n"] == 2 and ts["signal"]["rate"] == 1.0 and ts["signal"]["expect"] == list(TL.EXPECT_AAPLUS) and ts["signal"]["role"] == "signal" and ts["signal"]["drift"] is False
     bt = ts["by_tier"]
     assert bt["A+"]["role"] == "signal" and bt["A"]["role"] == "signal" and bt["B"]["role"] == "descriptive"
-    assert bt["A+"]["expect"] == [0.55, 0.57] and "expect" not in bt["B"]
+    assert bt["A+"]["expect"] == list(TL.EXPECT_AAPLUS) and "expect" not in bt["B"]
     assert bt["B"]["drift"] is False and "描述級" in bt["B"]["note"] and bt["B"]["rate"] == 0.0
     assert abs(bt["B"]["avg_fin"] - (-7.0)) < 1e-6 and abs(bt["B"]["avg_fin21"] - 10.0) < 1e-6 and bt["B"]["n_fin21"] == 1   # 結案日報酬 vs 21 日報酬分開
-    assert bt["A+"]["bt_hit"] == 0.638 and bt["A"]["bt_hit"] == 0.471                                              # 舊鍵保留
-    assert ts["roles"] == {"A+": "signal", "A": "signal", "B+": "descriptive", "B": "descriptive"} and ts["expect_AAplus"] == [0.55, 0.57]
+    assert bt["A+"]["bt_hit"] == TL.RADAR_TIER["A+"]["hit"] and bt["A"]["bt_hit"] == TL.RADAR_TIER["A"]["hit"]       # 10-07 時點正確回測 (鍵名不變)
+    assert st["surge"]["bt_hit"] == TL.RADAR_BT["S3"]["surge"]
+    assert ts["roles"] == {"A+": "signal", "A": "signal", "B+": "descriptive", "B": "descriptive"} and ts["expect_AAplus"] == list(TL.EXPECT_AAPLUS)
     assert ts["by_month"]["2026-09"]["n_A"] == 2 and ts["by_month"]["2026-09"]["avg_fin21"] == 7.0
     # 真實發布 A 級 20 筆命中 20% → 漂移 (只看 published)；同樣 20 筆若全是回填 → 不漂移；B 級 100 筆 5% → 永不漂移
     def rows(tier, n, hits, backfill):
@@ -197,7 +198,7 @@ def test_alert_wording():
     assert len(tre) == 2 and all(a["tier"] in ("A+", "A") for a in tre)
     for a in tre:
         m = a["msg"]
-        assert "模型分 0." in m and "55~57%" in m and "非買賣建議" in m
+        assert "模型分 0." in m and "44~50%" in m and "非買賣建議" in m
         for bad in ("命中機率", "進場", "持有", "買進", "賣出"):
             assert bad not in m, (bad, m)
     assert any(a["kind"] == "surge" for a in al)
@@ -225,7 +226,7 @@ def test_backfill_marks_source():
 
 
 def test_h_constant_matches_backtest():
-    assert T.H == 21 and TL.EXPECT_AAPLUS == (0.55, 0.57)
+    assert T.H == 21 and TL.EXPECT_AAPLUS == (0.44, 0.50)   # 10-07 誠實回測
 
 
 def test_hit_day_and_reason():
@@ -317,7 +318,8 @@ def test_pool_rows_restricts_to_training_universe():
     assert set(TL.pool_rows(rows, {"universe": ["2330", "1101"]})) == {"2330", "1101"}
     assert set(TL.pool_rows(rows, {})) == {"2330", "1101", "9999"}
     assert TL.RADAR_BT["pool_rule"]["after"]["S3"]["win21"] > TL.RADAR_BT["pool_rule"]["before"]["S3"]["win21"]
-    assert TL.RADAR_BT["pool"]["surge"] == 0.16, "原本「一般股票」基準率不可被覆蓋"
+    assert TL.RADAR_BT["pool"]["n"] > 10000 and 0.1 < TL.RADAR_BT["pool"]["surge"] < 0.3, "「一般股票」基準率不可被覆蓋"
+    assert TL.RADAR_BT["method"]["pit"] and TL.RADAR_BT["A"]["win21"] < TL.RADAR_BT["method"]["old"]["A"]["win21"], "10-07 誠實回測 (時點正確宇宙) 應低於舊的後見之明版"
 
 
 def test_path_prob_and_weak_alert():
@@ -337,6 +339,10 @@ def test_path_prob_and_weak_alert():
         for w in ("進場", "持有", "買進", "賣出", "加碼", "減碼"):
             assert w not in a["msg"], (w, a["msg"])
     assert TL.RADAR_BT["path"]["A"]["3"] and TL.RADAR_BT["fail"]["early"]["A"]["exit"] < TL.RADAR_BT["fail"]["early"]["A"]["hold"]
+    # 10-07：飆股表只用「仍在追蹤」的推薦 (已飆 +20% 結案的不算) → 第 15 天還漲 ≥5% 的飆機率不可能像舊表 64% 那麼高
+    s15 = TL.path_prob("S3", 16, 6.0); assert s15["k"] == 15 and s15["hit"] < 0.4 and s15.get("nd", 0) >= s15["n"], s15
+    d0 = TL.RADAR_BT["day0"]; assert len(d0["hit"]) == len(d0["edges"]) + 1 and d0["hit"] == sorted(d0["hit"]), d0
+    assert TL.day0_prob(0.5, 0.5) == d0["hit"][0] and TL.day0_prob(0.95, 0.5) == d0["hit"][-1] and TL.day0_prob(None, 0.5) is None
 
 
 def _tiny_model():
