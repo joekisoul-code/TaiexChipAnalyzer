@@ -55,6 +55,18 @@ DRIFT_MIN_PUBLISHED = 15       # 訊號級漂移判定：真實發布結案 ≥1
 NOTE_TIERS = "A/A+ 為訊號級；B/B+ 為描述級 (回測即無選股力 #40/#84)"
 MAX_FIN21_WAIT_DAYS = 60       # 結案列補 fin21：日 K 已延伸 60 個日曆日仍湊不到 21 根 (下市/停牌) → 放棄
 WHY_TOP = 3                    # 10-06：A/A+ 原因 = 模型分下降最多的前 3 項
+# 10-06 挖寶 × 飆股 整合研究 (scratch radar_study.py：170 檔、Yahoo 10y、兩模型逐年走動式、模擬每日掃描；2022-01 ~ 2026-09 樣本外)
+# hit = 挖寶定義命中、surge = 飆股定義、win21 = 第 21 交易日報酬 > 0、fin21 = 21 日平均報酬、q10 = 最差一成。
+# 結論：兩邊同日都選到 (多為 B 級) 並沒有比較好 (n=48 勝率 50%)；A∩飆股 只有 5 筆 → 不另設「雙訊號」等級，只並列顯示。
+RADAR_BT = {
+    "A": {"n": 357, "hit": 0.563, "surge": 0.291, "win21": 0.717, "fin21": 9.03, "med21": 6.37, "q10": -9.74},
+    "A+": {"n": 179, "hit": 0.67, "surge": 0.318, "win21": 0.804, "fin21": 11.25, "med21": 8.55, "q10": -3.7},
+    "S3": {"n": 610, "hit": 0.395, "surge": 0.33, "win21": 0.554, "fin21": 7.31, "med21": 2.82, "q10": -16.45},
+    "dual": {"n": 48, "hit": 0.396, "surge": 0.25, "win21": 0.5, "fin21": 2.78, "med21": 1.4, "q10": -16.75},
+    "B": {"n": 5461, "hit": 0.383, "surge": 0.188, "win21": 0.508, "fin21": 3.0, "med21": 0.4, "q10": -14.0},
+    "pool": {"n": 149397, "hit": 0.39, "surge": 0.16, "win21": 0.529, "fin21": 3.0},
+    "period": "2022-01~2026-09", "note": "170 檔、逐年走動式樣本外、模擬每日掃描；同日兩邊都選到 (多為 B 級) 沒有比較好，A∩飆股僅 5 筆",
+}
 # 特徵中文名與格式 (App learning.js TM_LABEL 同款；改這裡要一起改)
 FEAT_LABEL = {
     "pct": ("當日漲幅", "s%"), "amp": ("當日振幅", "%"), "lval": ("成交金額", "amt"), "b5": ("距 5 日線", "s%"), "b10": ("距 10 日線", "s%"),
@@ -137,8 +149,8 @@ def market_snapshot(date: str | None = None) -> tuple[str | None, dict]:
             r.raise_for_status()
             j = r.json()
             tbl = [t for t in (j.get("tables") or []) if len(t.get("data") or []) > 500]
-            if not tbl:
-                return None
+            if not tbl:   # 10-06：當天還沒公布 → 丟例外 (不寫快取)；原本回 None 會被快取 30 天，清晨跑過一次那天就永遠掃不到 (10-05 即此)
+                raise LookupError(f"MI_INDEX {ds} 尚未公布")
             f = tbl[0]["fields"]; ix = {k: f.index(k) for k in f}
             out = {}
             for row in tbl[0]["data"]:
@@ -155,9 +167,11 @@ def market_snapshot(date: str | None = None) -> tuple[str | None, dict]:
                 out[code] = {"name": str(row[ix["證券名稱"]]).strip(), "open": o, "high": h, "low": l, "close": c, "volume": _num(row[ix["成交股數"]]),
                              "value": _num(row[ix["成交金額"]]), "change": chg, "pct": chg / ((c - chg) or 1e-9) * 100, "amp": (h - l) / (l or 1e-9) * 100 if h > 0 and l > 0 else 0.0,
                              "per": _num(row[ix["本益比"]])}
+            if not out:
+                raise LookupError(f"MI_INDEX {ds} 無資料列")
             return {"date": d.isoformat(), "rows": out}
         try:
-            j = cached(f"twse:mi_index_all:{ds}", 30 * 86400, load, allow_stale=False)
+            j = cached(f"twse:mi_index_all2:{ds}", 30 * 86400, load, allow_stale=False)   # 10-06 換鍵：舊鍵可能存了「未公布」的 null
         except Exception as e:  # noqa: BLE001
             log.warning("MI_INDEX %s: %s", ds, e)
             j = None
@@ -395,6 +409,8 @@ def record(prev: dict, sc: dict, tm: dict | None = None, scan_src: str = "live")
     recent_miss = {x["code"] for x in tre if x.get("status") == "未命中" and x.get("evalAt") and (pd.Timestamp(D) - pd.Timestamp(x["evalAt"])).days < REENTRY_MISS_DAYS}
     have = {(x["code"], x["date"]) for x in tre}
     n = 0
+    s_codes = {r["code"] for r in sc.get("surge") or []}                          # 10-06：今日飆股前 3
+    t_tier = {r["code"]: (r["tier"], r["p"]) for r in sc.get("treasure") or []}   # 今日挖寶候選 (含 B 級) 的等級與模型分
     for r in sc["treasure"][:20]:
         if n >= PER_DAY or len(active) + n >= MAX_ACTIVE:
             break
@@ -402,13 +418,15 @@ def record(prev: dict, sc: dict, tm: dict | None = None, scan_src: str = "live")
             continue
         tre.append({"code": r["code"], "name": r["name"], "date": D, "entry": r["close"], "mktEntry": sc.get("mkt_close"), "p": r["p"], "tier": r["tier"], "ps": r.get("ps"),
                     "pct": r["pct"], "status": "追蹤", "peak": 0.0, "trough": 0.0, "cur": 0.0, "rel": 0.0, "days": 0, **meta,
-                    **({"why": r["why"]} if r.get("why") else {})})
+                    **({"why": r["why"]} if r.get("why") else {}), **({"sPick": True} if r["code"] in s_codes else {})})
         n += 1
     sur = led["surge"]
     for r in sc["surge"]:
         if any(x["code"] == r["code"] and abs((pd.Timestamp(D) - pd.Timestamp(x["date"])).days) < SURGE_DEDUP_DAYS for x in sur):
             continue
+        tt = t_tier.get(r["code"])
         sur.append({"code": r["code"], "name": r["name"], "date": D, "entry": r["close"], "ps": r["ps"], "status": "追蹤", "days": 0,
+                    **({"tier": tt[0], "p": tt[1]} if tt else {}),
                     "model_ver": meta["model_ver"], "th_top10": (tm.get("surge") or {}).get("th_top10"), "scan_src": scan_src})
     scans = [x for x in prev.get("scans") or [] if x.get("date") != D]
     scans.append({"date": D, "n_treasure": len(sc["treasure"]), "n_A": sum(1 for r in sc["treasure"] if r["tier"] in ("A", "A+")), "mkt_bias20": sc.get("mkt_bias20"),
@@ -428,6 +446,55 @@ def _fin21_of(x: dict):
     return None
 
 
+def _walk_treasure(since: list[dict], e: float, me, mk: dict) -> dict:
+    """回測定義逐日走訪 (與原 _eval_treasure 迴圈同邏輯)；10-06 另記第一次達標 / 跌破 / 峰值的交易日序與日期，讓 App 能顯示「實際有沒有命中、哪天」。"""
+    cm = -1e9; stop = False; reached = False; peak = -1e9; trough = 1e9; rel_max = -1e9; w: dict = {}
+    for k, r in enumerate(since, 1):
+        d = str(r["date"])[:10]
+        cr = (float(r["close"]) / e - 1) * 100; lr = (float(r.get("low") or r["close"]) / e - 1) * 100
+        cm = max(cm, cr); trough = min(trough, lr)
+        if cr > peak:
+            peak = cr; w["peakDay"], w["peakDate"] = k, d
+        mr = ((mk.get(d) or float("nan")) / me - 1) * 100 if me else 0.0
+        if not np.isfinite(mr):
+            mr = 0.0
+        rel_max = max(rel_max, cr - mr)
+        if not stop and not reached and lr <= T.STOP and cm < T.TGT:
+            stop = True; w["stopDay"], w["stopDate"], w["stopVal"] = k, d, round(lr, 2)
+        if not stop and (cr >= T.TGT or (cr - mr) >= T.REL):
+            if not reached:
+                w["hitDay"], w["hitDate"], w["hitVal"] = k, d, round(cr, 2); w["hitBy"] = "漲幅" if cr >= T.TGT else "相對大盤"
+            reached = True
+    w.update(stop=stop, reached=reached, peak=peak, trough=trough, rel_max=rel_max)
+    return w
+
+
+def _treasure_reason(st: str, w: dict, cur: float, H: int) -> str:
+    """結案原因 (10-06：寫出第幾天、哪一天)。"""
+    if st == "未命中" and w.get("stopDay"):
+        return f"第 {w['stopDay']} 天 ({w['stopDate'][5:]}) 盤中跌破 {T.STOP:.0f}% (低點 {w['stopVal']:+.1f}%)"
+    if st == "命中":
+        return f"第 {w['hitDay']} 天 ({w['hitDate'][5:]}) {'收盤 ' + format(w['hitVal'], '+.1f') + '% 達標' if w.get('hitBy') == '漲幅' else '贏大盤 4pt 達標'}；結案 {cur:+.1f}% (峰值 {w['peak']:+.1f}%)"
+    if st == "回落":
+        return f"第 {w.get('hitDay', '?')} 天曾達標 (峰值 {w['peak']:+.1f}%)，但第 {H} 天結案 {cur:+.1f}%"
+    return f"{H} 個交易日內未達 +6% / 贏大盤 4pt (峰值 {w['peak']:+.1f}%)"
+
+
+def _annotate_closed_treasure(x: dict, since: list[dict], mk: dict) -> None:
+    """已結案列補「第幾天」資訊 (一次性：chk=1)；狀態/數值不動。"""
+    n = int(x.get("days") or 0)
+    if n <= 0 or len(since) < n:
+        return
+    me = x.get("mktEntry") or (mk.get(x["date"]) if x["date"] in mk else None)
+    w = _walk_treasure(since[:n], float(x["entry"]), me, mk)
+    for k in ("hitDay", "hitDate", "hitVal", "hitBy", "stopDay", "stopDate", "stopVal", "peakDay", "peakDate"):
+        if k in w:
+            x[k] = w[k]
+    if x.get("cur") is not None and x.get("status") in ("命中", "回落", "未命中"):
+        x["reason"] = _treasure_reason(x["status"], w, float(x["cur"]), T.H)
+    x["chk"] = 1
+
+
 def _eval_treasure(x: dict, b: list[dict], mk: dict) -> None:
     """回測定義 (treasure.features 的 label)：21 交易日；峰值取收盤、停損取盤中低點 (先後順序)、相對大盤任一日 ≥ 4pt。
     pr2：fin21 = 第 21 個交易日收盤報酬，不論是否已停損 (停損後仍追到 21 日)；已結案列只補 fin21 (cur/peak/days 等結案值不動)。"""
@@ -439,6 +506,8 @@ def _eval_treasure(x: dict, b: list[dict], mk: dict) -> None:
     elif len(since) < T.H and x.get("fin21") is None and (pd.Timestamp(str(b[-1]["date"])[:10]) - pd.Timestamp(x["date"])).days > MAX_FIN21_WAIT_DAYS:
         x["fin21_na"] = True      # 日 K 不足 (下市/停牌/資料斷)：不再重試
     if x.get("status") not in (None, "追蹤"):
+        if x.get("chk") is None:      # 10-06：舊結案列補「第幾天達標/跌破」
+            _annotate_closed_treasure(x, since, mk)
         if x.get("trail") is None:   # 舊結案列 (理論上結案時已填)：補移動停利
             pk = e
             for r in since:
@@ -449,18 +518,12 @@ def _eval_treasure(x: dict, b: list[dict], mk: dict) -> None:
                 x["trail"] = x.get("cur")
         return
     me = x.get("mktEntry") or (mk.get(x["date"]) if x["date"] in mk else None)
-    cm = -1e9; stop = False; reached = False; peak = -1e9; trough = 1e9; rel_max = -1e9
-    for r in since:
-        cr = (float(r["close"]) / e - 1) * 100; lr = (float(r.get("low") or r["close"]) / e - 1) * 100
-        cm = max(cm, cr); peak = max(peak, cr); trough = min(trough, lr)
-        mr = ((mk.get(str(r["date"])[:10]) or float("nan")) / me - 1) * 100 if me else 0.0
-        if not np.isfinite(mr):
-            mr = 0.0
-        rel_max = max(rel_max, cr - mr)
-        if not stop and not reached and lr <= T.STOP and cm < T.TGT:
-            stop = True
-        if not stop and (cr >= T.TGT or (cr - mr) >= T.REL):
-            reached = True
+    w = _walk_treasure(since, e, me, mk)
+    stop, reached, peak, trough, rel_max = w["stop"], w["reached"], w["peak"], w["trough"], w["rel_max"]
+    for k in ("hitDay", "hitDate", "hitVal", "hitBy", "stopDay", "stopDate", "stopVal", "peakDay", "peakDate"):
+        if k in w:
+            x[k] = w[k]
+    x["chk"] = 1
     cur = (float(since[-1]["close"]) / e - 1) * 100
     last_m = mk.get(str(since[-1]["date"])[:10]); rel = (cur - ((last_m / me - 1) * 100)) if (me and last_m) else None
     x.update(peak=round(peak, 2), trough=round(trough, 2), cur=round(cur, 2), rel=round(rel, 2) if rel is not None else None, relMax=round(rel_max, 2), days=len(since), lastDate=str(since[-1]["date"])[:10])
@@ -472,39 +535,57 @@ def _eval_treasure(x: dict, b: list[dict], mk: dict) -> None:
             if pk >= e * 1.1 and float(r["close"]) <= pk * 0.92:
                 x["trail"] = round((float(r["close"]) / e - 1) * 100, 2); x["trailDate"] = str(r["date"])[:10]; break
     if x.get("status") == "追蹤" and (stop or len(since) >= T.H):
-        if stop:
-            x["status"], x["reason"] = "未命中", f"先跌破 {T.STOP:.0f}% (盤中低點 {trough:.1f}%)"
-        elif reached and cur > 0:
-            x["status"], x["reason"] = "命中", f"峰值 {peak:+.1f}%、結案 {cur:+.1f}%"
-        elif reached:
-            x["status"], x["reason"] = "回落", f"曾達標 (峰值 {peak:+.1f}%) 但結案 {cur:+.1f}%"
-        else:
-            x["status"], x["reason"] = "未命中", f"21 日內未達 +6% / 相對 +4pt (峰值 {peak:+.1f}%)"
+        st = "未命中" if stop else ("命中" if reached and cur > 0 else ("回落" if reached else "未命中"))
+        x["status"], x["reason"] = st, _treasure_reason(st, w, cur, T.H)
         x["evalAt"] = str(since[-1]["date"])[:10]
         if x.get("trail") is None:
             x["trail"] = round(cur, 2)
+
+
+def _walk_surge(since: list[dict], e: float) -> dict:
+    """飆股定義逐日走訪 (同一根 K 先判跌破再判漲到，與原邏輯相同)；10-06 另記第幾天先到 +20% / 先破 −10% / 最高點。"""
+    peak = e; res = None; trail = None; tdate = None; w: dict = {}
+    for k, r in enumerate(since, 1):
+        d = str(r["date"])[:10]
+        h = float(r.get("high") or r["close"]); l = float(r.get("low") or r["close"]); c = float(r["close"])
+        if res is None and l <= e * (1 + T.SURGE_DN / 100):
+            res = "未飆"; w["stopDay"], w["stopDate"], w["stopVal"] = k, d, round((l / e - 1) * 100, 2)
+        if res is None and h >= e * (1 + T.SURGE_UP / 100):
+            res = "飆"; w["hitDay"], w["hitDate"], w["hitVal"] = k, d, round((h / e - 1) * 100, 2)
+        if h > peak:
+            peak = h; w["peakDay"], w["peakDate"] = k, d
+        if trail is None and peak >= e * 1.1 and c <= peak * 0.92:
+            trail, tdate = (c / e - 1) * 100, d
+    w.update(res=res, peak=peak, trail=trail, tdate=tdate)
+    return w
+
+
+def _surge_reason(st: str, w: dict, e: float) -> str:
+    if st == "飆":
+        return f"第 {w['hitDay']} 天 ({w['hitDate'][5:]}) 盤中最高 {w['hitVal']:+.1f}%，先到 +{T.SURGE_UP:.0f}%"
+    if w.get("stopDay"):
+        return f"第 {w['stopDay']} 天 ({w['stopDate'][5:]}) 盤中跌破 {T.SURGE_DN:.0f}% (低點 {w['stopVal']:+.1f}%)"
+    return f"{T.SURGE_N} 個交易日內最高 {(w['peak'] / e - 1) * 100:+.1f}%，未到 +{T.SURGE_UP:.0f}%"
 
 
 def _eval_surge(x: dict, b: list[dict]) -> None:
     e = float(x["entry"]); since = [r for r in b if str(r["date"])[:10] > x["date"] and r.get("close")][:T.SURGE_N]
     if not since:
         return
-    peak = e; res = None; trail = None; tdate = None
-    for r in since:
-        h = float(r.get("high") or r["close"]); l = float(r.get("low") or r["close"]); c = float(r["close"])
-        if res is None and l <= e * (1 + T.SURGE_DN / 100):
-            res = "未飆"
-        if res is None and h >= e * (1 + T.SURGE_UP / 100):
-            res = "飆"
-        peak = max(peak, h)
-        if trail is None and peak >= e * 1.1 and c <= peak * 0.92:
-            trail, tdate = (c / e - 1) * 100, str(r["date"])[:10]
+    w = _walk_surge(since, e)
+    peak, res, trail, tdate = w["peak"], w["res"], w["trail"], w["tdate"]
+    for k in ("hitDay", "hitDate", "hitVal", "stopDay", "stopDate", "stopVal", "peakDay", "peakDate"):
+        if k in w:
+            x[k] = w[k]
+    x["chk"] = 1
     last = float(since[-1]["close"])
     x.update(cur=round((last / e - 1) * 100, 2), peak=round((peak / e - 1) * 100, 2), days=len(since), lastDate=str(since[-1]["date"])[:10])
     if trail is not None:
         x["trail"], x["trailDate"] = round(trail, 2), tdate
     if x.get("status") == "追蹤" and (res in ("飆", "未飆") or len(since) >= T.SURGE_N):
         x["status"] = "飆" if res == "飆" else "未飆"; x["evalAt"] = str(since[-1]["date"])[:10]
+    if x.get("status") in ("飆", "未飆"):
+        x["reason"] = _surge_reason(x["status"], w, e)
     if x.get("trail") is None and len(since) >= T.SURGE_N:
         x["trail"] = x["cur"]
 
@@ -514,10 +595,10 @@ def evaluate(prev: dict, mk: dict, max_fetch: int = 200, upto: str | None = None
     n = 0
     todo = []
     for x in prev["ledger"]["treasure"]:
-        if x.get("status") == "追蹤" or x.get("trail") is None or (x.get("fin21") is None and not x.get("fin21_na") and (x.get("days") or 0) < T.H):
-            todo.append(("t", x))     # pr2：停損提早結案的列繼續追到第 21 日補 fin21
+        if x.get("status") == "追蹤" or x.get("trail") is None or (x.get("fin21") is None and not x.get("fin21_na") and (x.get("days") or 0) < T.H) or x.get("chk") is None:
+            todo.append(("t", x))     # pr2：停損提早結案的列繼續追到第 21 日補 fin21；10-06：舊結案列補一次「第幾天」(chk)
     for x in prev["ledger"]["surge"]:
-        if x.get("status") == "追蹤" or (x.get("trail") is None and (x.get("days") or 0) < T.SURGE_N):
+        if x.get("status") == "追蹤" or (x.get("trail") is None and (x.get("days") or 0) < T.SURGE_N) or x.get("chk") is None:
             todo.append(("s", x))
     cache: dict[str, list] = {}
     for kind, x in todo[:max_fetch * 2]:
@@ -667,7 +748,7 @@ def build(date: str | None = None, do_scan: bool = True, backfill_days: int = 0)
     st = stats(prev, tm)
     out = {"asof": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M:%S"), "scan": sc, "ledger": prev["ledger"], "scans": prev["scans"], "stats": st,
            "alerts": alerts(sc, st | {"surge": {**(st.get("surge") or {}), "th_top10": ((tm.get("surge") or {}).get("th_top10"))}}),
-           "model": {"trained_at": tm.get("trained_at"), "th_A": tm.get("th_A"), "th_Aplus": tm.get("th_Aplus"), "oos": (tm.get("oos") or {}).get("tiers"), "surge_oos": (tm.get("surge") or {}).get("oos"),
+           "model": {"radar_bt": RADAR_BT, "trained_at": tm.get("trained_at"), "th_A": tm.get("th_A"), "th_Aplus": tm.get("th_Aplus"), "oos": (tm.get("oos") or {}).get("tiers"), "surge_oos": (tm.get("surge") or {}).get("oos"),
                      "exit": tm.get("exit"), "surge_exit": (tm.get("surge") or {}).get("exit"), "entry": tm.get("entry"),
                      "expect_AAplus": list(EXPECT_AAPLUS), "note_tiers": NOTE_TIERS, "roles": dict(ROLE), "spec": "pr2 2026-10-05"},
            "n_fetch": n_fetch,

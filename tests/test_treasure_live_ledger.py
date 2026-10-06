@@ -228,6 +228,66 @@ def test_h_constant_matches_backtest():
     assert T.H == 21 and TL.EXPECT_AAPLUS == (0.55, 0.57)
 
 
+def test_hit_day_and_reason():
+    """10-06：結案列記第幾天達標 / 跌破 (挖寶、飆股)，原因寫出天數與日期；同日兩邊都選到互相標記。"""
+    sc = dict(SC); sc["surge"] = SC["surge"] + [{"code": "2222", "name": "乙", "close": 100.0, "pct": 3.0, "ps": 0.33}]
+    with patched(TL, "bars", _fake_bars):
+        prev = TL.record(_fresh(), sc, TM)
+        _run_days(prev, 22)
+    t = {x["code"]: x for x in prev["ledger"]["treasure"]}; s = {x["code"]: x for x in prev["ledger"]["surge"]}
+    # 大盤持平 → 第 2 天 +4% 已贏大盤 4pt (相對達標)，第 3 天收盤 +7% 才是漲幅達標；記第一次
+    assert t["1111"]["status"] == "命中" and t["1111"]["hitDay"] == 2 and t["1111"]["hitDate"] == AFTER[1] and t["1111"]["hitBy"] == "相對大盤", t["1111"]
+    assert t["1111"]["reason"] == "第 2 天 (" + AFTER[1][5:] + ") 贏大盤 4pt 達標；結案 +8.0% (峰值 +8.0%)", t["1111"]["reason"]
+    assert t["2222"]["status"] == "未命中" and t["2222"]["stopDay"] == 3 and "盤中跌破 -8%" in t["2222"]["reason"] and t["2222"]["chk"] == 1, t["2222"]
+    assert t["3333"]["hitDay"] == 10 and t["3333"]["peakDay"] == 10
+    assert s["9999"]["status"] == "飆" and s["9999"]["hitDay"] == 1 and "先到 +20%" in s["9999"]["reason"], s["9999"]
+    assert t["2222"].get("sPick") is True and "sPick" not in t["1111"], "同日也是飆股前 3 → sPick"
+    assert s["2222"]["tier"] == "B" and s["2222"]["p"] == 0.45 and "tier" not in s["9999"], "飆股列帶挖寶等級"
+
+
+def test_closed_rows_annotated_once():
+    """舊結案列 (沒有 chk) 補一次「第幾天」，狀態與數值不動。"""
+    with patched(TL, "bars", _fake_bars):
+        prev = TL.record(_fresh(), SC, TM)
+        _run_days(prev, 22)
+        for x in prev["ledger"]["treasure"] + prev["ledger"]["surge"]:
+            for k in ("hitDay", "hitDate", "hitVal", "hitBy", "stopDay", "stopDate", "stopVal", "peakDay", "peakDate", "chk"):
+                x.pop(k, None)
+        before = {x["code"]: (x["status"], x["cur"], x["days"]) for x in prev["ledger"]["treasure"]}
+        TL.evaluate(prev, MK, max_fetch=10 ** 6, upto=AFTER[25])
+    t = {x["code"]: x for x in prev["ledger"]["treasure"]}
+    assert all(x.get("chk") == 1 for x in prev["ledger"]["treasure"] + prev["ledger"]["surge"])
+    assert t["1111"]["hitDay"] == 2 and t["2222"]["stopDay"] == 3
+    assert {c: (x["status"], x["cur"], x["days"]) for c, x in t.items()} == before
+
+
+def test_market_snapshot_does_not_cache_unpublished_day():
+    """10-06：TWSE 當天還沒公布 → 不寫快取 (原本快取 null 30 天，該日永遠掃不到)，往前找到有資料的日子。"""
+    writes = []
+
+    def fake_cached(key, ttl, loader, allow_stale=True):
+        data = loader()            # 未公布 → 丟例外，不會寫入
+        writes.append(key)
+        return data
+
+    rows = [["1101", "台泥", "1,000", "1", "100", "30.00", "30.50", "29.90", "30.20", "+", "0.20", "", "", "", "", "10.5"]] * 600
+    fields = ["證券代號", "證券名稱", "成交股數", "成交筆數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "漲跌(+/-)", "漲跌價差", "最後揭示買價", "最後揭示買量", "最後揭示賣價", "最後揭示賣量", "本益比"]
+
+    class R:
+        def __init__(self, j): self.j = j
+        def raise_for_status(self): pass
+        def json(self): return self.j
+
+    class S:
+        def get(self, url, params=None, headers=None, timeout=None):
+            return R({"stat": "很抱歉，沒有符合條件的資料!"} if params["date"] == "20261006" else {"tables": [{"fields": fields, "data": rows}]})
+
+    with patched(TL, "cached", fake_cached), patched(TL, "session", lambda: S()):
+        D, rows_out = TL.market_snapshot("2026-10-06")
+    assert D == "2026-10-05" and "1101" in rows_out, D
+    assert writes == ["twse:mi_index_all2:20261005"], writes
+
+
 def _tiny_model():
     """兩棵樹：特徵 0 > 5 加分、特徵 1 < 0 加分；其餘特徵不影響。"""
     feats = ["ret20", "dd_hi60", "vola20"]
