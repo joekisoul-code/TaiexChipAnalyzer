@@ -311,6 +311,15 @@ def test_close_alerts_recent_signal_rows():
     assert any(a["kind"] == "close" for a in out)
 
 
+def test_pool_rows_restricts_to_training_universe():
+    """10-06：候選池只用模型訓練過的股票；舊模型檔沒有 universe 時維持全市場。"""
+    rows = {"2330": {"value": 1e10}, "1101": {"value": 1e9}, "9999": {"value": 2e8}}
+    assert set(TL.pool_rows(rows, {"universe": ["2330", "1101"]})) == {"2330", "1101"}
+    assert set(TL.pool_rows(rows, {})) == {"2330", "1101", "9999"}
+    assert TL.RADAR_BT["pool_rule"]["after"]["S3"]["win21"] > TL.RADAR_BT["pool_rule"]["before"]["S3"]["win21"]
+    assert TL.RADAR_BT["pool"]["surge"] == 0.16, "原本「一般股票」基準率不可被覆蓋"
+
+
 def _tiny_model():
     """兩棵樹：特徵 0 > 5 加分、特徵 1 < 0 加分；其餘特徵不影響。"""
     feats = ["ret20", "dd_hi60", "vola20"]

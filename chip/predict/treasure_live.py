@@ -71,6 +71,13 @@ RADAR_BT = {
               "S3": {"n": 138, "hit": 0.362, "surge": 0.384, "win21": 0.587, "fin21": 11.17},
               "B": {"n": 870, "hit": 0.441, "surge": 0.391, "win21": 0.605, "fin21": 9.99}},
     # 與雲端帳本「同一段期間」(推薦日 2026-07-01~09-03) 的樣本外回測 → 實際 (回填) 比它高的部分 ≈ 回填偏樂觀
+    # 10-06 候選池研究 (scratch radar_study2.py：全上市 1,030 檔 Yahoo 10y、兩模型逐年走動式、2022-01~2026-09 樣本外)
+    # 模型只用約 170 檔大型股訓練，候選池卻是全上市 → 宇宙外 (中小型) 推薦每年都較差 (同日同模型：飆股勝率 35~48% vs 宇宙內 59~68%、A 48~75% vs 60~89%)；
+    # 用全市場重訓也沒改善 (A 63%、飆股 49%)。→ 候選池限定訓練宇宙：A 勝率 62%→70%、A+ 71%→78%、飆股 47%→55% (5/5 年改善)、飆股最差一成 −20%→−15%。
+    "pool_rule": {"rule": "候選池只用模型訓練過的股票 (約 170 檔大型股)", "since": "2026-10-06",
+             "before": {"A": {"n": 577, "hit": 0.471, "win21": 0.617, "fin21": 6.02}, "A+": {"n": 275, "hit": 0.545, "win21": 0.709}, "S3": {"n": 1067, "surge": 0.299, "win21": 0.469, "fin21": 2.68, "q10": -20.43}, "B": {"win21": 0.458}},
+             "after": {"A": {"n": 380, "hit": 0.547, "win21": 0.695, "fin21": 8.36}, "A+": {"n": 180, "hit": 0.656, "win21": 0.783}, "S3": {"n": 607, "surge": 0.308, "win21": 0.552, "fin21": 6.87, "q10": -15.49}, "B": {"win21": 0.51}},
+             "broad": {"A": {"win21": 0.629}, "S3": {"win21": 0.491}}},
     "same": {"period": "2026-07~09",
              "A": {"n": 43, "hit": 0.535, "surge": 0.465, "win21": 0.744, "fin21": 21.52},
              "S3": {"n": 41, "hit": 0.341, "surge": 0.317, "win21": 0.512, "fin21": 6.37},
@@ -323,6 +330,12 @@ def score_one(code: str, snap_row: dict, D: str, mkf: pd.DataFrame, tm: dict) ->
     return {"p": round(p, 4), "tier": tier, "ps": round(ps, 4) if ps is not None else None, "m_bias20": round(x["m_bias20"], 3), "_x": {f: x[f] for f in tm["features"]}}
 
 
+def pool_rows(rows: dict, tm: dict) -> dict:
+    """10-06：候選池限定模型訓練宇宙 (tm["universe"])；模型對宇宙外的中小型股選股力差 (radar_study2)。舊模型檔沒有 universe → 全市場。"""
+    uni = set(tm.get("universe") or [])
+    return {c: v for c, v in rows.items() if c in uni} if uni else rows
+
+
 def scan(tm: dict, date: str | None = None) -> dict:
     """當日掃描：回傳 {date, pool_n, treasure[(前 40 中 pct<9.4、依 p 排序)], surge[前 3], mkt_close, mkt_bias20, errors}。"""
     D, rows = market_snapshot(date)
@@ -336,7 +349,7 @@ def scan(tm: dict, date: str | None = None) -> dict:
             log.warning("TWII %s missing (%s)：大盤特徵以前一日計", D, e)
     mkf = _mk_frame(mk, D)
     mkt_pct = float(mkf["m_ret1"].iloc[-1]) if len(mkf) and pd.notna(mkf["m_ret1"].iloc[-1]) else 0.0
-    pool = [r for r in screen(rows, valuation(), mkt_pct, POOL) if not r["code"].startswith("00")][:POOL]
+    pool = [r for r in screen(pool_rows(rows, tm), valuation(), mkt_pct, POOL) if not r["code"].startswith("00")][:POOL]   # 10-06：限定訓練宇宙
     res, errors = {}, 0
     for r in pool:
         try:
@@ -360,7 +373,7 @@ def scan(tm: dict, date: str | None = None) -> dict:
     sg_k = int(((tm.get("surge") or {}).get("def") or {}).get("topk") or 3)
     sur = sorted([{"code": r["code"], "name": r["name"], "close": r["close"], "pct": round(r["pct"], 2), "ps": res[r["code"]]["ps"]} for r in pool if r["code"] in res and res[r["code"]]["ps"] is not None and r["pct"] < 9.4],
                  key=lambda x: -x["ps"])[:sg_k]
-    return {"date": D, "pool_n": len(pool), "scored_n": len(res), "errors": errors, "treasure": tre, "surge": sur,
+    return {"date": D, "pool_n": len(pool), "scored_n": len(res), "errors": errors, "treasure": tre, "surge": sur, "pool_rule": "universe" if tm.get("universe") else "all", "uni_n": len(tm.get("universe") or []),
             "mkt_close": mk.get(D), "mkt_bias20": round(float(mkf["m_bias20"].iloc[-1]), 3) if len(mkf) and pd.notna(mkf["m_bias20"].iloc[-1]) else None,
             "mkt_pct": round(mkt_pct, 2)}
 
