@@ -70,6 +70,11 @@ RADAR_BT = {
     "y2026": {"A": {"n": 54, "hit": 0.537, "surge": 0.463, "win21": 0.741, "fin21": 20.43},
               "S3": {"n": 138, "hit": 0.362, "surge": 0.384, "win21": 0.587, "fin21": 11.17},
               "B": {"n": 870, "hit": 0.441, "surge": 0.391, "win21": 0.605, "fin21": 9.99}},
+    # 與雲端帳本「同一段期間」(推薦日 2026-07-01~09-03) 的樣本外回測 → 實際 (回填) 比它高的部分 ≈ 回填偏樂觀
+    "same": {"period": "2026-07~09",
+             "A": {"n": 43, "hit": 0.535, "surge": 0.465, "win21": 0.744, "fin21": 21.52},
+             "S3": {"n": 41, "hit": 0.341, "surge": 0.317, "win21": 0.512, "fin21": 6.37},
+             "B": {"n": 222, "hit": 0.311, "surge": 0.225, "win21": 0.514, "fin21": 1.91}},
 }
 # 特徵中文名與格式 (App learning.js TM_LABEL 同款；改這裡要一起改)
 FEAT_LABEL = {
@@ -693,7 +698,32 @@ def stats(prev: dict, tm: dict) -> dict:
             "surge": surge}
 
 
-def alerts(sc: dict, st: dict) -> list[dict]:
+CLOSE_ALERT_DAYS = 4   # 10-06：最近幾個日曆日內結案的訊號級推薦發「結案」提醒 (A/A+ 與飆股；B 級描述級不發)
+
+
+def close_alerts(prev: dict | None, ref: str | None = None) -> list[dict]:
+    """10-06：最近結案 (evalAt 在最新結案日往前 CLOSE_ALERT_DAYS 天內) 的 A/A+ 挖寶與飆股 → 「實際有沒有命中」主動告知。"""
+    if not prev:
+        return []
+    led = prev.get("ledger") or {}
+    rows = [("t", x) for x in led.get("treasure") or [] if x.get("tier") in ("A", "A+") and x.get("status") not in (None, "追蹤") and x.get("evalAt")] + \
+           [("s", x) for x in led.get("surge") or [] if x.get("status") not in (None, "追蹤") and x.get("evalAt")]
+    if not rows:
+        return []
+    last = ref or max(x["evalAt"] for _, x in rows)
+    lo = (pd.Timestamp(last) - pd.Timedelta(days=CLOSE_ALERT_DAYS)).strftime("%Y-%m-%d")
+    out = []
+    for kind, x in sorted(rows, key=lambda z: (z[1]["evalAt"], z[1]["code"]), reverse=True):
+        if x["evalAt"] < lo or x["evalAt"] > last:
+            continue
+        ok = x["status"] in ("命中", "飆")
+        head = (f"💎 挖寶 {x['tier']}" if kind == "t" else "🚀 飆股") + f" 結案 {'✓' if ok else '↩' if x['status'] == '回落' else '✗'} {x['status']}"
+        out.append({"level": "mid", "kind": "close", "code": x["code"], "name": x.get("name", ""), "date": x["evalAt"], "rec_date": x["date"], "radar": kind, "status": x["status"],
+                    "msg": f"{head}：{x['code']} {x.get('name', '')} ({x['date'][5:]} 推薦)" + (f" — {x['reason']}" if x.get("reason") else "") + "。歷史紀錄，非買賣建議。"})
+    return out[:6]
+
+
+def alerts(sc: dict, st: dict, prev: dict | None = None) -> list[dict]:
     out = []
     D = sc.get("date") or ""
     for r in [x for x in sc.get("treasure") or [] if x["tier"] in ("A+", "A")][:4]:
@@ -711,6 +741,10 @@ def alerts(sc: dict, st: dict) -> list[dict]:
             out.append({"level": "mid", "kind": "drift", "code": "", "date": D, "msg": f"⚠ 挖寶 {t} 級真實發布命中 {round(gp['rate'] * 100)}% ({gp['n']} 筆結案)，低於預期 55~57% 達 15pt 以上：請檢視模型"})
     if (st.get("surge") or {}).get("drift"):
         s = st["surge"]; out.append({"level": "mid", "kind": "drift", "code": "", "date": D, "msg": f"⚠ 飆股雷達上線飆股率 {round(s['rate'] * 100)}% (回測 {round(s['bt_hit'] * 100)}%，{s['done']} 筆)：實盤失準"})
+    try:
+        out += close_alerts(prev)
+    except Exception as e:  # noqa: BLE001
+        log.debug("close alerts: %s", e)
     return out
 
 
@@ -751,7 +785,7 @@ def build(date: str | None = None, do_scan: bool = True, backfill_days: int = 0)
     n_fetch = evaluate(prev, mk)
     st = stats(prev, tm)
     out = {"asof": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M:%S"), "scan": sc, "ledger": prev["ledger"], "scans": prev["scans"], "stats": st,
-           "alerts": alerts(sc, st | {"surge": {**(st.get("surge") or {}), "th_top10": ((tm.get("surge") or {}).get("th_top10"))}}),
+           "alerts": alerts(sc, st | {"surge": {**(st.get("surge") or {}), "th_top10": ((tm.get("surge") or {}).get("th_top10"))}}, prev),
            "model": {"radar_bt": RADAR_BT, "trained_at": tm.get("trained_at"), "th_A": tm.get("th_A"), "th_Aplus": tm.get("th_Aplus"), "oos": (tm.get("oos") or {}).get("tiers"), "surge_oos": (tm.get("surge") or {}).get("oos"),
                      "exit": tm.get("exit"), "surge_exit": (tm.get("surge") or {}).get("exit"), "entry": tm.get("entry"),
                      "expect_AAplus": list(EXPECT_AAPLUS), "note_tiers": NOTE_TIERS, "roles": dict(ROLE), "spec": "pr2 2026-10-05"},

@@ -288,6 +288,29 @@ def test_market_snapshot_does_not_cache_unpublished_day():
     assert writes == ["twse:mi_index_all2:20261005"], writes
 
 
+def test_close_alerts_recent_signal_rows():
+    """10-06：最近結案的 A/A+ 與飆股發「結案」提醒 (B 級不發)，文案寫結果與原因、不含交易指令。"""
+    with patched(TL, "bars", _fake_bars):
+        prev = TL.record(_fresh(), SC, TM)
+        _run_days(prev, 2)
+        early = {(a["radar"], a["code"]) for a in TL.close_alerts(prev)}
+        assert early == {("s", "9999")}, early          # 飆股第 1 天就先到 +20% → 先發
+        _run_days(prev, 22)
+    al = TL.close_alerts(prev)
+    codes = {(a["radar"], a["code"]) for a in al}
+    assert ("t", "1111") in codes and ("t", "3333") in codes, codes
+    assert ("s", "9999") not in codes, "超過 4 天前結案的不再提醒"
+    assert ("t", "2222") not in codes, "B 級不發結案提醒"
+    a1 = next(a for a in al if a["code"] == "1111")
+    assert a1["kind"] == "close" and a1["status"] == "命中" and "✓ 命中" in a1["msg"] and "第 2 天" in a1["msg"] and "非買賣建議" in a1["msg"], a1
+    for a in al:
+        for w in ("進場", "持有", "買進", "賣出", "加碼", "減碼"):
+            assert w not in a["msg"], (w, a["msg"])
+    assert all(a["date"] >= "2026-09-01" for a in al)
+    sc2 = dict(SC); out = TL.alerts(sc2, {}, prev)
+    assert any(a["kind"] == "close" for a in out)
+
+
 def _tiny_model():
     """兩棵樹：特徵 0 > 5 加分、特徵 1 < 0 加分；其餘特徵不影響。"""
     feats = ["ret20", "dd_hi60", "vola20"]
