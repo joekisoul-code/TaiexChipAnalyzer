@@ -472,6 +472,19 @@ def main() -> None:
             print("  pit_ledger: no rows from Pages / cache / local (first run?) — nothing written")
     except Exception as e:  # noqa: BLE001
         print("  pit_ledger failed:", e)
+    # 除權息預告表每日快照 (r7，2026-10-07)：證交所 TWT48U 沒有歷史 API → 從現在起每天存 (研究「推薦當天已公告的除息」用；App 不讀)；
+    # 同 pit_ledger：Pages 整站覆蓋 → 每次先帶回上一版 (fast 模式只帶回不抓)
+    try:
+        from chip.predict import exdiv_archive as _xd
+        _xd_path = DATA / "exdiv_announce.jsonl"
+        _xd_urls = (gov8.PAGES_URL.rstrip("/") + "/data/exdiv_announce.jsonl", "https://raw.githubusercontent.com/joekisoul-code/TaiexChipAnalyzer/gh-pages/data/exdiv_announce.jsonl")
+        _x0 = _xd.carry(_xd_path, _xd_urls)
+        if not args.fast:
+            print(f"  exdiv_announce: carried {_x0} → {_xd.snapshot(_xd_path)} snapshots")
+        elif _x0:
+            print(f"  exdiv_announce: carried over {_x0} snapshots")
+    except Exception as e:  # noqa: BLE001
+        print("  exdiv_announce failed:", e)
     # 操盤台 (2026-09-25)：0050/00631L/00663L/00981A/2330/065423 的均線、選擇權回檔機率帶、高低點承接價、價位帶、回撤控制價位、
     # 資金防守、八大行庫歸檔、00981A 持股、權證、2330 ADR。完整模式重算；fast 模式在清晨/當天第一次 (ADR) 或資料落後最後交易日時重算，其餘沿用上次發布
     def _prev_desk() -> dict:

@@ -357,6 +357,10 @@ def score_one(code: str, snap_row: dict, D: str, mkf: pd.DataFrame, tm: dict) ->
     bar = {"date": D, "open": r["open"] if r["open"] > 0 else r["close"], "high": r["high"] if r["high"] > 0 else r["close"], "low": r["low"] if r["low"] > 0 else r["close"],
            "close": r["close"], "volume": r["volume"] or (rows[-1]["volume"] if rows[-1]["date"] == D else 0), "amount": r["value"]}
     if rows[-1]["date"] == D:
+        yc = float(rows[-1]["close"] or 0)
+        if yc > 0 and r["close"] > 0 and abs(yc / r["close"] - 1) > PX_TOL:   # r7：回填日之後有配股/減資 → Yahoo 已縮放，MI 原始價換到同一基準 (否則 D 日假跳動)
+            k = yc / r["close"]
+            bar.update(open=bar["open"] * k, high=bar["high"] * k, low=bar["low"] * k, close=bar["close"] * k)
         rows[-1] = bar
     elif D > rows[-1]["date"]:
         rows.append(bar)
@@ -554,6 +558,43 @@ def _fin21_of(x: dict):
     return None
 
 
+PX_TOL = 0.01   # r7：推薦價 (證交所盤後原始收盤) 與 Yahoo 同日收盤差 >1% = Yahoo 事後因配股/減資把整段歷史回溯縮放 (09 筆實測 1.5~33%，其餘 <0.05%)
+PX_KEYS = ("status", "reason", "cur", "peak", "trough", "rel", "relMax", "days", "lastDate", "evalAt", "trail", "trailDate", "fin21", "fin21Date", "fin21_na",
+           "hitDay", "hitDate", "hitVal", "hitBy", "stopDay", "stopDate", "stopVal", "peakDay", "peakDate", "chk")
+
+
+def _bar_on(b: list[dict], d: str) -> dict | None:
+    return next((r for r in b if str(r["date"])[:10] == d and r.get("close")), None)
+
+
+def _basis(x: dict, b: list[dict]) -> float:
+    """r7 價格基準：帳本 entry 是證交所原始收盤，日 K 是 Yahoo (配股/減資後整段回溯縮放 → 假停損 / 假飆股，研究 r7/ledger F1)。
+    同一序列的推薦日收盤與 entry 差 >PX_TOL → 改用序列的推薦日收盤當報酬基準 (entry 本身不改，畫面仍顯示當天真實價)，記 px_adj = 比值。"""
+    e = float(x["entry"])
+    d0 = _bar_on(b, x["date"])
+    c0 = float(d0["close"]) if d0 else 0.0
+    if c0 > 0 and e > 0 and abs(c0 / e - 1) > PX_TOL:
+        x["px_adj"] = round(c0 / e, 4)
+        return c0
+    x.pop("px_adj", None)
+    return e
+
+
+def _px_repair(x: dict, b: list[dict]) -> bool:
+    """r7 一次性 (pxk=1)：已結案列若價格基準不一致，原結果存到 orig、重設為追蹤，交給 _eval_* 以正確基準重算 (停損日語意同每日對帳)。"""
+    x["pxk"] = 1
+    if x.get("status") in (None, "追蹤"):
+        return False
+    d0 = _bar_on(b, x["date"]); e = float(x["entry"]); c0 = float(d0["close"]) if d0 else 0.0
+    if not (c0 > 0 and e > 0 and abs(c0 / e - 1) > PX_TOL):
+        return False
+    x["orig"] = {k: x[k] for k in PX_KEYS if k in x}
+    for k in PX_KEYS:
+        x.pop(k, None)
+    x["status"] = "追蹤"; x["px_fix"] = 1
+    return True
+
+
 def _walk_treasure(since: list[dict], e: float, me, mk: dict) -> dict:
     """回測定義逐日走訪 (與原 _eval_treasure 迴圈同邏輯)；10-06 另記第一次達標 / 跌破 / 峰值的交易日序與日期，讓 App 能顯示「實際有沒有命中、哪天」。"""
     cm = -1e9; stop = False; reached = False; peak = -1e9; trough = 1e9; rel_max = -1e9; w: dict = {}
@@ -588,13 +629,13 @@ def _treasure_reason(st: str, w: dict, cur: float, H: int) -> str:
     return f"{H} 個交易日內未達 +6% / 贏大盤 4pt (峰值 {w['peak']:+.1f}%)"
 
 
-def _annotate_closed_treasure(x: dict, since: list[dict], mk: dict) -> None:
-    """已結案列補「第幾天」資訊 (一次性：chk=1)；狀態/數值不動。"""
+def _annotate_closed_treasure(x: dict, since: list[dict], mk: dict, e: float | None = None) -> None:
+    """已結案列補「第幾天」資訊 (一次性：chk=1)；狀態/數值不動。e = 價格基準 (r7；預設 entry)。"""
     n = int(x.get("days") or 0)
     if n <= 0 or len(since) < n:
         return
     me = x.get("mktEntry") or (mk.get(x["date"]) if x["date"] in mk else None)
-    w = _walk_treasure(since[:n], float(x["entry"]), me, mk)
+    w = _walk_treasure(since[:n], float(x["entry"]) if e is None else e, me, mk)
     for k in ("hitDay", "hitDate", "hitVal", "hitBy", "stopDay", "stopDate", "stopVal", "peakDay", "peakDate"):
         if k in w:
             x[k] = w[k]
@@ -606,7 +647,7 @@ def _annotate_closed_treasure(x: dict, since: list[dict], mk: dict) -> None:
 def _eval_treasure(x: dict, b: list[dict], mk: dict) -> None:
     """回測定義 (treasure.features 的 label)：21 交易日；峰值取收盤、停損取盤中低點 (先後順序)、相對大盤任一日 ≥ 4pt。
     pr2：fin21 = 第 21 個交易日收盤報酬，不論是否已停損 (停損後仍追到 21 日)；已結案列只補 fin21 (cur/peak/days 等結案值不動)。"""
-    e = float(x["entry"]); since = [r for r in b if str(r["date"])[:10] > x["date"] and r.get("close")][:T.H]
+    e = _basis(x, b); since = [r for r in b if str(r["date"])[:10] > x["date"] and r.get("close")][:T.H]
     if not since:
         return
     if len(since) >= T.H and x.get("fin21") is None:
@@ -615,7 +656,7 @@ def _eval_treasure(x: dict, b: list[dict], mk: dict) -> None:
         x["fin21_na"] = True      # 日 K 不足 (下市/停牌/資料斷)：不再重試
     if x.get("status") not in (None, "追蹤"):
         if x.get("chk") is None:      # 10-06：舊結案列補「第幾天達標/跌破」
-            _annotate_closed_treasure(x, since, mk)
+            _annotate_closed_treasure(x, since, mk, e)
         if x.get("trail") is None:   # 舊結案列 (理論上結案時已填)：補移動停利
             pk = e
             for r in since:
@@ -627,6 +668,8 @@ def _eval_treasure(x: dict, b: list[dict], mk: dict) -> None:
         return
     me = x.get("mktEntry") or (mk.get(x["date"]) if x["date"] in mk else None)
     w = _walk_treasure(since, e, me, mk)
+    if w["stop"] and (w.get("stopDay") or 0) < len(since):   # r7：每日對帳語意 = 停損當天結案 (晚對帳 / 重算時不用停損後的收盤；fin21 已另外用第 21 日)
+        since = since[:w["stopDay"]]; w = _walk_treasure(since, e, me, mk)
     stop, reached, peak, trough, rel_max = w["stop"], w["reached"], w["peak"], w["trough"], w["rel_max"]
     for k in ("hitDay", "hitDate", "hitVal", "hitBy", "stopDay", "stopDate", "stopVal", "peakDay", "peakDate"):
         if k in w:
@@ -677,7 +720,7 @@ def _surge_reason(st: str, w: dict, e: float) -> str:
 
 
 def _eval_surge(x: dict, b: list[dict]) -> None:
-    e = float(x["entry"]); since = [r for r in b if str(r["date"])[:10] > x["date"] and r.get("close")][:T.SURGE_N]
+    e = _basis(x, b); since = [r for r in b if str(r["date"])[:10] > x["date"] and r.get("close")][:T.SURGE_N]
     if not since:
         return
     w = _walk_surge(since, e)
@@ -703,13 +746,15 @@ def evaluate(prev: dict, mk: dict, max_fetch: int = 200, upto: str | None = None
     n = 0
     todo = []
     for x in prev["ledger"]["treasure"]:
-        if x.get("status") == "追蹤" or x.get("trail") is None or (x.get("fin21") is None and not x.get("fin21_na") and (x.get("days") or 0) < T.H) or x.get("chk") is None:
-            todo.append(("t", x))     # pr2：停損提早結案的列繼續追到第 21 日補 fin21；10-06：舊結案列補一次「第幾天」(chk)
+        need = x.get("status") == "追蹤" or x.get("trail") is None or (x.get("fin21") is None and not x.get("fin21_na") and (x.get("days") or 0) < T.H) or x.get("chk") is None
+        if need or x.get("pxk") is None:
+            todo.append(("t", x, need))     # pr2：停損提早結案的列繼續追到第 21 日補 fin21；10-06：舊結案列補一次「第幾天」(chk)
     for x in prev["ledger"]["surge"]:
-        if x.get("status") == "追蹤" or (x.get("trail") is None and (x.get("days") or 0) < T.SURGE_N) or x.get("chk") is None:
-            todo.append(("s", x))
+        need = x.get("status") == "追蹤" or (x.get("trail") is None and (x.get("days") or 0) < T.SURGE_N) or x.get("chk") is None
+        if need or x.get("pxk") is None:
+            todo.append(("s", x, need))   # r7：pxk = 價格基準一次性檢查 (配股/減資回溯縮放)；只檢查不需修的列不重算 (結果維持原樣)
     cache: dict[str, list] = {}
-    for kind, x in todo[:max_fetch * 2]:
+    for kind, x, need in todo[:max_fetch * 2]:
         if n >= max_fetch and x["code"] not in cache:
             break
         try:
@@ -724,6 +769,8 @@ def evaluate(prev: dict, mk: dict, max_fetch: int = 200, upto: str | None = None
                     ref = pd.Timestamp(upto) if upto else pd.Timestamp(dt.datetime.now(config.TZ).strftime("%Y-%m-%d"))
                     if (ref - pd.Timestamp(x["date"])).days > MAX_FIN21_WAIT_DAYS:
                         x["fin21_na"] = True
+                continue
+            if x.get("pxk") is None and not _px_repair(x, b) and not need:
                 continue
             (_eval_treasure(x, b, mk) if kind == "t" else _eval_surge(x, b))
         except Exception as e:  # noqa: BLE001
@@ -807,6 +854,12 @@ def stats(prev: dict, tm: dict) -> dict:
 # r6 10-07 各等級時點正確回測，訓練窗與正式相同 (2020 起) (A = 不含 A+；B = 不含 B+)：A+ 命中 65%、A 42%、B+ 43%、B 37% — 訊號主要在 A+ 與「大盤月線下的日子」
 RADAR_TIER = {'A+': {'n': 128, 'hit': 0.648, 'fin': 12.37, 'win21': 0.813}, 'A': {'n': 170, 'hit': 0.424, 'fin': 3.99, 'win21': 0.594}, 'B+': {'n': 483, 'hit': 0.432, 'fin': 4.42, 'win21': 0.56}, 'B': {'n': 5475, 'hit': 0.37, 'fin': 1.64, 'win21': 0.484}}
 RADAR_BT["path"], RADAR_BT["fail"], RADAR_BT["day0"], RADAR_BT["tiers"] = RADAR_PATH, RADAR_FAIL, RADAR_DAY0, RADAR_TIER
+# r7 (2026-10-07) 除息研究 (scratchpad r7/tr + 反方重跑)：回測/帳本用未還原收盤價；含息重算現行推薦 A∪A+ 命中 .520→.532、勝率 .688→.701
+# (10% 的 A 推薦 21 日內遇除息，6 月 A 命中 .12→.16、7 月 .49→.54)；改用含息報酬重新訓練 25 種子只 +0.7~1pt (與隨機擾動同級) → 不採用；
+# 股利特徵 (近 12 月殖利率等) 點估計 +3~4pt 但集中 2025 → 需更多資料 (已開始每日存除權息預告表 data/exdiv_announce.jsonl)
+RADAR_BT["div"] = {"A_hit": [0.520, 0.532], "A_win": [0.688, 0.701], "jun_hit": [0.119, 0.159], "jul_hit": [0.489, 0.539], "share": 0.101,
+                   "retrain": "改用含息報酬重新訓練：25 個種子平均只多 0.7~1 個百分點，和隨機擾動同級 → 不採用",
+                   "note": "回測與帳本用未還原收盤價 (除息日的下跌算虧損)；含息計算差異小，主要在 6~7 月"}
 CLOSE_ALERT_DAYS = 4   # 10-06：最近幾個日曆日內結案的訊號級推薦發「結案」提醒 (A/A+ 與飆股；B 級描述級不發)
 
 

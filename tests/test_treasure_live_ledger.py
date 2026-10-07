@@ -514,6 +514,98 @@ def test_score_one_skips_unadjusted_split():
         TL.bars = old
 
 
+
+def _days(start, n):
+    out, d = [], pd.Timestamp(start)
+    while len(out) < n:
+        d += pd.Timedelta(days=1)
+        if d.weekday() < 5:
+            out.append(d.strftime("%Y-%m-%d"))
+    return out
+
+
+def test_px_basis_anchor_and_repair():
+    """r7：Yahoo 事後因配股/減資把歷史回溯縮放 (推薦日收盤 90 vs 帳本 entry 100) → 以同一序列推薦日收盤當基準；
+    已結案的錯誤列一次性重算 (原結果存 orig)，停損日語意同每日對帳；差 <1% 不動。"""
+    ds = _days("2026-07-01", 25); D = ds[0]
+    # Yahoo 縮放後：推薦日 90，第 2 天盤中 84 (相對 90 = -6.7%，未破 -8%；相對原始 100 = -16% 假停損)，第 5 天收 96 (+6.7% 達標)，之後持平 97
+    closes = [90, 88, 87, 89, 92, 96] + [97] * 19
+    lows = [c - 1 for c in closes]; lows[2] = 84
+    b = [{"date": d, "open": c, "high": c + 1, "low": l, "close": c, "volume": 1000} for d, c, l in zip(ds, closes, lows)]
+    mk = {d: 1000.0 for d in ds}
+    x = {"code": "9001", "name": "測", "date": D, "entry": 100.0, "tier": "A", "status": "未命中", "cur": -16.0, "fin21": -3.0, "days": 2, "trail": -16.0, "chk": 1,
+         "reason": "第 2 天盤中跌破 -8%"}
+    prev = {"ledger": {"treasure": [x], "surge": []}}
+    with patched(TL, "bars", lambda code, years="2y": b):
+        TL.evaluate(prev, mk, max_fetch=10, upto=ds[-1])
+    assert x["px_adj"] == 0.9 and x["px_fix"] == 1 and x["pxk"] == 1 and x["orig"]["status"] == "未命中", x
+    assert x["status"] == "命中" and x["hitDay"] == 5 and abs(x["fin21"] - (97 / 90 - 1) * 100) < 0.01, x
+    assert x["entry"] == 100.0, "畫面顯示的推薦價不改"
+    # 一致的列：只做檢查、不重算 (結果維持原樣)
+    y = {"code": "9002", "date": D, "entry": 90.2, "tier": "A", "status": "回落", "cur": 1.0, "fin21": 7.5, "days": 21, "trail": 1.0, "chk": 1}
+    prev2 = {"ledger": {"treasure": [y], "surge": []}}
+    with patched(TL, "bars", lambda code, years="2y": b):
+        TL.evaluate(prev2, mk, max_fetch=10, upto=ds[-1])
+    assert y["pxk"] == 1 and "px_adj" not in y and y["status"] == "回落" and y["cur"] == 1.0 and "orig" not in y, y
+    # 停損日語意：晚對帳也以停損當天結案 (cur = 停損日收盤，days = 停損日序)
+    b2 = [dict(r) for r in b]; b2[3]["low"] = 70; b2[3]["close"] = 80
+    z = {"code": "9003", "date": D, "entry": 90.0, "tier": "A", "status": "追蹤"}
+    with patched(TL, "bars", lambda code, years="2y": b2):
+        TL.evaluate({"ledger": {"treasure": [z], "surge": []}}, mk, max_fetch=10, upto=ds[-1])
+    assert z["status"] == "未命中" and z["stopDay"] == 3 and z["days"] == 3 and abs(z["cur"] - (80 / 90 - 1) * 100) < 0.01, z
+
+
+def test_px_basis_surge_fake_surge_fixed():
+    """r7：減資回溯放大 (Yahoo 推薦日 133.3 vs 帳本 100) → 用原始 entry 會出現假飆股；改用同序列基準後不是飆股。"""
+    ds = _days("2026-07-01", 22); D = ds[0]
+    closes = [133.3] + [135.0] * 21
+    b = [{"date": d, "open": c, "high": c + 2, "low": c - 2, "close": c, "volume": 1000} for d, c in zip(ds, closes)]
+    x = {"code": "9004", "date": D, "entry": 100.0, "status": "飆", "cur": 35.0, "days": 1, "trail": 35.0, "chk": 1}
+    with patched(TL, "bars", lambda code, years="2y": b):
+        TL.evaluate({"ledger": {"treasure": [], "surge": [x]}}, {d: 1000.0 for d in ds}, max_fetch=10, upto=ds[-1])
+    assert x["status"] == "未飆" and x["px_fix"] == 1 and x["orig"]["status"] == "飆", x
+
+
+def test_score_one_rescaled_history_no_fake_jump():
+    """r7：回填日之後有配股/減資 → Yahoo 歷史已縮放，MI 原始價換到同一基準，不再出現 D 日假跳動 (原本 >11% 會被當壞資料略過、5~10% 會扭曲特徵)。"""
+    ds = _days("2026-03-01", 130); D = ds[-1]
+    rows = [{"date": d, "open": 50.0 + i * 0.01, "high": 50.5 + i * 0.01, "low": 49.5 + i * 0.01, "close": 50.0 + i * 0.01, "volume": 1000 + i} for i, d in enumerate(ds)]
+    mkf = pd.DataFrame({"date": ds, "m_close": 1000.0, "m_ret1": 0.0, "m_bias20": -1.0, "m_ret20": 0.0})
+    row = {"open": 100.0, "high": 101.0, "low": 99.0, "close": rows[-1]["close"] * 2, "volume": 5000, "value": 5e8}   # MI 原始價 = Yahoo 縮放後的 2 倍 (1:2 減資前)
+    with patched(TL, "bars", lambda code, years="2y": rows):
+        got = TL.score_one("9005", row, D, mkf, {"features": ["ret20", "m_bias20"], "trees": [], "init": 0.0, "th_A": 0.5, "gate": {"m_bias20_lt": 0.0}})
+    assert got is not None and abs(got["_x"]["ret20"]) < 5, got
+
+
+def test_exdiv_archive_parse_and_snapshot():
+    """r7：除權息預告表 (TWT48U) 每日快照：民國日期轉換、待公告 → None、同日覆蓋、抓不到不寫。"""
+    import json as _j
+    import tempfile
+    from chip.predict import exdiv_archive as XD
+    j = {"stat": "OK", "fields": ["除權除息日期", "股票代號", "名稱", "除權息", "無償配股率", "現金增資配股率", "現金增資認購價", "現金股利", "詳細資料"],
+         "data": [["115年10月15日", "1463", "強盛新", "息", "0.00000000", "0.00000000", "0.00000000", "0.12730000", "x"],
+                  ["115年10月20日", "1711", "永光", "權", "0.00000000", "0.09128214", "尚未公告", "0.00000000", "x"]]}
+    rows = XD.parse(j)
+    assert rows[0] == ["2026-10-15", "1463", "強盛新", "息", 0.0, 0.0, 0.0, 0.1273] and rows[1][6] is None, rows
+    for bad in ({"stat": "OK", "data": []}, {"stat": "很抱歉"}, None):
+        try:
+            XD.parse(bad); assert False, "should raise"
+        except LookupError:
+            pass
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "exdiv.jsonl"
+        assert XD.snapshot(path, cache=False, rows=rows, asof="2026-10-07") == 1
+        assert XD.snapshot(path, cache=False, rows=rows[:1], asof="2026-10-07") == 1, "同日覆蓋"
+        assert XD.snapshot(path, cache=False, rows=rows, asof="2026-10-08") == 2
+        old = XD.fetch
+        try:
+            XD.fetch = lambda: (_ for _ in ()).throw(LookupError("down"))
+            assert XD.snapshot(path, cache=False, asof="2026-10-09") == 2, "抓不到 → 不寫"
+        finally:
+            XD.fetch = old
+        lines = [_j.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines()]
+        assert [ln["ts"] for ln in lines] == ["2026-10-07", "2026-10-08"] and lines[0]["n"] == 1
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):
