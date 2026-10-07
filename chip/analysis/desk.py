@@ -977,7 +977,7 @@ def warrant_block(wpx: pd.DataFrame, upx: pd.DataFrame, uadj: pd.Series, ev: dic
     if out.get("vol_premium") is not None and out["vol_premium"] >= 15:
         flags.append(f"隱含波動比 20 日實現波動高 {out['vol_premium']:.0f} 點 (偏貴)")
     if (out.get("time_value_pct") or 0) > 50 and n_td < 25:
-        flags.append("時間價值佔一半以上且剩不到 25 個交易日：零漂移下持有到期期望值為負")
+        flags.append("時間價值佔一半以上且剩不到 25 個交易日：零漂移下放到到期期望值為負")
     if out.get("spread_pct") and out["spread_pct"] >= 2.3:
         flags.append("買賣價差 ≥2 檔：流動性差")
     out["flags"] = flags

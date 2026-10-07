@@ -43,6 +43,10 @@ TOUCH_TARGET = 0.20
 DEGRADE_ENABLED = False        # LC-01 連敗降級：被降級的叫牌反而命中更高 (夜盤 0.968 vs 保留 0.737，差 −0.231 [−0.312,−0.127]；不含夜盤 −0.105)；206 檢定 0 pass、16 顯著有害
 PLATT_ENABLED = False          # LC-02 線上 Platt：Brier 變差 (夜盤 −0.0049 [−0.0087,−0.0014] p 0.0008；不含夜盤 −0.0043)；不含夜盤 raw p_up 本身無斜率、夜盤 raw 已校準
 TOUCH_FACTOR_ENABLED = False   # LC-07 觸及率 sigma 乘數：加權走動式 pinball IV σ k1 −0.30% ns、k3 +0.99% 變差；乘數平均 1.003、sd 0.065 → 固定 1.0
+# r6 (2026-10-07 forecast3 F9 + 驗證)：水準自學 (level_bias → 預估收盤平移) 走動式 MSE ×1.004/1.008/1.011 (1/2/3 日)，多數年份變差、
+# 區塊 bootstrap CI 含 1、2026 中性 → 無益 → 停用 (shift 0)；統計值照算只供顯示/稽核 (summary.market.level_bias.*.adj_raw)。
+LEVEL_ADJ_ENABLED = False
+LEVEL_ADJ_NOTE = "停用：走動式驗證無益"
 BACKFILL_VER = "2026-09-24"   # 叫牌規則改變時換版本 → 舊回填紀錄 (僅 backfill=True) 移除並依新規則重算；真實發布紀錄永不改
 
 
@@ -375,12 +379,15 @@ def _touch_stats(rs: list[dict]) -> dict:
 def summarize(rows: list[dict]) -> dict:
     mk = [r for r in rows if r.get("kind") == "mkt" and not r.get("live")]
     out = {"market": {"by_h": {}, "touch": {}, "trend7": None, "recent": []}, "stocks": {}}
+    out["market"]["by_h_variant"] = {}
     for h in (1, 2, 3, 5, 10, 20):
         rs = [r for r in mk if r.get("h") == h]
         if rs:
             g = _group_stats(rs)
             g["by_variant"] = {v: _group_stats([r for r in rs if r.get("variant") == v]) for v in sorted({r.get("variant") or "" for r in rs}) if v}
             out["market"]["by_h"][str(h)] = g
+            # r6 C7：by_h 混合不含夜盤 (base) 與含夜盤 (night) 兩種叫牌 → 另給分開的表 (鍵與 by_h[h] 相同，不含巢狀 by_variant)；by_h 不變
+            out["market"]["by_h_variant"][str(h)] = {v: gv for v, gv in g["by_variant"].items()}
     for h in (1, 2, 3):
         out["market"]["touch"][str(h)] = _touch_stats([r for r in mk if r.get("h") == h])
     t7 = [r for r in mk if r.get("h") == 5 and r.get("trend7") and r.get("realized")]
@@ -404,6 +411,7 @@ def summarize(rows: list[dict]) -> dict:
     if hr_rows:
         out["market"]["hourly"] = {"all": _group_stats(hr_rows), "by_mark": {mk_: _group_stats([r for r in hr_rows if r.get("mark") == mk_]) for mk_ in sorted({r.get("mark") or "" for r in hr_rows}) if mk_}}
     # 水準偏誤 (即時修正)：近期「預估收盤 vs 實際收盤」的帶號誤差 (相對基準價 %)，指數衰減；下次預測依此微調水準
+    # (r6：LEVEL_ADJ_ENABLED=False → 只算統計，adj=0、原算值 adj_raw)
     lb = {}
     for h in (1, 2, 3):
         rs = [r for r in mk if r.get("h") == h and r.get("realized") and r.get("level") and r.get("base")]
@@ -413,7 +421,12 @@ def summarize(rows: list[dict]) -> dict:
             bias = float(np.dot(w, np.array(errs)) / w.sum()); mae = float(np.mean(np.abs(errs[-60:])))
             k = min(1.0, (len(errs) - 10) / 40)   # 10 筆開始、50 筆全信
             side = "低" if bias > 0 else "高"
-            lb[str(h)] = {"n": len(errs), "bias": round(bias, 3), "mae": round(mae, 3), "adj": round(bias * k * 0.5, 3), "note": f"近期預估收盤平均偏{side} {abs(bias):.2f}%，下次水準修正 {bias * k * 0.5:+.2f}%"}
+            adj_raw = round(bias * k * 0.5, 3)
+            if LEVEL_ADJ_ENABLED:
+                lb[str(h)] = {"n": len(errs), "bias": round(bias, 3), "mae": round(mae, 3), "adj": adj_raw, "note": f"近期預估收盤平均偏{side} {abs(bias):.2f}%，下次水準修正 {bias * k * 0.5:+.2f}%"}
+            else:   # r6：停用 → adj 0、原算值留 adj_raw
+                lb[str(h)] = {"n": len(errs), "bias": round(bias, 3), "mae": round(mae, 3), "adj": 0.0, "adj_raw": adj_raw, "enabled": False,
+                              "note": f"近期預估收盤平均偏{side} {abs(bias):.2f}%；水準修正{LEVEL_ADJ_NOTE} (原算 {adj_raw:+.2f}%，不套用)"}
     out["market"]["level_bias"] = lb
     rec = [r for r in mk if r.get("h") in (1, 2, 3, 5) and r.get("call") != "中性"][-40:]
     out["market"]["recent"] = [{"as_of": r["as_of"], "h": r["h"], "target": r.get("target") or (r["realized"] or {}).get("date"), "call": r["call"] + (r.get("strength") or ""),
@@ -435,7 +448,8 @@ def summarize(rows: list[dict]) -> dict:
 def adjust_forecast(fc: dict, summary: dict) -> dict:
     """依近期對帳結果把 recent_hit / recent_up_rate / recent_flag / learn_note 寫進 next_days 與 horizons (pr2：只顯示不調整)。
     DEGRADE_ENABLED / PLATT_ENABLED 為 True 時才走舊路徑 (call 改中性並留 call_model、寫 p_up_adj)；預設不寫 p_up_adj、不設 call_degraded，
-    App 的 `p_up_adj ?? p_up` 自動回到 raw p_up。level_bias 水準偏誤修正本輪未驗證、維持。"""
+    App 的 `p_up_adj ?? p_up` 自動回到 raw p_up。level_bias 水準偏誤修正：r6 起 LEVEL_ADJ_ENABLED=False → level 不動、level_adj_pct=0、
+    x["level_adj"]={enabled:False, shift_pct:0, raw_pct, bias, mae, n, note:"停用：走動式驗證無益"} 只供顯示。"""
     if not fc or fc.get("error"):
         return fc
     byh = (summary.get("market") or {}).get("by_h") or {}
@@ -477,11 +491,23 @@ def adjust_forecast(fc: dict, summary: dict) -> dict:
     lb = (summary.get("market") or {}).get("level_bias") or {}
     for x in fc.get("next_days") or []:
         b = lb.get(str(x.get("n")))
-        if b and b.get("adj") and _num(x.get("level")) and _num(fc.get("close")):
-            base_px = _num((fc.get("intraday") or {}).get("price")) or _num(fc.get("close"))
-            x["level_model"] = x["level"]
-            x["level"] = round(x["level"] + base_px * b["adj"] / 100)
-            x["level_adj_pct"] = b["adj"]; x["level_bias_note"] = b["note"]
+        if not b:
+            continue
+        if LEVEL_ADJ_ENABLED:
+            if b.get("adj") and _num(x.get("level")) and _num(fc.get("close")):
+                base_px = _num((fc.get("intraday") or {}).get("price")) or _num(fc.get("close"))
+                x["level_model"] = x["level"]
+                x["level"] = round(x["level"] + base_px * b["adj"] / 100)
+                x["level_adj_pct"] = b["adj"]; x["level_bias_note"] = b["note"]
+        else:
+            # r6 C6(d)：水準自學停用 → level 不動、平移 0；統計照給 (level_adj) 供顯示「停用：走動式驗證無益」
+            raw = b.get("adj_raw", b.get("adj"))
+            note = b.get("note") or ""
+            if LEVEL_ADJ_NOTE not in note:   # 舊版 summary (未經 r6 summarize) 的 note 寫「下次水準修正」→ 改寫
+                note = f"水準修正{LEVEL_ADJ_NOTE} (近期偏誤 {float(b.get('bias') or 0):+.2f}%，原算 {float(raw or 0):+.2f}%，不套用)"
+            x["level_adj_pct"] = 0.0
+            x["level_bias_note"] = note
+            x["level_adj"] = {"enabled": False, "shift_pct": 0.0, "raw_pct": raw, "bias": b.get("bias"), "mae": b.get("mae"), "n": b.get("n"), "note": LEVEL_ADJ_NOTE}
     if (summary.get("market") or {}).get("gap"):
         fc["gap_learn"] = summary["market"]["gap"]
     hr = (summary.get("market") or {}).get("hourly") or {}
@@ -489,9 +515,12 @@ def adjust_forecast(fc: dict, summary: dict) -> dict:
         fc["hourly_learn"] = {"all": {k: hr["all"].get(k) for k in ("n_calls", "hit_ewm", "hit20", "hit_all", "base_hit", "brier")}, "by_mark": {m: {k: v.get(k) for k in ("n_calls", "hit_ewm", "hit_all")} for m, v in (hr.get("by_mark") or {}).items()}}
     tt = (summary.get("market") or {}).get("touch") or {}
     fc["learn"] = {"touch_sigma_factor": {h: v.get("sigma_factor") for h, v in tt.items()},
-                   "flags": {"degrade": DEGRADE_ENABLED, "platt": PLATT_ENABLED, "touch_factor": TOUCH_FACTOR_ENABLED},
+                   "flags": {"degrade": DEGRADE_ENABLED, "platt": PLATT_ENABLED, "touch_factor": TOUCH_FACTOR_ENABLED, "level_adj": LEVEL_ADJ_ENABLED},
+                   "level_adj": {"enabled": LEVEL_ADJ_ENABLED, "shift_pct": None if LEVEL_ADJ_ENABLED else 0.0, "note": "" if LEVEL_ADJ_ENABLED else LEVEL_ADJ_NOTE,
+                                 "stats": {h: {k: v.get(k) for k in ("n", "bias", "mae", "adj", "adj_raw")} for h, v in lb.items()}},
                    "note": "依近期對帳只顯示不調整：recent_hit=近期實際命中、recent_up_rate=同期上漲率、recent_flag=近期相對長期 (below/above)；"
-                           "Platt (p_up_adj)/連敗降級 (call_degraded)/觸及率水準乘數 2026-10 起停用 (pr2 LC-01/02/07)；level_bias 水準偏誤修正本輪未驗證、維持"}
+                           "Platt (p_up_adj)/連敗降級 (call_degraded)/觸及率水準乘數 2026-10 起停用 (pr2 LC-01/02/07)；"
+                           + ("level_bias 水準偏誤修正維持" if LEVEL_ADJ_ENABLED else "level_bias 水準自學 2026-10-07 起停用 (走動式驗證無益，只顯示統計)")}
     return fc
 
 

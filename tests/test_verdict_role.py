@@ -4,7 +4,7 @@
     python -m pytest tests/test_verdict_role.py
 
 variant night → bucket_role == 'info'、verdict 無 ‧高共識/‧分歧 後綴、head 以信心分層領頭、action 不含「縮小部位」；
-variant base → 'filter'、head/action 字串與舊版相同 (迴歸)。
+variant base → 'filter'、head 字串與舊版相同 (迴歸)；action 自 r6 (2026-10-07) 改中性描述 (下緣/上緣參考、轉弱，無承接/減碼/停損/縮小部位)。
 """
 from __future__ import annotations
 
@@ -54,10 +54,11 @@ def test_night_mode_info_role():
     assert V["agree"] == 1 and V["disagree"] == 4 and V["net"] == -3 and V["bucket"] == "分歧"          # 票數仍算、仍輸出 (資訊)
     assert V["verdict"] == "偏多" and "‧" not in V["verdict"]
     assert V["head"] == "模型偏多強；信心分層 高 (歷史 90%，覆蓋 30%)；其他 6 票 淨 -3 (夜盤模式下票數不加分，僅供參考)", V["head"]
-    assert V["action"] == "拉回 49,189 附近承接，停損 48,962，目標 50,466", V["action"]
+    assert V["action"] == "下緣參考 49,189，跌破 48,962 轉弱，上緣 (一成機率) 50,466", V["action"]   # r6 中性用語
     assert "縮小部位" not in V["action"] and "縮小部位" not in V["head"] and "縮小部位" not in V["text"]
     assert V["conf_tier"] == "高" and V["conf_oos"] == CT["tiers"]["1_night"]["高"] and V["conf_hit"] == 0.903
-    assert V["oos"] == VT["tiers"]["1_night"]["bucket"]["分歧"]                                         # 桶的 OOS 仍附上 (資訊)
+    # 桶的 OOS 仍附上 (資訊)；r6：n=29 < 30 → hit/yr_min 為 null，原值留 hit_raw
+    assert V["oos"]["n"] == 29 and V["oos"]["hit"] is None and V["oos"]["yr_min"] is None and V["oos"]["hit_raw"] == 0.897 and V["oos"]["small_n"] is True
     assert V["call"] == "偏多" and V["call_action"] == "偏多"
     # 偏空 + 分歧 (夜盤) 也不加「不追空」
     with tables():
@@ -79,7 +80,7 @@ def test_base_mode_unchanged():
     assert len(V["votes"]) == 5 and V["agree"] == 0 and V["disagree"] == 4 and V["net"] == -4 and V["bucket"] == "分歧"
     assert V["verdict"] == "偏多‧分歧"
     assert V["head"] == "模型偏多強，其他 5 票同向 0、反向 4 (淨 -4) → 分歧；同狀況歷史 OOS 命中 46% (覆蓋 6%，逐年最低 23%)；信心分層 高 (61%)", V["head"]
-    assert V["action"] == "拉回 49,189 附近承接，停損 48,962，目標 50,466；訊號分歧：縮小部位、不追價", V["action"]
+    assert V["action"] == "下緣參考 49,189，跌破 48,962 轉弱，上緣 (一成機率) 50,466；訊號分歧：叫牌可信度較低", V["action"]   # r6 中性用語
     assert V["conf_tier"] == "高" and V["conf_oos"] == CT["tiers"]["1_base"]["高"]
     assert V["text"] == f"判斷總結：{V['verdict']}。{V['head']}。{V['action']}。"
     # 高共識 (全同向) 的後綴與 head 格式不變
@@ -98,7 +99,7 @@ def test_no_call_unchanged():
     # 既有行為：訊號共識把 cs 轉 1 → bucket 以 net=0 落在「一般」、oos 換成未叫牌表 (不改)
     assert V["verdict"] == "偏多‧訊號共識" and V["call_action"] == "偏多" and V["bucket"] == "一般" and V["bucket_role"] == "filter" and V["conf_tier"] is None and V["conf_oos"] is None
     assert V["oos"] == {"n": 61, "hit": 0.705, "cov": None, "yr_min": 0.45}
-    assert "模型無叫牌但 5 票中淨多 4" in V["head"] and V["action"] == "拉回 49,189 附近承接，停損 48,962，目標 50,466"
+    assert "模型無叫牌但 5 票中淨多 4" in V["head"] and V["action"] == "下緣參考 49,189，跌破 48,962 轉弱，上緣 (一成機率) 50,466"
 
 
 def test_learn_extra_uses_recent_flag():

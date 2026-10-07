@@ -275,18 +275,18 @@ def combined_view(chip_smooth: float, chip_regime: str, rt_score: float, rt_labe
     else:
         pre = ""
     if chip_bull and rt_bull:
-        return pre + "籌碼偏多 + 盤勢強：順勢，可依計畫加碼，拉回 5 日線為進場點。"
+        return pre + "籌碼偏多 + 盤勢強：多方共振，5 日線為短線支撐參考。"   # r6：中性描述 (原含加碼/進場點)
     if chip_bull and rt_bear:
-        return pre + "籌碼偏多但盤勢弱：多頭拉回，不急著停損；若收盤跌破月線且量增再減碼。"
+        return pre + "籌碼偏多但盤勢弱：多頭拉回型態；收盤跌破月線且量增則轉弱。"
     if chip_bear and rt_bull:
-        return pre + "籌碼偏空但盤勢強：反彈性質，不追高；等籌碼 (外資/期貨) 轉向再確認。"
+        return pre + "籌碼偏空但盤勢強：反彈性質；籌碼 (外資/期貨) 尚未轉向。"
     if chip_bear and rt_bear:
-        return pre + "籌碼偏空 + 盤勢弱：空方共振，避免進場，已持股者控管部位。"
+        return pre + "籌碼偏空 + 盤勢弱：空方共振。"
     if rt_bull:
-        return pre + "籌碼中性、盤勢偏強：可小量試單，依收盤籌碼再決定加碼。"
+        return pre + "籌碼中性、盤勢偏強：方向待收盤籌碼確認。"
     if rt_bear:
-        return pre + "籌碼中性、盤勢偏弱：觀望，等待止跌訊號。"
-    return pre + "籌碼與盤勢皆中性：區間操作或觀望。"
+        return pre + "籌碼中性、盤勢偏弱：止跌訊號尚未出現。"
+    return pre + "籌碼與盤勢皆中性：區間整理。"
 
 
 # ------------------------------------------------------------------ 警示

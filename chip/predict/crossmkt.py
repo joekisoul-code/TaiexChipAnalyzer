@@ -137,7 +137,7 @@ def build(matrix: pd.DataFrame) -> dict:
         "台股 5 日落後 KOSPI >3% (補漲)": (g("rel_kospi5") < -3, "fwd5", "跨市場"), "KOSPI 同日 >2%": (g("kospi_r0") > 2, "fwd1", "跨市場"), "KOSPI 同日 <-2%": (g("kospi_r0") < -2, "fwd1", "跨市場"),
         "恆生同日 >2%": (g("hsi_r0") > 2, "fwd1", "跨市場"), "恆生同日 <-2%": (g("hsi_r0") < -2, "fwd1", "跨市場"), "VIX >30 (20 日)": (g("g_vix_level") > 30, "fwd20", "跨市場"),
         "VIX 5 日升 >30% (5 日)": (g("g_vix_r5") > 30, "fwd5", "跨市場"), "費半前晚 >3%": (g("g_sox_r1") > 3, "fwd1", "跨市場"), "EWT 前晚 >2%": (g("g_ewt_r1") > 2, "fwd1", "跨市場"), "S&P 前晚 <-2%": (g("g_sp500_r1") < -2, "fwd1", "跨市場"),
-        "聰明錢 z<-1 且散戶加碼 (5 日)": (g("smart_spread") < -1, "fwd5", "主力"), "聰明錢 z>1 且散戶減碼 (5 日)": (g("smart_spread") > 1, "fwd5", "主力"),
+        "聰明錢 z<-1 且散戶融資增加 (5 日)": (g("smart_spread") < -1, "fwd5", "主力"), "聰明錢 z>1 且散戶融資減少 (5 日)": (g("smart_spread") > 1, "fwd5", "主力"),
         "聰明錢 v2 >1.5 (5 日)": (g("smart2") > 1.5, "fwd5", "主力"), "聰明錢 v2 >1.5 (20 日)": (g("smart2") > 1.5, "fwd20", "主力"), "聰明錢 v2 <-1.5 (5 日)": (g("smart2") < -1.5, "fwd5", "主力"), "聰明錢 v2 <-1.5 (20 日)": (g("smart2") < -1.5, "fwd20", "主力"),
         "選擇權外資買賣權差 z>1 (10 日)": (g("txo_f_cp_diff_z") > 1, "fwd20", "主力"), "選擇權外資買賣權差 z<-1 (10 日)": (g("txo_f_cp_diff_z") < -1, "fwd20", "主力"),
         "外資現貨賣、期貨增倉 (背離,5 日)": ((g("foreign_z5") < -1) & (g("fut_foreign_chg5_z") > 1), "fwd5", "主力"), "外資現貨買、期貨減倉 (背離,5 日)": ((g("foreign_z5") > 1) & (g("fut_foreign_chg5_z") < -1), "fwd5", "主力"),
@@ -168,7 +168,7 @@ def build(matrix: pd.DataFrame) -> dict:
             corr[name] = {"all": round(float(dd["x"].corr(dd["y"])), 2), "recent2y": round(float(recent["x"].corr(recent["y"])), 2) if len(recent) > 60 else None, "last60": round(float(roll["x"].corr(roll["y"])), 2) if len(roll) > 30 else None}
     s2 = today.get("smart2")
     smart2_txt = ("" if s2 is None else f"聰明錢 v2 {s2:+.2f}：" + ("強力偏多 (前 20% 區，歷史 5/10/20 日上漲 64/67/68%)" if s2 > 1.5 else "偏多" if s2 > 0.5 else "偏空 (後 20% 區，歷史 58/60/64%)" if s2 < -1.5 else "偏空" if s2 < -0.5 else "中性"))
-    smart_txt = ("聰明錢 (外資現貨+期貨) 明顯強於散戶 (融資)" if (today["smart_spread"] or 0) > 1 else "散戶加碼快於聰明錢 (歷史上 5 日偏弱，9/9 年)" if (today["smart_spread"] or 0) < -1 else "聰明錢與散戶差距不大")
+    smart_txt = ("聰明錢 (外資現貨+期貨) 明顯強於散戶 (融資)" if (today["smart_spread"] or 0) > 1 else "散戶融資增加快於聰明錢 (歷史上 5 日偏弱，9/9 年)" if (today["smart_spread"] or 0) < -1 else "聰明錢與散戶差距不大")
     return {"generated": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M:%S"), "today": today, "active": active, "findings": findings, "lead_lag": lead, "corr": corr,
             "text": {"smart": smart_txt, "smart2": smart2_txt,
                      "kospi": (f"台股 5 日相對 KOSPI {today['rel_kospi5']:+.1f}%" + ("，落後 >3% → 歷史 5 日補漲 64% (13 年 77% 一致)" if (today["rel_kospi5"] or 0) < -3 else "，領先 >3% 無對稱效果 (不算訊號)" if (today["rel_kospi5"] or 0) > 3 else "")) if today["rel_kospi5"] is not None else "",

@@ -139,7 +139,7 @@ def build(scored: pd.DataFrame, night=None) -> dict | None:
     text = (f"後五日 (交易日)：{call}。訊號淨票 {net:+d} (多 {sum(1 for v in votes if v['s'] > 0)} / 空 {sum(1 for v in votes if v['s'] < 0)})"
             + (f"；同淨票歷史五日上漲率 {bn['up']:.0%} (n={bn['n']}，年 {bn['yr_min']:.0%}~{bn['yr_max']:.0%})" if bn else "")
             + (f"；規則整體：{'偏多' if call == '偏多' else '偏空'}叫牌樣本外命中 {stt['hit']:.0%} (覆蓋 {stt['cov']:.0%}，逐年最低 {stt['yr_min']:.0%})" if call != "中性" and stt.get("hit") else (f"；基準五日上漲 {st['base_up']:.0%}" if call == "中性" else ""))
-            + ("；研究顯示五日空方無穩定邏輯，不建議放空" if call != "偏空" and net < 0 else ""))
+            + ("；研究顯示五日空方無穩定邏輯，空方訊號不採用" if call != "偏空" and net < 0 else ""))
     strength, strong = "", None
     if call == "偏多" and net >= STRONG_NET:
         rows_ = [v for k, v in (st.get("by_net") or {}).items() if int(k) >= STRONG_NET and v.get("n")]

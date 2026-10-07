@@ -324,7 +324,7 @@ def buy_points(df: pd.DataFrame, flow_col: str = "gov8_net", width: float = MARK
         return RULES[k].format(w=zone_window, n=TOP_N, tol=tol * 100).replace("[賣訊] ", "").split(" 且")[0]
 
     if fired:
-        state, text = "dip_buy", "官股逢跌加碼中 (" + "、".join(_short(k) for k in fired) + ")"
+        state, text = "dip_buy", "官股逢跌買超中 (" + "、".join(_short(k) for k in fired) + ")"
     elif sells:
         state, text = "trim", "官股高檔調節 (" + "、".join(_short(k) for k in sells) + ")"
     elif vs60 is not None and vs60 < -10:
@@ -332,7 +332,7 @@ def buy_points(df: pd.DataFrame, flow_col: str = "gov8_net", width: float = MARK
     elif vs20 is not None and vs20 >= 0:
         state, text = "above_cost", f"現價高於官股 20 日成本 {_fmt(c20, unit)} ({vs20:+.1f}%)，官股部位獲利中"
     elif vs20 is not None:
-        state, text = "below_cost", f"現價低於官股 20 日成本 {_fmt(c20, unit)} ({vs20:+.1f}%)，官股今日未加碼"
+        state, text = "below_cost", f"現價低於官股 20 日成本 {_fmt(c20, unit)} ({vs20:+.1f}%)，官股今日未買超"
     else:
         state, text = "na", "官股成本資料不足"
     warn = f"官股套牢 {vs60:+.1f}%" if vs60 is not None and vs60 < -10 else None

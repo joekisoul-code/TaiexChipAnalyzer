@@ -81,7 +81,7 @@ async function loadMarket() {
   $("#mk-head").innerHTML = `<div class="gauge ${cls(A.composite_smooth)}">${fmt(A.composite_smooth, 1, true)}</div>
     <div><span class="pill">${A.regime}</span><span class="pill">${A.state}</span><span class="pill">信心度 ${conf} ${A.confidence}</span><span class="pill">動能 ${fmt(A.momentum, 0, true)}</span></div>
     <div class="big" style="margin:8px 0 4px">${A.action}</div><div class="note">${A.detail}</div>
-    <div style="margin-top:6px">建議持股水位 <b>${A.position}</b>　資料日 ${A.date}　收盤 ${fmt(A.close, 2)}</div>
+    <div style="margin-top:6px">籌碼強度 <b>${A.position}</b>　資料日 ${A.date}　收盤 ${fmt(A.close, 2)}</div>
     ${A.turning ? `<div class="pill warn">🔀 ${A.turning}</div>` : ""}
     ${A.bottom_signals.length ? `<div style="margin-top:6px">底部訊號：${A.bottom_signals.map((x) => `<span class="pill buy">${x}</span>`).join("")}</div>` : ""}
     ${A.top_risks.length ? `<div style="margin-top:6px">高檔風險：${A.top_risks.map((x) => `<span class="pill sell">${x}</span>`).join("")}</div>` : ""}`;

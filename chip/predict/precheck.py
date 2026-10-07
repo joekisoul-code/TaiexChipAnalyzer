@@ -50,6 +50,71 @@ def _events_for(dates: list[str]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _cell(gg: pd.DataFrame, b, bull) -> dict:
+    """一個 (跳空桶, 多空) 格的統計；gg 需有 fill/cont/hold/dip/pop/intra/ret/rng/year 欄 (方向定義由呼叫端決定)。"""
+    yr = gg.groupby("year")["cont"].mean(); yr = yr[gg.groupby("year").size() >= 5]
+    cont = float(gg["cont"].mean())
+    hy = gg.groupby("year")["hold"].agg(["mean", "size"]); hy = hy[hy["size"] >= 8]
+    hd = gg[gg["hold"] == True]  # noqa: E712
+    extra_ = {"hold_yr_min": round(float(hy["mean"].min()), 2) if len(hy) else None, "hold_yr_max": round(float(hy["mean"].max()), 2) if len(hy) else None, "hold_years": int(len(hy)),
+              "hold_recent": round(float(gg[gg["year"] >= gg["year"].max() - 2]["hold"].mean()), 3), "n_recent": int((gg["year"] >= gg["year"].max() - 2).sum()),
+              "dip_hold_q20": round(float(hd["dip"].quantile(0.2)), 2) if len(hd) >= 10 else None, "dip_hold_q50": round(float(hd["dip"].median()), 2) if len(hd) >= 10 else None,
+              "pop_hold_q50": round(float(hd["pop"].median()), 2) if len(hd) >= 10 else None,
+              "dip_fail_q50": round(float(gg[gg["hold"] == False]["dip"].median()), 2) if (gg["hold"] == False).sum() >= 10 else None}  # noqa: E712
+    return {"label": GAP_LABELS[int(b)], "regime": "多頭 (前收在月線上)" if bull else "空頭 (前收在月線下)", "n": int(len(gg)), "p_fill": round(float(gg["fill"].mean()), 3), "p_cont": round(cont, 3),
+            "p_hold": round(float(gg["hold"].mean()), 3), "intra_mean": round(float(gg["intra"].mean()), 3), "intra_med": round(float(gg["intra"].median()), 3), "intra_p20": round(float(gg["intra"].quantile(0.2)), 2), "intra_p80": round(float(gg["intra"].quantile(0.8)), 2),
+            "ret_mean": round(float(gg["ret"].mean()), 3), "p_up_close": round(float((gg["ret"] > 0).mean()), 3), "range_mean": round(float(gg["rng"].mean()), 2),
+            "cont_yr_cons": round(float(((yr >= 0.5) == (cont >= 0.5)).mean()), 2) if len(yr) else None, "years": int(len(yr)), **extra_}
+
+
+EST_BETA_WIN = 250      # r6 估計跳空表：滾動 β 視窗 (與 build 的「近一年 β」同長)，至少 120 列，往後移一日 (只用前一日以前的資料)
+EST_BETA_MIN = 120
+
+
+def _est_cells(m: pd.DataFrame) -> tuple[dict, dict]:
+    """r6 (2026-10-07 honesty gap_flat_fill)：開盤前 App 用「β × 夜盤」的估計跳空查表，舊表卻以實際跳空分組 →
+    估計平盤 (±0.15%) 日顯示回補 79%，實際只有 66% (2017-11~2026-10，n=756，逐年皆低於 79%)。
+    這裡以時點正確的估計跳空分組：β_t = 前 250 個有夜盤日 (至少 120) 的 cov/var，往後移一日；est = β_t × clip(夜盤, ±8)。
+    方向定義：估計平盤格沿用實際跳空方向 (與實際表同)；估計開高/開低格以估計方向 (回補 = 觸及前收、守住 = 收盤仍在前收同側)。
+    m = d 與夜盤合併後的列 (需 date/open/high/low/close/prev/gap/intra/ret/rng/year/bull/ma20/night_chg_pct，|夜盤| ≤ 8)。"""
+    m = m.dropna(subset=["gap", "intra", "ma20", "night_chg_pct"]).sort_values("date").reset_index(drop=True)
+    x, y = m["night_chg_pct"].astype(float), m["gap"].astype(float)
+    cov = x.rolling(EST_BETA_WIN, min_periods=EST_BETA_MIN).cov(y).shift(1)
+    var = x.rolling(EST_BETA_WIN, min_periods=EST_BETA_MIN).var().shift(1)
+    m["beta_pit"] = cov / var
+    m = m.dropna(subset=["beta_pit"]).reset_index(drop=True)
+    meta = {"n": int(len(m)), "start": str(m["date"].iloc[0]) if len(m) else None, "end": str(m["date"].iloc[-1]) if len(m) else None,
+            "beta": f"滾動 {EST_BETA_WIN} 日 (至少 {EST_BETA_MIN}) cov/var，往後移一日", "night_clip": 8}
+    if not len(m):
+        return {}, meta
+    m["est"] = m["beta_pit"] * m["night_chg_pct"].clip(-8, 8)
+    m["bucket"] = np.searchsorted(GAP_EDGES, m["est"].values, side="right")
+    flat = m["bucket"] == 3
+    s_act = np.sign(m["gap"]); s_est = np.where(m["bucket"] > 3, 1.0, -1.0)
+    up_a = m["gap"] > 0
+    fill_a = np.where(up_a, m["low"] <= m["prev"], m["high"] >= m["prev"])
+    # r6 review：估計平盤格 build() 文字寫「收盤高於開盤 p_cont」→ p_cont 直接用 close>open
+    # (實際表 flat 格的 p_cont 是「延續微小實際跳空方向」，空頭 54% vs 真正收盤高於開盤 45%，標籤不符；實際表維持不動)
+    cont_a = (m["close"] > m["open"]).values
+    hold_a = np.where(up_a, m["close"] > m["prev"], np.where(m["gap"] < 0, m["close"] < m["prev"], m["close"] > m["prev"]))
+    fill_e = np.where(s_est > 0, m["low"] <= m["prev"], m["high"] >= m["prev"])
+    cont_e = np.where(s_est > 0, m["close"] > m["open"], m["close"] < m["open"])
+    hold_e = np.where(s_est > 0, m["close"] > m["prev"], m["close"] < m["prev"])
+    m["fill"] = np.where(flat, fill_a, fill_e); m["cont"] = np.where(flat, cont_a, cont_e); m["hold"] = np.where(flat, hold_a, hold_e)
+    m["dip"] = (m["low"] / m["open"] - 1) * 100; m["pop"] = (m["high"] / m["open"] - 1) * 100
+    meta["flat_share"] = round(float(flat.mean()), 3)
+    meta["sign_agree"] = round(float((s_act[~flat] == s_est[~flat]).mean()), 3) if (~flat).any() else None
+    cells = {}
+    for (b, bull), gg in m.groupby(["bucket", "bull"]):
+        if len(gg) < 20:
+            continue
+        c = _cell(gg, b, bull)
+        c["basis"] = "est"
+        c["same_bucket_actual"] = round(float((np.searchsorted(GAP_EDGES, gg["gap"].values, side="right") == int(b)).mean()), 3)
+        cells[f"{int(b)}|{'bull' if bull else 'bear'}"] = c
+    return cells, meta
+
+
 def train(scored: pd.DataFrame, write: bool = True, verbose: bool = True) -> dict:
     d = scored[["date", "open", "high", "low", "close"]].copy().reset_index(drop=True)
     d["date"] = d["date"].astype(str).str[:10]
@@ -73,20 +138,7 @@ def train(scored: pd.DataFrame, write: bool = True, verbose: bool = True) -> dic
     for (b, bull), gg in g.groupby(["bucket", "bull"]):
         if len(gg) < 20:
             continue
-        yr = gg.groupby("year")["cont"].mean(); yr = yr[gg.groupby("year").size() >= 5]
-        cont = float(gg["cont"].mean())
-        hy = gg.groupby("year")["hold"].agg(["mean", "size"]); hy = hy[hy["size"] >= 8]
-        hd = gg[gg["hold"] == True]  # noqa: E712
-        extra_ = {"hold_yr_min": round(float(hy["mean"].min()), 2) if len(hy) else None, "hold_yr_max": round(float(hy["mean"].max()), 2) if len(hy) else None, "hold_years": int(len(hy)),
-                  "hold_recent": round(float(gg[gg["year"] >= gg["year"].max() - 2]["hold"].mean()), 3), "n_recent": int((gg["year"] >= gg["year"].max() - 2).sum()),
-                  "dip_hold_q20": round(float(hd["dip"].quantile(0.2)), 2) if len(hd) >= 10 else None, "dip_hold_q50": round(float(hd["dip"].median()), 2) if len(hd) >= 10 else None,
-                  "pop_hold_q50": round(float(hd["pop"].median()), 2) if len(hd) >= 10 else None,
-                  "dip_fail_q50": round(float(gg[gg["hold"] == False]["dip"].median()), 2) if (gg["hold"] == False).sum() >= 10 else None}  # noqa: E712
-        out["gap"]["cells"][f"{int(b)}|{'bull' if bull else 'bear'}"] = {
-            "label": GAP_LABELS[int(b)], "regime": "多頭 (前收在月線上)" if bull else "空頭 (前收在月線下)", "n": int(len(gg)), "p_fill": round(float(gg["fill"].mean()), 3), "p_cont": round(cont, 3),
-            "p_hold": round(float(gg["hold"].mean()), 3), "intra_mean": round(float(gg["intra"].mean()), 3), "intra_med": round(float(gg["intra"].median()), 3), "intra_p20": round(float(gg["intra"].quantile(0.2)), 2), "intra_p80": round(float(gg["intra"].quantile(0.8)), 2),
-            "ret_mean": round(float(gg["ret"].mean()), 3), "p_up_close": round(float((gg["ret"] > 0).mean()), 3), "range_mean": round(float(gg["rng"].mean()), 2),
-            "cont_yr_cons": round(float(((yr >= 0.5) == (cont >= 0.5)).mean()), 2) if len(yr) else None, "years": int(len(yr)), **extra_}
+        out["gap"]["cells"][f"{int(b)}|{'bull' if bull else 'bear'}"] = _cell(gg, b, bull)
     # 夜盤 → 跳空 β (2020~ 有夜盤資料的日子)
     try:
         from . import short_term as ST
@@ -104,6 +156,13 @@ def train(scored: pd.DataFrame, write: bool = True, verbose: bool = True) -> dic
                 big = np.abs(x) > 0.5
                 out["gap"]["night_beta"] = {"beta": round(beta, 3), "beta_recent": round(beta_r, 3), "n": int(len(m)), "resid_sd": round(float(resid.std()), 3), "r2": round(float(1 - resid.var() / y.var()), 3),
                                             "by_year": by_year, "dir_agree_big": round(float((np.sign(x[big]) == np.sign(y[big])).mean()), 3), "n_big": int(big.sum())}
+                # r6：開盤前 (估計跳空) 用的時點正確估計跳空分組表；盤中 (實際開盤) 仍用上面的 cells
+                try:
+                    ce, cm = _est_cells(m)
+                    if ce:
+                        out["gap"]["cells_est"], out["gap"]["est_meta"] = ce, cm
+                except Exception as e:  # noqa: BLE001
+                    log.warning("precheck est cells: %s", e)
     except Exception as e:  # noqa: BLE001
         log.warning("night beta: %s", e)
     # 日曆效應
@@ -128,6 +187,11 @@ def train(scored: pd.DataFrame, write: bool = True, verbose: bool = True) -> dic
         nb = out["gap"].get("night_beta"); print(f"  跳空 β(夜盤→跳空) {nb}")
         for k, c in list(out["gap"]["cells"].items())[:14]:
             print(f"  跳空 {c['label']} {c['regime'][:2]}: n={c['n']} 回補 {c['p_fill']} 續走 {c['p_cont']} (年一致 {c['cont_yr_cons']}) 守住 {c['p_hold']} 日內 {c['intra_mean']:+.2f}% 收漲 {c['p_up_close']}")
+        if out["gap"].get("cells_est"):
+            print(f"  估計跳空表 {out['gap'].get('est_meta')}")
+            for k, c in out["gap"]["cells_est"].items():
+                a = out["gap"]["cells"].get(k) or {}
+                print(f"  [估計] {c['label']} {c['regime'][:2]}: n={c['n']} 回補 {c['p_fill']} (實際表 {a.get('p_fill')}) 守住 {c['p_hold']} (實際表 {a.get('p_hold')})")
     if write:
         M.save_json("precheck", out)
     return out
@@ -214,27 +278,45 @@ def build(scored: pd.DataFrame, snap: dict | None, fc: dict | None, us_px=None, 
                 est, src = bu * float(np.clip(float(tn["change_pct"]), -8, 8)), f"夜盤進行中 {float(tn['change_pct']):+.2f}% × 近一年 β {bu} (暫定)"
     if est is not None:
         b = int(np.searchsorted(GAP_EDGES, est, side="right"))
-        cell = (st["gap"]["cells"] or {}).get(f"{b}|{'bull' if bull else 'bear'}") or {}
+        key = f"{b}|{'bull' if bull else 'bear'}"
+        cell_act = (st["gap"]["cells"] or {}).get(key) or {}
+        cell_est = (st["gap"].get("cells_est") or {}).get(key) or {}
+        # r6 (honesty gap_flat_fill)：開盤前 (估計跳空) 用估計跳空分組表；盤中實際開盤已知 → 實際跳空表。估計表缺 (舊 precheck.json / 格 n<20) → 實際表
+        estimated = src != "實際開盤"
+        table = "est" if (estimated and cell_est) else "actual"
+        cell = cell_est if table == "est" else cell_act
         if cell:
             up = est > 0.15; dn = est < -0.15
-            txt = (f"預估開盤{'跳空' if (up or dn) else '平盤附近'} {est:+.2f}% ({src})，{cell['regime']}下歷史同狀況 {cell['n']} 次："
+            basis = "，以夜盤估計跳空分組" if table == "est" else ""
+            txt = (f"預估開盤{'跳空' if (up or dn) else '平盤附近'} {est:+.2f}% ({src})，{cell['regime']}下歷史同狀況 {cell['n']} 次{basis}："
                    + (f"當日回補跳空機率 {cell['p_fill']:.0%}、收盤高於開盤 {cell['p_cont']:.0%}、收盤守住跳空 {cell['p_hold']:.0%}" if up else
                       f"當日回補跳空 (反彈到前收) 機率 {cell['p_fill']:.0%}、收盤低於開盤 (續跌) {cell['p_cont']:.0%}、收盤仍低於前收 {cell['p_hold']:.0%}" if dn else
-                      f"收盤高於開盤 {cell['p_cont']:.0%}")
+                      (f"當日回補 (回到前收) {cell['p_fill']:.0%}、收盤高於開盤 {cell['p_cont']:.0%}" if table == "est" else f"收盤延續開盤方向 {cell['p_cont']:.0%}"))   # r6：實際表平盤格 p_cont = 延續微小實際跳空方向，不是「收盤高於開盤」
                    + f"；日內 (開→收) 平均 {cell['intra_mean']:+.2f}% (兩成~八成 {cell['intra_p20']:+.2f}~{cell['intra_p80']:+.2f}%)、收盤上漲率 {cell['p_up_close']:.0%}、平均振幅 {cell['range_mean']:.2f}%")
             if cell.get("dip_hold_q50") is not None and (up or dn):
                 txt += f"；守住日的日內回檔中位 {cell['dip_hold_q50']:+.2f}%、兩成 {cell['dip_hold_q20']:+.2f}% (未守住日中位 {cell['dip_fail_q50']:+.2f}%)"
             if cell.get("hold_years"):
                 txt += f"；守住率逐年 {cell['hold_yr_min']:.0%}~{cell['hold_yr_max']:.0%} ({cell['hold_years']} 年)，近三年 {cell['hold_recent']:.0%} (n={cell['n_recent']})"
+            # r6：中性描述 (原「不追開盤價 / 進場點 / 短線買點 / 減碼點」)
             if up and cell["p_fill"] >= 0.5:
-                txt += " → 開高後多半會回測前收，不追開盤價，等回補再看是否守住"
+                txt += " → 開高後多半會回測前收，回測後能否守住前收為觀察點"
             elif up and cell["p_hold"] >= 0.6:
-                txt += f" → 開高守住機率高，開盤價下 {abs(cell.get('dip_hold_q50') or 0.2):.1f}~{abs(cell.get('dip_hold_q20') or 0.5):.1f}% 的小回檔即為進場點，跌破開盤 1.3% 以上視為守不住"
+                txt += f" → 開高守住機率高；守住日開盤價下 {abs(cell.get('dip_hold_q50') or 0.2):.1f}~{abs(cell.get('dip_hold_q20') or 0.5):.1f}% 為常見回檔深度 (下緣參考)，跌破開盤 1.3% 以上歷史上多半守不住"
             elif dn and cell["p_fill"] >= 0.5:
-                txt += " → 開低多半會反彈到前收附近，開盤殺低是短線買點"
+                txt += " → 開低多半會反彈到前收附近"
             elif dn and cell["p_hold"] >= 0.6:
-                txt += " → 開低後續弱，反彈到前收附近是減碼點"
+                txt += " → 開低後續偏弱，前收附近為上緣參考 (壓力)"
             out["gap"] = {"est": round(est, 2), "source": src, "bucket": cell["label"], "regime": cell["regime"], "stats": cell, "text": txt, "live": live}
+            # r6：兩張表都發布，table 說明 stats 用的是哪一張
+            out["gap"]["table"] = table
+            out["gap"]["table_note"] = ("開盤前以夜盤估計跳空：用「估計跳空分組」歷史統計 (時點正確 β" + (f"，{(st['gap'].get('est_meta') or {}).get('start')}~" if (st['gap'].get('est_meta') or {}).get('start') else "") + ")"
+                                        if table == "est" else
+                                        ("盤中實際開盤已知：用實際跳空分組歷史統計 (2010~)" if not estimated else
+                                         "估計跳空分組表無此格 (樣本不足或未訓練)，暫用實際跳空分組統計 (2010~)" + ("；平盤估計的回補率可能高估" if not (up or dn) else "")))
+            if cell_act:
+                out["gap"]["stats_actual"] = cell_act
+            if cell_est:
+                out["gap"]["stats_est"] = cell_est
             if ua is not None:
                 out["gap"]["us_add"] = ua
             if prov:

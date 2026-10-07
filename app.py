@@ -469,7 +469,7 @@ with tabs[1]:
         st.subheader(A["action"])
         st.write(A["detail"])
         conf_icon = {"高": "🟢", "中": "🟡", "低": "🔴"}[A["confidence"]]
-        st.info(f"建議持股水位：**{A['position']}**　　信心度：{conf_icon} **{A['confidence']}** (因子一致 {A['agree_ratio']:.0%}，資料完整 {A['coverage']:.0%})")
+        st.info(f"籌碼強度：**{A['position']}**　　信心度：{conf_icon} **{A['confidence']}** (因子一致 {A['agree_ratio']:.0%}，資料完整 {A['coverage']:.0%})")
         if A.get("turning"):
             st.warning("🔀 轉折：" + A["turning"])
         if A["bottom_signals"]:
@@ -494,7 +494,7 @@ with tabs[1]:
                 st.markdown(f"🔻 **{f.name}**：{f.comment}")
             if not A["reasons_neg"]:
                 st.caption("無明顯空方因子")
-        st.markdown(f"**進場檢查表** ({A['passed']}/{A['total']} 通過)")
+        st.markdown(f"**條件檢查表** ({A['passed']}/{A['total']} 通過)")
         for name, ok in A["checklist"]:
             st.markdown(("✅ " if ok else "❔ " if ok is None else "❌ ") + name)
     # ---- 大盤買點 / 賣點訊號 (長歷史驗證)

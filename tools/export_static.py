@@ -328,7 +328,10 @@ def main() -> None:
             print(f"  learn: annotated {_na} rows (bucket/call_model/conf_tier)")
     except Exception as e:  # noqa: BLE001
         print("  learn annotate failed:", e)
-    dump("forecast", {"updated": time.strftime("%Y-%m-%d %H:%M:%S"), "forecast": fc, "hourly": hr, "stocks": stock_fc})
+    _fj = {"updated": time.strftime("%Y-%m-%d %H:%M:%S"), "forecast": fc, "hourly": hr, "stocks": stock_fc}
+    if isinstance(fc, dict) and fc.get("range_touch_last250"):   # r6 C6(a)：近 250 日實際觸及率，頂層也放一份 (與 forecast.range_touch_last250 相同)
+        _fj["range_touch_last250"] = fc["range_touch_last250"]
+    dump("forecast", _fj)
     try:   # 挖寶雷達樹模型 (前端算分)；模型檔在 repo (每週 --train 重訓)
         from chip.predict import model as _M
         _tm = _M.load_json("treasure_model")

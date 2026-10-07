@@ -47,7 +47,7 @@ STATE_WEIGHTS = {
 NAMES = {
     "foreign": "外資現貨買賣超", "trust": "投信買賣超", "dealer": "自營商買賣超",
     "fut_foreign": "外資台指期部位 (含現貨一致性)", "gov8": "八大行庫買賣超", "margin": "融資量價象限",
-    "maint": "大盤融資維持率", "short": "融券餘額變化", "sbl": "借券賣出餘額變化",
+    "maint": "大盤融資維持率", "short": "融券餘額變化", "sbl": "借券空單餘額變化",   # r6：UI 文字不用「賣出」(原「借券賣出餘額變化」)
     "pcr": "選擇權 Put/Call 比", "large": "大額交易人(特定法人)淨部位", "volume": "量價關係", "trend": "指數趨勢",
     "reversion": "超跌回歸 (月線負乖離)", "global": "國際盤 (VIX/費半/韓股)", "fx_flow": "匯率資金流 (台幣/油價)",
 }
@@ -102,7 +102,7 @@ def build_frame(use_wantgoo: bool = True) -> tuple[pd.DataFrame, dict]:
     pcr = _safe(taifex.put_call_ratio, meta, "TAIFEX P/C ratio", pd.DataFrame())
     large = _safe(taifex.large_traders_tx, meta, "TAIFEX 大額交易人")
     fut_latest = _safe(taifex.futures_institutional_latest, meta, "TAIFEX 期貨法人(最新)", pd.DataFrame())
-    sbl_today = _safe(lambda: {k: v for k, v in (twse.sbl_balance() or {}).items() if k != "stocks"}, meta, "TWSE 借券賣出餘額")
+    sbl_today = _safe(lambda: {k: v for k, v in (twse.sbl_balance() or {}).items() if k != "stocks"}, meta, "TWSE 借券空單餘額")
     twse_inst = _safe(twse.institutional_daily, meta, "TWSE 三大法人(當日)")
     twse_margin = _safe(twse.margin_daily, meta, "TWSE 融資融券(當日)")
     twse_mkt = _safe(twse.market_daily, meta, "TWSE 市場成交(當月)", pd.DataFrame())
@@ -370,7 +370,7 @@ def _row_factors(r: pd.Series, weights: dict) -> list[Factor]:
         tags.append("賣壓高潮")
     add("foreign", f"今 {fmt(r['foreign'])} 億｜5日 {fmt(r['foreign_5d'])}｜20日 {fmt(r['foreign_20d'])}", cm, tags)
     add("trust", f"今 {fmt(r['trust'])} 億｜5日 {fmt(r['trust_5d'])}",
-        "投信持續加碼，中小型/ETF 資金有撐" if r["trust_5d"] > 50 else "投信偏賣，作帳/贖回壓力" if r["trust_5d"] < -50 else "投信動作不大")
+        "投信持續買超，中小型/ETF 資金有撐" if r["trust_5d"] > 50 else "投信偏賣，作帳/贖回壓力" if r["trust_5d"] < -50 else "投信動作不大")
     add("dealer", f"今 {fmt(r['dealer'])} 億｜5日 {fmt(r['dealer_5d'])}",
         "自營商避險賣壓重 (權證/ETF 對沖)" if r["dealer"] < -150 else "自營商偏多" if r["dealer"] > 100 else "自營商中性")
     oi, pct, cons = r.get("fut_foreign_net_oi"), r.get("fut_foreign_pct"), int(r.get("foreign_consistency") or 0)
@@ -381,13 +381,13 @@ def _row_factors(r: pd.Series, weights: dict) -> list[Factor]:
     g5, gs = r.get("gov8_5d"), int(r.get("gov8_streak") or 0)
     tags, cm = [], "八大行庫動作不明顯"
     if gs >= 3 and r["ret5"] < 0:
-        cm, tags = f"指數下跌但官股連續買超 {gs} 日 → 護盤/國家隊進場跡象", ["護盤"]
+        cm, tags = f"指數下跌但官股連續買超 {gs} 日 → 護盤/國家隊買盤跡象", ["護盤"]
     elif pd.notna(g5) and g5 > 30:
-        cm = "官股順勢買進"
+        cm = "官股順勢買超"
     elif gs <= -3 and r["ret5"] > 0:
         cm = f"指數上漲官股連賣 {abs(gs)} 日 → 官股高檔調節"
     elif pd.notna(g5) and g5 < -30:
-        cm = "官股減碼"
+        cm = "官股賣超"
     add("gov8", f"今 {fmt(r.get('gov8_net'))} 億｜5日 {fmt(g5)}｜20日 {fmt(r.get('gov8_20d'))}｜連{'買' if gs > 0 else '賣'} {abs(gs)} 日", cm, tags)
     m20, r20 = r.get("margin_pct20"), r.get("ret20")
     tags = []
@@ -417,7 +417,7 @@ def _row_factors(r: pd.Series, weights: dict) -> list[Factor]:
         "上漲中融券增加 → 軋空動能" if r["ret5"] > 0 and (r.get("short_chg5") or 0) > 0 else
         "下跌中融券增加 → 空方追空" if r["ret5"] < 0 and (r.get("short_chg5") or 0) > 0 else "融券回補/變化不大")
     add("sbl", f"5日 {fmt(r.get('sbl_chg5'), 0)} 張｜今 {fmt(r.get('sbl_chg'), 0)}",
-        "借券賣出餘額上升 → 法人放空增加" if (r.get("sbl_chg5") or 0) > 0 else "借券賣出回補 → 空方壓力減輕")
+        "借券空單餘額上升 → 法人空方部位增加" if (r.get("sbl_chg5") or 0) > 0 else "借券空單回補 → 空方壓力減輕")
     p = r.get("pcr_oi")
     add("pcr", f"OI {fmt(p, 2, '%', sign=False)}",
         "P/C 比偏高 → 市場偏空避險，反向偏多" if pd.notna(p) and p >= 110 else
@@ -525,7 +525,7 @@ def rally_confirm(scored: pd.DataFrame) -> dict:
     if confirmed:
         out["text"] = "起漲確認：底部訊號後收盤突破前 3 日高 (歷史 10 日上漲 67%、平均 +1.6%)"
     elif armed:
-        out["text"] = f"底部訊號區，先別接刀：收盤突破 {out['trigger']} (近 3 日高) 才算起漲 (訊號首日就買歷史 10 日上漲僅 48%)"
+        out["text"] = f"底部訊號區 (尚未確認起漲)：收盤突破 {out['trigger']} (近 3 日高) 才算起漲 (自訊號首日起算，歷史 10 日上漲僅 48%)"
     return out
 
 
@@ -612,37 +612,38 @@ def assess(scored: pd.DataFrame) -> dict:
     if rally.get("confirmed"):
         turning = rally["text"] + (f"；{turning}" if turning else "")
     stabilizing = r["ret1"] > 0 and mom > 5
+    # r6 (2026-10-07)：中性描述市場狀態，不給進出場/部位建議 (原「可進場/分批布局/減碼觀望/持股續抱/試單/不宜進場」與持股水位 %)
+    lean = False   # 偏多型態 (舊版 action 以「可」或「多頭拉回」開頭者) → 信心度低時加註
     if state == "多頭":
         if smooth >= 20 and passed >= max(5, total - 2):
-            action, detail = "可進場（多頭順勢）", "多頭結構 + 籌碼偏多且訊號一致，順勢做多；跌破月線或外資轉連賣則減碼。"
+            action, detail, lean = "多頭順勢（籌碼偏多一致）", "多頭結構 + 籌碼偏多且訊號一致；跌破月線或外資轉連賣則轉弱。", True
         elif smooth >= 0 and passed >= 5 and (r.get("bias20") or 0) < 2 and r["foreign_5d"] > -300:
-            action, detail = "多頭拉回，可分批布局", "多頭結構未破、乖離收斂，籌碼中性偏多，逢回分批建立部位。"
+            action, detail, lean = "多頭拉回（乖離收斂）", "多頭結構未破、乖離收斂，籌碼中性偏多。", True
         elif smooth <= -20 or len(top_risk) >= 2:
-            action, detail = "多頭但籌碼轉弱，減碼觀望", "趨勢仍在但籌碼面明顯惡化或高檔風險累積，先降低部位等待籌碼修復。"
+            action, detail = "多頭但籌碼轉弱", "趨勢仍在但籌碼面明顯惡化或高檔風險累積，留意籌碼是否修復。"
         else:
-            action, detail = "多頭震盪，持股續抱、不追高", "結構偏多但籌碼訊號不一致，既有部位續抱，新資金等拉回。"
+            action, detail = "多頭震盪（籌碼訊號不一致）", "結構偏多但籌碼訊號不一致，短線方向不明。"
     elif state == "空頭":
         if smooth >= 25 and r["close"] > r["ma20"] and passed >= 6:
-            action, detail = "空頭反轉確認，可試單進場", "空頭結構下籌碼明顯轉多且站回月線，屬反轉初期，可控部位進場。"
+            action, detail = "空頭反轉確認（籌碼轉多、站回月線）", "空頭結構下籌碼明顯轉多且站回月線，屬反轉初期型態。"
         elif len(bottom) >= 3 and (stabilizing or turning):
-            action, detail = "空頭末端，小部位分批試單", "多項底部訊號集中且籌碼動能回升，僅適合小額試單、嚴設停損。"
+            action, detail = "空頭末端（底部訊號集中）", "多項底部訊號集中且籌碼動能回升，反轉尚未確認、波動大。"
         else:
-            action, detail = "空頭格局，不宜進場", "趨勢與籌碼皆偏空，等待底部訊號累積與籌碼轉折。"
+            action, detail = "空頭格局", "趨勢與籌碼皆偏空，底部訊號尚未累積、籌碼尚未轉折。"
     else:
         if smooth >= 20 and passed >= 6:
-            action, detail = "盤整偏多，可小量進場", "區間整理但籌碼偏多，小量參與，突破季線再加碼。"
+            action, detail = "盤整偏多", "區間整理但籌碼偏多；突破季線為轉強確認。"
         elif smooth <= -20:
-            action, detail = "盤整偏空，觀望／減碼", "籌碼偏空，區間下緣不破前不進場。"
+            action, detail = "盤整偏空", "籌碼偏空；區間下緣為支撐參考，跌破則轉弱。"
         elif len(bottom) >= 3:
-            action, detail = "底部訊號浮現，分批試單（小部位）", "逆勢訊號集中，可分批布局但需嚴設停損。"
+            action, detail = "底部訊號浮現", "逆勢訊號集中，但趨勢尚未翻多、波動大。"
         else:
-            action, detail = "觀望，等待訊號一致", "多空因子互相抵銷，沒有明確優勢，保留現金等待。"
-    if confidence == "低" and action.startswith(("可", "多頭拉回")):
-        detail += "（信心度低：因子方向分歧或資料不全，部位再減半）"
+            action, detail = "多空訊號互相抵銷", "多空因子互相抵銷，沒有明確優勢。"
+    if confidence == "低" and lean:
+        detail += "（信心度低：因子方向分歧或資料不全，此判讀可信度打折）"
 
-    level = "70–100%" if smooth >= 40 else "50–70%" if smooth >= 15 else "30–50%" if smooth > -15 else "10–30%" if smooth > -40 else "0–10%"
-    if state == "空頭":
-        level = {"70–100%": "50–70%", "50–70%": "30–50%", "30–50%": "20–30%"}.get(level, level)
+    # position：舊版為「建議持股水位」%；r6 改為籌碼強度的中性分級 (鍵名保留給舊前端)
+    level = "籌碼強偏多" if smooth >= 40 else "籌碼偏多" if smooth >= 15 else "籌碼中性" if smooth > -15 else "籌碼偏空" if smooth > -40 else "籌碼強偏空"
     return {
         "date": str(r["date"]), "close": float(r["close"]), "ret1": float(r["ret1"]) if pd.notna(r["ret1"]) else None,
         "ret20": float(r["ret20"]) if pd.notna(r.get("ret20")) else None,
@@ -691,11 +692,11 @@ def intraday_hint(scored: pd.DataFrame, quote: dict | None) -> dict | None:
     if last > ma5:
         msgs.append("站上 5 日線，短線偏強。")
     if ret <= -2:
-        msgs.append("單日重挫 2% 以上：若外資盤後仍大賣，屬賣壓高潮觀察點；不建議盤中接刀。")
+        msgs.append("單日重挫 2% 以上：若外資盤後仍大賣，屬賣壓高潮觀察點；盤中波動大、低點未確認。")
     elif ret >= 2:
         msgs.append("單日大漲 2% 以上：留意是否伴隨量增與外資回補，否則提防一日行情。")
     if bias > 6:
-        msgs.append("月線乖離過大，不宜追價。")
+        msgs.append("月線正乖離過大，短線過熱。")
     elif bias < -6:
         msgs.append("月線負乖離過大，短線超跌。")
     return {"last": last, "ret": round(ret, 2), "ma5": round(ma5, 2), "ma20": round(ma20, 2), "bias20": round(bias, 2),

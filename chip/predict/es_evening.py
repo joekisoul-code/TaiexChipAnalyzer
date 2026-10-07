@@ -158,7 +158,7 @@ def build(date: str | None) -> dict | None:
         out = {"date": date, "next": nxt, "sym": es_code, "cont": SYM, "base": round(base, 2), "base_ts": base_ts, "table": table, "gap": gap, "stocks": stocks, "base_up": base_up,
                "start_hour": START_HOUR, "th_main": 0.5, "th_late": None, "late_hour": LATE_HOUR, "tradable_hit": 0.50, "stats_kind": "全期統計 (2024-05 起，非走動式)",
                "note": "收盤後美股 S&P 期貨 (具體季月合約) 相對當天 13:00 的漲跌；22:00 起 ≥0.5% 叫隔天台股收盤同方向，全期統計命中 75~83% (2024-05 起，非走動式)。"
-                       "命中幾乎全來自開盤跳空：隔天台指期開盤才進場、持有到收盤只有約 50%"}
+                       "命中幾乎全來自開盤跳空：隔天台指期開盤後才看 (開盤到收盤) 只有約 50%"}   # r6：中性用語 (原「開盤才進場、持有到收盤」)
         t0 = pd.Timestamp(f"{date} 13:00", tz="Asia/Taipei")
         last = s[s.index > t0]
         if len(last):

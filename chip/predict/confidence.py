@@ -135,3 +135,23 @@ def train(matrix: pd.DataFrame, pat: dict, write: bool = True, verbose: bool = T
 def stats_for(h: int, variant: str, tier: str) -> dict | None:
     c = M.load_json("confidence") or {}
     return ((c.get("tiers") or {}).get(f"{h}_{variant}") or {}).get(tier)
+
+
+# r6 (2026-10-07 honesty conf_tier_tiny_n)：分層/桶的命中率 n < 30 不顯示 (夜盤 低 h1 n=2 → 100%、verdict 夜盤 分歧 n=29 → 90%)。
+# 原值留 hit_raw / yr_min_raw 供稽核；n 照舊。
+MIN_N_SHOW = 30
+
+
+def for_display(st: dict | None, min_n: int = MIN_N_SHOW) -> dict | None:
+    """顯示用副本：n < min_n → hit / yr_min 設 None (原值存 hit_raw / yr_min_raw)、small_n=True；n ≥ min_n 或無 n → 原樣 (同一物件)。"""
+    if not isinstance(st, dict):
+        return st
+    try:
+        n = int(st.get("n")) if st.get("n") is not None else None
+    except (TypeError, ValueError):
+        n = None
+    if n is None or n >= min_n:
+        return st
+    out = dict(st)
+    out.update(hit=None, yr_min=None, hit_raw=st.get("hit"), yr_min_raw=st.get("yr_min"), small_n=True)
+    return out

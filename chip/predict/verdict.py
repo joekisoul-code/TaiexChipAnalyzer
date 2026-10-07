@@ -222,7 +222,8 @@ def build(fc: dict, hourly: dict | None, snap: dict | None, scored: pd.DataFrame
     st = M.load_json("verdict") or {}
     tiers = (st.get("tiers") or {}).get(f"1_{x.get('variant') or 'base'}") or {}
     bucket = "高共識" if net >= HIGH_NET else "分歧" if net <= LOW_NET else "一般"
-    oos = (tiers.get("bucket") or {}).get(bucket) or {}
+    from . import confidence as CF
+    oos = CF.for_display((tiers.get("bucket") or {}).get(bucket) or {}) or {}   # r6 C6(b)：桶 n < 30 → hit/yr_min 為 null (hit_raw 留稽核)
     conf_hit = x.get("conf_hit")
     variant = x.get("variant") or "base"
     bucket_role = "info" if variant == "night" else "filter"   # pr2 P3：夜盤模式票數只當資訊，信心分層為主要信心標示
@@ -230,10 +231,11 @@ def build(fc: dict, hourly: dict | None, snap: dict | None, scored: pd.DataFrame
     conf_oos = None
     if conf_tier:
         try:
-            from . import confidence as CF
-            conf_oos = CF.stats_for(1, variant, conf_tier)
+            conf_oos = CF.for_display(CF.stats_for(1, variant, conf_tier))
         except Exception as e:  # noqa: BLE001
             log.debug("conf_oos: %s", e)
+        if conf_hit is not None and (conf_oos or {}).get("small_n"):   # 舊 fc (未經 r6 market_forecast) 仍帶小樣本 conf_hit → 不顯示
+            conf_hit = None
     call_action = call
     if cs == 0:
         verdict = "中性"
@@ -246,9 +248,9 @@ def build(fc: dict, hourly: dict | None, snap: dict | None, scored: pd.DataFrame
             oos = {"n": ncs.get("n"), "hit": ncs.get("up"), "cov": None, "yr_min": ncs.get("yr_min")}
             head += f" → 模型無叫牌但 {len(votes)} 票中淨多 {net_abs}：歷史同狀況隔天上漲 {ncs['up']:.0%} (n={ncs['n']}，年最低 {ncs.get('yr_min') or 0:.0%})，給偏多"
         elif net_abs >= 3 and ncs.get("up"):
-            head += f" → 訊號偏多 (歷史同狀況上漲 {ncs['up']:.0%}，n={ncs['n']})，略偏多但不足以叫牌、不追高"
+            head += f" → 訊號偏多 (歷史同狀況上漲 {ncs['up']:.0%}，n={ncs['n']})，略偏多但不足以叫牌"
         elif bear - bull >= 3:
-            head += " → 訊號偏空，但研究顯示空方共識對下跌無預測力，不放空"
+            head += " → 訊號偏空，但研究顯示空方共識對下跌無預測力，不叫偏空"
     elif bucket_role == "info":
         # 夜盤模式 (pr2 P3)：信心分層領頭、票數只當資訊；不加 ‧高共識/‧分歧 後綴 (夜盤 分歧 桶 n 29/26 命中 0.897/0.846，不是風險訊號)
         verdict = call
@@ -263,41 +265,43 @@ def build(fc: dict, hourly: dict | None, snap: dict | None, scored: pd.DataFrame
         head = f"模型{call}{x.get('call_strength') or ''}，其他 {len(votes)} 票同向 {agree}、反向 {disagree} (淨 {net:+d}) → {bucket}"
         if oos.get("hit"):
             head += f"；同狀況歷史 OOS 命中 {oos['hit']:.0%} (覆蓋 {oos['cov']:.0%}，逐年最低 {oos['yr_min']:.0%})" if oos.get("yr_min") is not None else f"；同狀況歷史 OOS 命中 {oos['hit']:.0%}"
+        elif oos.get("small_n"):
+            head += f"；同狀況歷史樣本不足 (n={oos.get('n')}，未滿 {CF.MIN_N_SHOW} 不顯示命中率)"
         if x.get("conf_tier"):
             head += f"；信心分層 {x['conf_tier']}" + (f" ({float(conf_hit):.0%})" if conf_hit else "")
-    # 行動：結合 7 日閘門 與 路徑買賣點
+    # 參考價位：結合 7 日閘門 與 路徑上下緣 (r6：中性描述，不給買賣/部位建議；原「承接/減碼/停損/不放空/縮小部位」)
     gate = g.get("state") if g.get("available") else None
     act = []
     ba, sa, stp, tg = x.get("buy_at"), x.get("sell_at"), x.get("stop"), x.get("target")
     if call_action == "偏多" and cs == 0:
-        cs = 1   # 訊號共識偏多：行動比照偏多 (下方買點邏輯)
+        cs = 1   # 訊號共識偏多：比照偏多 (下緣參考邏輯)
     if cs > 0:
         if gate == "down":
-            act.append("7 日閘門偏下：不推薦買點，偏多僅短打或觀望")
+            act.append("7 日閘門偏下：偏多訊號可信度降低，下緣參考價僅供觀察")
         elif ba:
-            act.append(f"拉回 {float(ba):,.0f} 附近承接" + (f"，停損 {float(stp):,.0f}" if stp else "") + (f"，目標 {float(tg):,.0f}" if tg else ""))
-        if bucket == "分歧" and bucket_role != "info":   # 夜盤模式 (pr2)：分歧 不加行動
-            act.append("訊號分歧：縮小部位、不追價")
+            act.append(f"下緣參考 {float(ba):,.0f}" + (f"，跌破 {float(stp):,.0f} 轉弱" if stp else "") + (f"，上緣 (一成機率) {float(tg):,.0f}" if tg else ""))
+        if bucket == "分歧" and bucket_role != "info":   # 夜盤模式 (pr2)：分歧 不加
+            act.append("訊號分歧：叫牌可信度較低")
     elif cs < 0:
         if gate == "up":
-            act.append("7 日閘門偏上：不推薦賣點，偏空僅減碼不放空")
+            act.append("7 日閘門偏上：偏空訊號可信度降低，上緣參考價僅供觀察")
         elif sa:
-            act.append(f"反彈 {float(sa):,.0f} 附近減碼" + (f"，停損 {float(stp):,.0f}" if stp else ""))
+            act.append(f"上緣參考 (壓力) {float(sa):,.0f}" + (f"，跌破 {float(stp):,.0f} 轉弱" if stp else ""))
         if bucket == "分歧" and bucket_role != "info":
-            act.append("訊號分歧：不追空")
+            act.append("訊號分歧：叫牌可信度較低")
     else:
         if ba and sa:
-            act.append(f"區間操作：{float(ba):,.0f} 承接 / {float(sa):,.0f} 減碼" + (f"，停損 {float(stp):,.0f}" if stp else ""))
+            act.append(f"區間參考：下緣 {float(ba):,.0f} / 上緣 {float(sa):,.0f}" + (f"，跌破 {float(stp):,.0f} 轉弱" if stp else ""))
         if gate == "down":
-            act.append("7 日閘門偏下：不推薦買點")
+            act.append("7 日閘門偏下：下緣參考價可信度降低")
         elif gate == "up":
-            act.append("7 日閘門偏上：不推薦賣點")
+            act.append("7 日閘門偏上：上緣參考價可信度降低")
     for e in extra:
         if e["key"] == "hourly" and e["s"] and cs and e["s"] != cs:
-            act.append(f"盤中小時模型與日模型相反 ({e['note']})：以盤中為準縮小部位")
+            act.append(f"盤中小時模型與日模型相反 ({e['note']})：日模型叫牌可信度降低，以盤中資訊為準")
         if e["key"] == "rtscore" and e["s"] and cs and e["s"] != cs:
-            act.append("盤中即時評分與叫牌相反：等盤中訊號轉向再動作")
+            act.append("盤中即時評分與叫牌相反：留意盤中訊號是否轉向")
     return {"date": today, "target": x.get("date"), "verdict": verdict, "call": call, "call_action": call_action, "net": net, "agree": agree, "disagree": disagree, "bull": bull, "bear": bear,
-            "bucket": bucket if cs else None, "oos": (oos or None) if cs else None, "votes": votes, "extra": extra, "head": head, "action": "；".join(act) or "照常依買賣點操作",
+            "bucket": bucket if cs else None, "oos": (oos or None) if cs else None, "votes": votes, "extra": extra, "head": head, "action": "；".join(act) or "依上下緣參考價觀察",
             "variant": variant, "bucket_role": bucket_role, "conf_tier": conf_tier, "conf_hit": conf_hit, "conf_oos": conf_oos,   # pr2 P3：夜盤 info / 不含夜盤 filter
             "text": f"判斷總結：{verdict}。{head}。{'；'.join(act) if act else ''}".rstrip("。") + "。"}

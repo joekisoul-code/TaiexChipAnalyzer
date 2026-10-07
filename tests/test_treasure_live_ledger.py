@@ -5,6 +5,8 @@
 
 (a) record 寫入 model_ver / th_A / th_Aplus / mkt_bias20 / scan_src；(b) 停損列 21 日後有 fin21、cur 不變；(c) stats 的 by_source 與 by_tier[*].role、B 級無 drift；
 (d) alerts 文案不含「命中機率 / 進場 / 持有」；(e) 空帳本 / 全追蹤不崩；(f) backfill 標 backfill=True 與 scan_src=backfill。
+r6 (10-07)：(g) A/A+ 記錄規則同回測 (30 日曆日內未記過就記，不受前 20 / MAX_ACTIVE；每日 6 檔共用)，B/B+ 舊規則不變；
+(h) 常數為訓練窗與正式相同 (2020 起) 的版本、警報 A+ / A 分開寫；(i) 帶到 App 的文字不含禁用詞。
 """
 from __future__ import annotations
 
@@ -24,6 +26,8 @@ TM = {"trained_at": "2026-10-04 08:36:18", "th_A": 0.5062, "th_Aplus": 0.6362, "
       "oos": {"tiers": {"A": {"hit": 0.548, "fin": 9.2}, "A+": {"hit": 0.638, "fin": 11.16}, "A-": {"hit": 0.471, "fin": 7.52}, "B+": {"hit": 0.421, "fin": 5.22}, "B": {"hit": 0.387, "fin": 2.86}}},
       "surge": {"oos": {"app_hit": 0.329, "app_fin": 5.65}, "th_top10": 0.3977}}
 D0 = "2026-09-01"
+# r6：App 文字禁用詞 (含後端 JSON 帶進 UI 的字串)
+BANNED = ("買進", "賣出", "加碼", "減碼", "放空", "做多", "做空", "建議買", "建議賣", "抄底", "逃頂", "縮小部位", "進場", "持有", "持股水位", "續抱", "試單")
 DATES = [d.strftime("%Y-%m-%d") for d in pd.bdate_range("2026-08-03", "2026-12-31")]
 AFTER = [d for d in DATES if d > D0]
 MK = {d: 1000.0 for d in DATES}    # 大盤持平 → rel = cur
@@ -92,6 +96,81 @@ def test_record_meta_fields():
     # 舊呼叫方式 (不帶 tm) 仍可用
     p2 = TL.record(_fresh(), SC)
     assert p2["ledger"]["treasure"][0]["model_ver"] is None and p2["ledger"]["treasure"][0]["scan_src"] == "live"
+
+
+def _cand(code, tier, p, pct=1.0):
+    return {"code": code, "name": "測" + code[-2:], "close": 100.0, "pct": pct, "value": 1e8, "pbr": 1.0, "p": p, "tier": tier, "ps": 0.1, "m_bias20": -1.25}
+
+
+def _active_rows(n, date="2026-08-20", tier="B"):
+    return [{"code": f"8{i:03d}", "name": "舊", "date": date, "tier": tier, "status": "追蹤", "entry": 100.0, "p": 0.4, "days": 5} for i in range(n)]
+
+
+def test_record_a_rule_ignores_top20_and_max_active():
+    """r6 (radarshadow F6)：A/A+ 用回測規則 — 追蹤中已滿 40 檔、或排在第 20 名之後，A/A+ 仍記；B/B+ 維持舊規則 (被擋)。"""
+    prev = _fresh(); prev["ledger"]["treasure"] = _active_rows(TL.MAX_ACTIVE)
+    tre = [_cand(f"{1000 + i}", "B", 0.40 - i * 0.001) for i in range(22)] + [_cand("2001", "A", 0.39), _cand("2002", "A+", 0.385)]   # A 排第 23、24 名 (測順序無關)
+    sc = dict(SC, treasure=tre, surge=[])
+    out = TL.record(prev, sc, TM)
+    new = [x for x in out["ledger"]["treasure"] if x["date"] == D0]
+    assert [x["code"] for x in new] == ["2001", "2002"], [x["code"] for x in new]
+    assert all(x["rec_rule"] == TL.REC_RULE_A == "A30" for x in new)
+    # 同樣候選、但追蹤中只有 0 檔：B 只看前 20、A 照記；每日 6 檔上限共用
+    out2 = TL.record(_fresh(), sc, TM)
+    new2 = out2["ledger"]["treasure"]
+    assert len(new2) == TL.PER_DAY == 6 and [x["code"] for x in new2] == [f"{1000 + i}" for i in range(6)], [x["code"] for x in new2]
+    assert all(x["rec_rule"] == TL.REC_RULE_B == "B20" for x in new2)
+    # A 依 p 排在前面 (正式 scan 已依 p 排序) → 先記 A，B 補到 6 檔
+    sc3 = dict(SC, treasure=[_cand("2001", "A+", 0.70), _cand("2002", "A", 0.60)] + [_cand(f"{1000 + i}", "B", 0.40 - i * 0.001) for i in range(30)], surge=[])
+    new3 = TL.record(_fresh(), sc3, TM)["ledger"]["treasure"]
+    assert [x["code"] for x in new3] == ["2001", "2002", "1000", "1001", "1002", "1003"] and [x["rec_rule"] for x in new3] == ["A30", "A30"] + ["B20"] * 4
+    # 10 檔 A：每日上限 6 檔仍適用 (回測 cap 6)，依 p 取前 6
+    sc4 = dict(SC, treasure=[_cand(f"{3000 + i}", "A", 0.70 - i * 0.01) for i in range(10)], surge=[])
+    p4 = _fresh(); p4["ledger"]["treasure"] = _active_rows(TL.MAX_ACTIVE + 5)
+    new4 = [x for x in TL.record(p4, sc4, TM)["ledger"]["treasure"] if x["date"] == D0]
+    assert [x["code"] for x in new4] == [f"{3000 + i}" for i in range(6)]
+
+
+def test_record_a_cooldown_30_calendar_days():
+    """A/A+：同檔 30 個日曆日內記過 (任何等級、不論狀態) 才跳過；舊規則的「未命中 60 日不重複」「追蹤中不重複」只管 B/B+。"""
+    def led(code, date, tier, status, evalAt=None):
+        return {"code": code, "name": "x", "date": date, "tier": tier, "status": status, "entry": 100.0, "p": 0.5, "days": 21, **({"evalAt": evalAt} if evalAt else {})}
+    d29 = (pd.Timestamp(D0) - pd.Timedelta(days=29)).strftime("%Y-%m-%d")
+    d30 = (pd.Timestamp(D0) - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
+    d40 = (pd.Timestamp(D0) - pd.Timedelta(days=40)).strftime("%Y-%m-%d")
+    prev = _fresh()
+    prev["ledger"]["treasure"] = [led("4001", d29, "B", "未命中", d29),          # 29 天前記過 (B 級) → A 跳過
+                                  led("4002", d30, "A", "命中", d29),            # 剛好 30 天 → A 可再記
+                                  led("4003", d40, "A", "未命中", d29),          # 40 天前、29 天前未命中 → A 可記 (舊規則會擋 60 日)
+                                  led("4004", d40, "B", "追蹤"),                 # 40 天前、仍追蹤中 → A 可記 (回測沒有「追蹤中」限制)
+                                  led("5001", d40, "A", "未命中", d29),          # B 級候選：未命中 60 日內 → 舊規則擋
+                                  led("5002", d40, "B", "追蹤"),                 # B 級候選：追蹤中 → 舊規則擋
+                                  {"code": "4005", "date": "壞日期", "tier": "A", "status": "命中"}]   # 日期壞掉的舊列：略過不崩
+    sc = dict(SC, treasure=[_cand("4001", "A+", 0.80), _cand("4002", "A", 0.75), _cand("4003", "A", 0.70), _cand("4004", "A", 0.65), _cand("4005", "A", 0.62),
+                            _cand("5001", "B", 0.45), _cand("5002", "B", 0.44), _cand("5003", "B", 0.43)], surge=[])
+    new = [x for x in TL.record(prev, sc, TM)["ledger"]["treasure"] if x["date"] == D0]
+    assert [x["code"] for x in new] == ["4002", "4003", "4004", "4005", "5003"], [x["code"] for x in new]
+    assert {x["code"]: x["rec_rule"] for x in new} == {"4002": "A30", "4003": "A30", "4004": "A30", "4005": "A30", "5003": "B20"}
+    # 同一天再跑一次：不重複
+    again = TL.record(prev, sc, TM)
+    assert len([x for x in again["ledger"]["treasure"] if x["date"] == D0]) == 5
+    # 隔天：昨天剛記的 A 在 30 日內 → 不再記
+    nxt = AFTER[0]
+    sc2 = dict(sc, date=nxt)
+    new2 = [x for x in TL.record(again, sc2, TM)["ledger"]["treasure"] if x["date"] == nxt]
+    assert all(x["code"] not in ("4002", "4003", "4004", "4005") for x in new2), [x["code"] for x in new2]
+    assert TL._recent_codes([{"code": "1", "date": D0}], "壞日期", 30) == set()
+    # 回填較早的日子：之後已記的列 (30 日內) 也算 → 不擠在一起
+    later = (pd.Timestamp(D0) + pd.Timedelta(days=10)).strftime("%Y-%m-%d")
+    assert TL._recent_codes([{"code": "9", "date": later}], D0, 30) == {"9"}
+
+
+def test_record_b_only_day_unchanged():
+    """沒有 A/A+ 的日子：結果與舊規則完全相同 (前 20、追蹤上限 40、每日 6 檔)。"""
+    prev = _fresh(); prev["ledger"]["treasure"] = _active_rows(TL.MAX_ACTIVE - 2)
+    sc = dict(SC, treasure=[_cand(f"{6000 + i}", "B+" if i % 2 else "B", 0.6 - i * 0.01) for i in range(30)], surge=[])
+    new = [x for x in TL.record(prev, sc, TM)["ledger"]["treasure"] if x["date"] == D0]
+    assert [x["code"] for x in new] == ["6000", "6001"] and all(x["rec_rule"] == "B20" for x in new)
 
 
 def test_stop_row_gets_fin21_cur_unchanged():
@@ -168,6 +247,12 @@ def test_stats_sources_roles_and_drift():
     assert ts["all"]["n"] == 3 and ts["all"]["hit"] == 2 and ts["all"]["n_published"] == 3 and ts["all"]["n_backfill"] == 0
     assert ts["by_source"]["published"]["n"] == 3 and ts["by_source"]["backfill"] is None
     assert ts["signal"]["n"] == 2 and ts["signal"]["rate"] == 1.0 and ts["signal"]["expect"] == list(TL.EXPECT_AAPLUS) and ts["signal"]["role"] == "signal" and ts["signal"]["drift"] is False
+    # r6：依記錄規則分開 (新列 A30；沒有 rec_rule 的舊列算 legacy)
+    assert ts["signal"]["by_rule"]["A30"]["n"] == 2 and ts["signal"]["by_rule"]["legacy"] is None
+    for x in prev["ledger"]["treasure"]:
+        x.pop("rec_rule", None)
+    ts_old = TL.stats(prev, TM)["treasure"]
+    assert ts_old["signal"]["by_rule"] == {"A30": None, "legacy": ts["signal"]["by_rule"]["A30"]}
     bt = ts["by_tier"]
     assert bt["A+"]["role"] == "signal" and bt["A"]["role"] == "signal" and bt["B"]["role"] == "descriptive"
     assert bt["A+"]["expect"] == list(TL.EXPECT_AAPLUS) and "expect" not in bt["B"]
@@ -196,13 +281,47 @@ def test_alert_wording():
     al = TL.alerts(SC, st | {"surge": {**(st.get("surge") or {}), "th_top10": 0.3977}})
     tre = [a for a in al if a["kind"] == "treasure"]
     assert len(tre) == 2 and all(a["tier"] in ("A+", "A") for a in tre)
+    lo, hi = round(TL.EXPECT_AAPLUS[0] * 100), round(TL.EXPECT_AAPLUS[1] * 100)
     for a in tre:
         m = a["msg"]
-        assert "模型分 0." in m and "44~50%" in m and "非買賣建議" in m
-        for bad in ("命中機率", "進場", "持有", "買進", "賣出"):
+        assert "模型分 0." in m and f"{lo}~{hi}%" in m and "非買賣建議" in m
+        # r6：A+ 與 A 的歷史命中分開寫 (RADAR_TIER)
+        assert f"A+ 約 {round(TL.RADAR_TIER['A+']['hit'] * 100)}%" in m and f"、A 約 {round(TL.RADAR_TIER['A']['hit'] * 100)}%" in m, m
+        for bad in ("命中機率",) + BANNED:
             assert bad not in m, (bad, m)
+    # RADAR_TIER 缺值 (舊常數) 不崩：退回 A+ 用 RADAR_BT、A 略過；全缺 → 只寫合計區間
+    with patched(TL, "RADAR_TIER", {}):
+        t = TL.tier_expect_txt()
+        assert "A+ 約" in t and "、A 約" not in t and f"{lo}~{hi}%" in t, t
+        with patched(TL, "RADAR_BT", {}):
+            assert TL.tier_expect_txt() == f"A/A+ 命中約 {lo}~{hi}%"
     assert any(a["kind"] == "surge" for a in al)
     assert not any(a["kind"] == "drift" for a in al)
+
+
+def _strings(o):
+    if isinstance(o, str):
+        yield o
+    elif isinstance(o, dict):
+        for k, v in o.items():
+            yield from _strings(k); yield from _strings(v)
+    elif isinstance(o, (list, tuple)):
+        for v in o:
+            yield from _strings(v)
+
+
+def test_ui_strings_no_banned_words():
+    """r6：雲端 JSON 會帶到 App 的文字 (model.radar_bt、stats 說明、各種警報) 不含禁用詞。"""
+    prev = TL.record(_fresh(), SC, TM)
+    with patched(TL, "bars", _fake_bars):
+        _run_days(prev, 22)
+    st = TL.stats(prev, TM)
+    weak = {"ledger": {"treasure": [{"code": "1111", "name": "甲", "date": "2026-09-01", "tier": "A", "status": "追蹤", "days": 3, "cur": -6.2}], "surge": []}}
+    texts = list(_strings(TL.RADAR_BT)) + list(_strings(st)) + [TL.NOTE_TIERS, TL.tier_expect_txt()]
+    texts += [a["msg"] for a in TL.alerts(SC, st | {"surge": {**(st.get("surge") or {}), "th_top10": 0.3977}}, prev) + TL.weak_alerts(weak)]
+    for t in texts:
+        for w in BANNED:
+            assert w not in t, (w, t)
 
 
 def test_empty_and_tracking_only():
@@ -226,7 +345,15 @@ def test_backfill_marks_source():
 
 
 def test_h_constant_matches_backtest():
-    assert T.H == 21 and TL.EXPECT_AAPLUS == (0.44, 0.50)   # 10-07 誠實回測
+    assert T.H == 21 and TL.EXPECT_AAPLUS == (0.49, 0.54)   # r6 10-07：時點正確、訓練窗與正式相同 (2020 起)
+    # 預期區間 = RADAR_BT A∪A+ 10 組命中範圍；A+ 高於 A∪A+ 高於單獨 A (RADAR_TIER 的 A 不含 A+)
+    lo, hi = TL.RADAR_BT["A"]["hit_rng"]
+    assert abs(TL.EXPECT_AAPLUS[0] - lo) < 0.006 and abs(TL.EXPECT_AAPLUS[1] - hi) < 0.006
+    assert TL.RADAR_TIER["A+"]["hit"] > TL.RADAR_BT["A"]["hit"] > TL.RADAR_TIER["A"]["hit"]
+    assert TL.RADAR_TIER["A+"]["n"] + TL.RADAR_TIER["A"]["n"] == TL.RADAR_BT["A"]["n"]
+    assert TL.RADAR_BT["method"]["train_start"] == "2020-01-01" and TL.RADAR_BT["method"]["old"]["A"] == {"win21": 0.717, "hit": 0.563}
+    assert TL.RADAR_BT["method"]["old"]["S3"] == {"win21": 0.554, "surge": 0.33}
+    assert "2020" in TL.RADAR_BT["note"] and "2020" in TL.RADAR_DAY0["note"]
 
 
 def test_hit_day_and_reason():
@@ -317,7 +444,11 @@ def test_pool_rows_restricts_to_training_universe():
     rows = {"2330": {"value": 1e10}, "1101": {"value": 1e9}, "9999": {"value": 2e8}}
     assert set(TL.pool_rows(rows, {"universe": ["2330", "1101"]})) == {"2330", "1101"}
     assert set(TL.pool_rows(rows, {})) == {"2330", "1101", "9999"}
-    assert TL.RADAR_BT["pool_rule"]["after"]["S3"]["win21"] > TL.RADAR_BT["pool_rule"]["before"]["S3"]["win21"]
+    PR = TL.RADAR_BT["pool_rule"]
+    assert PR["after"]["S3"]["win21"] > PR["before"]["S3"]["win21"]
+    # r6：同 2020 訓練窗重算；after = RADAR_BT 本身 (同一批 10 組)，差值附 3 個月區塊 bootstrap 範圍
+    assert "2020" in PR["window"] and PR["after"]["A"]["win21"] == TL.RADAR_BT["A"]["win21"] and PR["within_noise"] in (True, False)
+    assert all(len(v["ci95"]) == 2 and v["ci95"][0] <= v["d"] <= v["ci95"][1] for v in PR["diff"].values())
     assert TL.RADAR_BT["pool"]["n"] > 10000 and 0.1 < TL.RADAR_BT["pool"]["surge"] < 0.3, "「一般股票」基準率不可被覆蓋"
     assert TL.RADAR_BT["method"]["pit"] and TL.RADAR_BT["A"]["win21"] < TL.RADAR_BT["method"]["old"]["A"]["win21"], "10-07 誠實回測 (時點正確宇宙) 應低於舊的後見之明版"
 

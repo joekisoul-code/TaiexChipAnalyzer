@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import sys
 from pathlib import Path
@@ -71,7 +72,7 @@ def test_a_degrade_display_only():
     assert "p_up_adj" not in x and x["p_up"] == 0.85
     assert x["recent_flag"] == "below" and abs(x["recent_hit"] - g["hit_ewm"]) < 1e-9 and x["recent_n"] == 60 and abs(x["recent_up_rate"] - 0.75) < 1e-9
     assert "不改叫牌" in x["learn_note"] and "同期上漲率 75%" in x["learn_note"] and "近期實際命中" in x["learn_note"]
-    assert out["learn"]["flags"] == {"degrade": False, "platt": False, "touch_factor": False} and "停用" in out["learn"]["note"]
+    assert out["learn"]["flags"] == {"degrade": False, "platt": False, "touch_factor": False, "level_adj": False} and "停用" in out["learn"]["note"]   # r6：加 level_adj 旗標
     # 高於長期 → above，同樣不改叫牌
     rows2 = _mkt_rows(60, 1, "night", lambda i: i % 10 != 9, 0.80)   # 0.9 vs 0.80
     adj2 = L.summarize(rows2)["market"]["by_h"]["1"]["adjust"]
@@ -182,6 +183,46 @@ def test_f_flags_restore_old_path():
     out = L.summarize(rows)
     assert out["market"]["by_h"]["1"]["adjust"]["degrade"] is False
     assert L.DEGRADE_ENABLED is False and L.PLATT_ENABLED is False and L.TOUCH_FACTOR_ENABLED is False
+
+
+def test_g_level_adj_disabled_r6():
+    """r6 C6(d)：水準自學停用 → level 不動、level_adj_pct=0、level_adj{enabled False, shift 0, note}；統計照算 (adj_raw)；旗標開回 → 舊路徑。"""
+    rows = _mkt_rows(60, 1, "base", lambda i: i % 2 == 0, 0.6)       # level 1001 vs base 1000 → 有帶號誤差
+    summ = L.summarize(rows)
+    lb = summ["market"]["level_bias"]["1"]
+    assert lb["adj"] == 0.0 and lb["enabled"] is False and lb["adj_raw"] != 0 and "停用：走動式驗證無益" in lb["note"] and "下次水準修正" not in lb["note"]
+    fc = {"date": "2026-10-02", "close": 100000.0, "next_days": [{"n": 1, "date": "2026-10-06", "variant": "base", "call": "偏多", "call_strength": "", "p_up": 0.6, "level": 100500}], "horizons": {}}
+    out = L.adjust_forecast(copy.deepcopy(fc), summ)
+    x = out["next_days"][0]
+    assert x["level"] == 100500 and "level_model" not in x and x["level_adj_pct"] == 0.0
+    assert x["level_adj"]["enabled"] is False and x["level_adj"]["shift_pct"] == 0.0 and x["level_adj"]["note"] == "停用：走動式驗證無益" and x["level_adj"]["raw_pct"] == lb["adj_raw"]
+    assert "停用：走動式驗證無益" in x["level_bias_note"]
+    la = out["learn"]["level_adj"]
+    assert la["enabled"] is False and la["shift_pct"] == 0.0 and la["note"] == "停用：走動式驗證無益" and la["stats"]["1"]["adj_raw"] == lb["adj_raw"]
+    # 舊版 summary (r6 之前 summarize：adj 非 0、note 寫「下次水準修正」) → 仍不平移、note 改寫
+    old = copy.deepcopy(summ); old["market"]["level_bias"]["1"] = {"n": 60, "bias": 0.2, "mae": 0.3, "adj": 0.1, "note": "近期預估收盤平均偏低 0.20%，下次水準修正 +0.10%"}
+    x2 = L.adjust_forecast(copy.deepcopy(fc), old)["next_days"][0]
+    assert x2["level"] == 100500 and x2["level_adj_pct"] == 0.0 and x2["level_adj"]["raw_pct"] == 0.1 and "下次水準修正" not in x2["level_bias_note"]
+    # 旗標開回 → 舊行為 (平移)
+    with patched(L, "LEVEL_ADJ_ENABLED", True):
+        s3 = L.summarize(rows)
+        assert s3["market"]["level_bias"]["1"]["adj"] != 0 and "adj_raw" not in s3["market"]["level_bias"]["1"]
+        x3 = L.adjust_forecast(copy.deepcopy(fc), s3)["next_days"][0]
+        assert x3["level_model"] == 100500 and x3["level"] != 100500 and x3["level_adj_pct"] == s3["market"]["level_bias"]["1"]["adj"] and "level_adj" not in x3
+    assert L.LEVEL_ADJ_ENABLED is False
+
+
+def test_h_by_h_variant_r6():
+    """r6 C7：market.by_h_variant {h: {base:{...}, night:{...}}}，鍵與 by_h[h] 相同；by_h 不變 (仍混合)。"""
+    rows = _mkt_rows(40, 1, "base", lambda i: i % 2 == 0, 0.6) + _mkt_rows(40, 1, "night", lambda i: i % 10 != 9, 0.85)
+    m = L.summarize(rows)["market"]
+    bv = m["by_h_variant"]["1"]
+    assert set(bv) == {"base", "night"}
+    assert bv["base"]["n_calls"] == 40 and abs(bv["base"]["hit_all"] - 0.5) < 1e-9 and abs(bv["night"]["hit_all"] - 0.9) < 1e-9
+    assert m["by_h"]["1"]["n_calls"] == 80 and abs(m["by_h"]["1"]["hit_all"] - 0.7) < 1e-9          # 混合的 by_h 不變
+    assert set(bv["base"]) == set(k for k in m["by_h"]["1"] if k != "by_variant")
+    assert bv["night"] == m["by_h"]["1"]["by_variant"]["night"]
+    assert L.summarize([])["market"]["by_h_variant"] == {}
 
 
 if __name__ == "__main__":

@@ -26,9 +26,9 @@ def market_report(a: dict) -> str:
         f"市場狀態：{a.get('state', '')}｜綜合籌碼分：{a['composite']:+.1f} (3日平滑 {a.get('composite_smooth', a['composite']):+.1f}，5日動能 {a.get('momentum', 0):+.1f})  【{a['regime']}】",
         f"信心度：{a.get('confidence', '')} (因子一致 {a.get('agree_ratio', 0):.0%}，資料完整 {a.get('coverage', 0):.0%})"
         + (f"｜轉折：{a['turning']}" if a.get("turning") else ""),
-        f"進場建議：{a['action']}",
+        f"籌碼判讀：{a['action']}",
         f"  {a['detail']}",
-        f"建議持股水位：{a['position']}",
+        f"籌碼強度：{a['position']}",
         "",
         "── 主要多方理由 ──",
         *([f"  + {f.name}：{f.comment}" for f in a.get("reasons_pos", [])] or ["  (無)"]),
@@ -38,7 +38,7 @@ def market_report(a: dict) -> str:
         "── 因子明細 (分數 -2~+2) ──",
         *factor_lines(a["factors"]),
         "",
-        f"── 進場檢查表 ({a['passed']}/{a['total']} 通過) ──",
+        f"── 條件檢查表 ({a['passed']}/{a['total']} 通過) ──",
     ]
     for name, ok in a["checklist"]:
         lines.append(f"  [{'✓' if ok else ('?' if ok is None else '✗')}] {name}")
@@ -55,7 +55,7 @@ def stock_report(a: dict) -> str:
     lines = [
         f"═══ {a['name']} ({a['stock_id']})  {a['date']}  收盤 {a['close']:,.2f}{rt} ═══",
         f"個股籌碼分數：{a['composite_raw']:+.1f}  大盤環境調整 {a['market_adj']:+.0f} → {a['composite']:+.1f} 【{a['regime']}】",
-        f"進場建議：{a['action']}",
+        f"籌碼判讀：{a['action']}",
         f"標籤：{'、'.join(a['tags']) if a['tags'] else '無'}",
         "",
         "── 因子明細 ──",

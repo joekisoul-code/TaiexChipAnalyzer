@@ -45,9 +45,14 @@ IV_START = "2017-01-01"
 IV_MAX_LAG_TD = 1       # ivk 可落後的交易日數 (lag-1 ×0.958 仍有效；lag-2 ×0.9875 [−0.012, +0.004] 失效)
 IV_FORMULA = "ivk_k/sqrt(252)*100 (TXO ATM，T=n/252 交易日)"
 IV_ALERT_LAST250 = {"k1_high90": [0.05, 0.15], "k3_low20": [0.13, 0.27], "k1_high80": [0.13, 0.27]}
-IV_ROLLBACK_LAST250 = {"k1_high90": 0.17, "k3_low20": 0.30}    # 連續兩次週訓超過 → 自動 iv_enabled=false
-IV_ROLLBACK_TEXT = ("若最近 250 日 base_iv k1_high90 > 0.17 或 k3_low20 > 0.30 連續兩次週訓，或 learn 帳本 range_sigma_src=txo_iv 的 1 日 buy/sell 觸及 "
-                    "(n≥120) 落在 [0.12,0.28] 之外 → 將 iv_enabled 設 false")
+IV_ROLLBACK_LAST250 = {"k1_high90": 0.17, "k3_low20": 0.30}    # 觸及率門檻：r6 起只當警示 (breach/breach_streak)；pinball 無法計算時才沿用為自動回滾
+# r6 (2026-10-07 forecast3 F8)：觸及率超標來自 2026 漂移 (+72%)，回滾到 ATR σ 反而更差 (2020~ pinball ×1.0625，0/7 年；近 250 日 ×1.065)
+# → 自動回滾改「相對」規則：最近 250 日走動式 (月初擴張重估乘數) pinball(IV) > 1.02 × pinball(ATR) 連續兩次擬合 (週訓) → iv_enabled=false。
+IV_ROLLBACK_PIN_RATIO = 1.02
+IV_PIN_MIN_N = 120      # 每個 k 的共同列 (IV 與 ATR σ 皆有、目標已實現) 至少 120 列才計算
+IV_ROLLBACK_TEXT = ("自動：最近 250 日走動式 (月初擴張重估乘數) pinball(IV) > 1.02 × pinball(ATR) 連續兩次週訓 → 將 iv_enabled 設 false；"
+                    "base_iv k1_high90 > 0.17 或 k3_low20 > 0.30 只列警示 (觸及偏高來自 2026 漂移，ATR 一樣偏高且 pinball 較差)，pinball 無法計算時才沿用此門檻連續兩次回滾。"
+                    "手動：learn 帳本 range_sigma_src=txo_iv 的 1 日 buy/sell 觸及 (n≥120) 落在 [0.12,0.28] 之外 → 先比對同期 ATR pinball 再決定是否設 false")
 IV_TOUCH_TEXT = "sigma 來源 TXO 選擇權 IV；q20/q80 樣本外觸及約 21~22%、q10/q90 約 11~12% (2020~，pinball 約 −6.5%)"
 _CACHE: dict = {}
 
@@ -263,22 +268,94 @@ def _fit_iv(d: pd.DataFrame, tg: pd.DataFrame, nv: pd.Series, siv: pd.DataFrame)
     return out
 
 
-def _iv_monitor(cov: dict, prev: dict | None) -> dict:
-    """iv_monitor：最近 250 日 base_iv 觸及警示 + 回滾規則。前一版 iv_enabled=false (手動或自動) 會保留；
-    最近 250 日超過回滾門檻連續兩次擬合 (週訓) → 自動設 false。"""
+def _pinball(y: np.ndarray, lv: np.ndarray, q: float) -> np.ndarray:
+    e = y - lv
+    return np.maximum(q * e, (q - 1) * e)
+
+
+def _pinball_last250(d: pd.DataFrame, sig: pd.Series, tg: pd.DataFrame, siv: pd.DataFrame | None, last: int = 250) -> dict | None:
+    """r6 IV 回滾的相對規則：最近 last 列的走動式 pinball，IV (siv_k × base_iv 式乘數) vs ATR (sig × base 式乘數)。
+    每個月初以「當月第一列之前、目標已實現 (列 j 的 k 日路徑在 j+k 收盤才知道 → j ≤ 首列 − k − 1)」的列擴張重估乘數
+    (ATR 用全部歷史；IV 只用 date ≥ IV_START 且 σ_iv > 0 的列，與 _fit_iv 相同)，只在兩者 σ 皆有的共同列上比較。
+    回傳 {iv, atr, ratio, n:{k:..}, method}；任一 k 共同列 < IV_PIN_MIN_N 或沒有 siv → None。"""
+    if siv is None or len(d) < last + 300:
+        return None
+    ds = d["date"].astype(str).str[:10].values
+    mon = pd.Series(ds).str[:7].values
+    n = len(d)
+    t0 = n - last
+    sig_v = sig.values.astype(float)
+    tot_iv, tot_atr, cnt, nk = 0.0, 0.0, 0, {}
+    for k in KS:
+        if k not in siv.columns:
+            return None
+        s_iv = siv[k].values.astype(float)
+        rows_k = 0
+        for name, q in QUANTS.items():
+            y = tg[f"pathLow{k}" if name.startswith("low") else f"pathHigh{k}"].values.astype(float)
+            r_atr = y / sig_v
+            r_iv = y / s_iv
+            ok_iv_tr = np.isfinite(r_iv) & (ds >= IV_START)
+            ok_atr_tr = np.isfinite(r_atr)
+            l_iv = np.full(n, np.nan); l_atr = np.full(n, np.nan)
+            i = t0
+            while i < n:
+                j = i
+                while j < n and mon[j] == mon[i]:
+                    j += 1
+                cut = max(0, i - k)          # 訓練列 < cut (目標在當月第一列之前已實現)
+                a_tr, v_tr = r_atr[:cut][ok_atr_tr[:cut]], r_iv[:cut][ok_iv_tr[:cut]]
+                if len(a_tr) >= 250 and len(v_tr) >= 250:
+                    l_atr[i:j] = np.quantile(a_tr, q) * sig_v[i:j]
+                    l_iv[i:j] = np.quantile(v_tr, q) * s_iv[i:j]
+                i = j
+            ok = np.isfinite(y) & np.isfinite(l_iv) & np.isfinite(l_atr)
+            ok[:t0] = False
+            m = int(ok.sum())
+            if m < IV_PIN_MIN_N:
+                return None
+            tot_iv += float(_pinball(y[ok], l_iv[ok], q).mean())
+            tot_atr += float(_pinball(y[ok], l_atr[ok], q).mean())
+            cnt += 1
+            rows_k = m
+        nk[str(k)] = rows_k
+    if not cnt or tot_atr <= 0:
+        return None
+    pi, pa = tot_iv / cnt, tot_atr / cnt
+    return {"iv": round(pi, 5), "atr": round(pa, 5), "ratio": round(pi / pa, 4), "n": nk, "cells": cnt,
+            "method": f"最近 {last} 列，月初擴張重估乘數 (目標已實現才入訓練)，k=1~3 × low10/low20/high80/high90 平均 pinball，IV 與 ATR σ 共同列"}
+
+
+def _iv_monitor(cov: dict, prev: dict | None, pin: dict | None = None) -> dict:
+    """iv_monitor：最近 250 日 base_iv 觸及警示 + 回滾規則。前一版 iv_enabled=false (手動或自動) 會保留。
+    pin (r6，_pinball_last250 輸出)：有 ratio 時自動回滾改為「pinball(IV) > IV_ROLLBACK_PIN_RATIO × pinball(ATR) 連續兩次擬合」，
+    觸及率門檻 (breach) 只當警示；pin 為 None (或無 ratio) → 沿用舊規則：觸及率超過回滾門檻連續兩次擬合 (週訓) → 自動設 false。"""
     l250 = ((cov or {}).get("last250") or {}).get("base_iv") or {}
     pm = (prev or {}).get("iv_monitor") or {}
     alerts = [f"{key} {l250[key]:.3f} ∉ [{lo}, {hi}]" for key, (lo, hi) in IV_ALERT_LAST250.items() if l250.get(key) is not None and not lo <= l250[key] <= hi]
     breach = [key for key, thr in IV_ROLLBACK_LAST250.items() if l250.get(key) is not None and l250[key] > thr]
-    streak = int(pm.get("breach_streak") or 0) + 1 if breach else 0
+    # r6 review：pinball 規則主導期間觸及率只當警示、不累積；退回觸及率規則時從 0 重新計 (避免一退回就立刻回滾)
+    streak = (int(pm.get("breach_streak") or 0) if pm.get("rollback_rule") != "pinball" else 0) + 1 if breach else 0
     enabled = bool(pm.get("iv_enabled", True))
     out = {"alert_last250": IV_ALERT_LAST250, "rollback": IV_ROLLBACK_TEXT, "iv_enabled": enabled,
            "last250": {key: l250.get(key) for key in IV_ALERT_LAST250}, "alerts": alerts, "breach": breach, "breach_streak": streak}
+    ratio = (pin or {}).get("ratio")
+    rule = "pinball" if ratio is not None else "touch"
+    out["rollback_rule"] = rule
+    if rule == "pinball":
+        pin_breach = bool(ratio > IV_ROLLBACK_PIN_RATIO)
+        pstreak = int(pm.get("pin_streak") or 0) + 1 if pin_breach else 0
+        out.update(pinball_last250=pin, pin_ratio_max=IV_ROLLBACK_PIN_RATIO, pin_streak=pstreak)
+        fire = pstreak >= 2
+        why = f"最近 250 日走動式 pinball IV/ATR = {ratio:.3f} > {IV_ROLLBACK_PIN_RATIO} 連續 {pstreak} 次擬合"
+    else:
+        fire = streak >= 2
+        why = f"最近 250 日 {'/'.join(breach)} 連續 {streak} 次擬合超過回滾門檻"
     if pm.get("disabled_by") and not enabled:
         out["disabled_by"] = pm["disabled_by"]
-    if enabled and streak >= 2:
+    if enabled and fire:
         out["iv_enabled"] = False
-        out["disabled_by"] = f"auto {dt.date.today().isoformat()}：最近 250 日 {'/'.join(breach)} 連續 {streak} 次擬合超過回滾門檻"
+        out["disabled_by"] = f"auto {dt.date.today().isoformat()}：{why}"
     return out
 
 
@@ -351,7 +428,12 @@ def fit_multipliers(scored: pd.DataFrame, night: pd.DataFrame | None = None, pat
     except Exception as e:  # noqa: BLE001
         log.warning("range_levels coverage table: %s", e)
     if out.get("base_iv"):
-        out["iv_monitor"] = _iv_monitor(out.get("coverage") or {}, prev)
+        pin = None
+        try:
+            pin = _pinball_last250(d, sig, tg, siv)
+        except Exception as e:  # noqa: BLE001
+            log.warning("range_levels pinball last250: %s", e)
+        out["iv_monitor"] = _iv_monitor(out.get("coverage") or {}, prev, pin)
     if path:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -381,6 +463,11 @@ def format_coverage(p: dict) -> str:
                      f"high80 {p['base_iv'].get('1', {}).get('high80')}σ；night_iv {'有' if p.get('night_iv') else '無'}")
         lines.append(f"  最近 250 日 base_iv: k1 low20/high80 {li.get('k1_low20')}/{li.get('k1_high80')}, k1 high90 {li.get('k1_high90')}, k3 low20 {li.get('k3_low20')}；"
                      f"iv_enabled={mon.get('iv_enabled')}" + (f"；警示 {mon.get('alerts')}" if mon.get("alerts") else "") + (f"；{mon.get('disabled_by')}" if mon.get("disabled_by") else ""))
+        pn = mon.get("pinball_last250") or {}
+        if pn:
+            lines.append(f"  最近 250 日走動式 pinball：IV {pn.get('iv')} vs ATR {pn.get('atr')} (×{pn.get('ratio')}；回滾門檻 >{mon.get('pin_ratio_max')} 連續兩次，目前連續 {mon.get('pin_streak')})")
+        else:
+            lines.append(f"  pinball 比較無法計算 → 回滾沿用觸及率門檻 (rollback_rule={mon.get('rollback_rule')})")
     elif p.get("n_iv") is None:
         lines.append("  IV sigma：未提供 ivk 歷史 (只擬合 ATR+EWMA)")
     return "\n".join(lines)
@@ -392,6 +479,40 @@ def load_multipliers(path: Path | str | None = DEFAULT_PATH) -> dict | None:
         p = Path(path)
         _CACHE[key] = json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
     return _CACHE[key]
+
+
+def touch_last250(nd: list[dict] | None = None, path: Path | str | None = DEFAULT_PATH, p: dict | None = None) -> dict | None:
+    """r6 C6(a)：「約兩成機率觸及」旁要顯示的近 250 日實際觸及率 (coverage.last250)。
+    模式跟本次 next_days 實際使用的帶一致：任一 k 用 TXO IV → *_iv；next_days[0] 為夜盤模式 → night*；否則 base。
+    nd 省略 → iv_enabled 決定 base_iv / base。回傳 {"k1":{"low10","low20","high80","high90"},...,"n":250,"n_k":{...},"src","mode",...}；
+    乘數未擬合 / 該模式無監控表 → None。注意：乘數為全樣本擬合 (樣本內)，走動式約再高 0~2pt。"""
+    p = p if p is not None else load_multipliers(path)
+    if not p:
+        return None
+    l250 = (p.get("coverage") or {}).get("last250") or {}
+    if nd:
+        iv = any(x.get("range_sigma_src") == "txo_iv" for x in nd)
+        night = str((nd[0] or {}).get("range_mode") or "").startswith("night")
+    else:
+        iv, night = iv_enabled(p), False
+    mode = ("night" if night else "base") + ("_iv" if iv else "")
+    row = l250.get(mode)
+    if not row and night:          # 夜盤監控表缺 → 退回同 σ 的 base 表
+        mode = "base_iv" if iv else "base"
+        row = l250.get(mode)
+    if not row:
+        return None
+    out: dict = {}
+    for k in KS:
+        if row.get(f"k{k}_n"):
+            out[f"k{k}"] = {q: row.get(f"k{k}_{q}") for q in QUANTS}
+    if not out:
+        return None
+    out.update({"n": 250, "n_k": {f"k{k}": row.get(f"k{k}_n") for k in KS if row.get(f"k{k}_n")},
+                "src": "iv_monitor" if mode == "base_iv" else f"coverage.last250.{mode}", "mode": mode,
+                "end": p.get("end"), "fitted_at": p.get("fitted_at"), "nominal_touch": {"low10": 0.10, "low20": 0.20, "high80": 0.20, "high90": 0.10},
+                "note": "最近 250 個交易日實際觸及率 (以加權指數計；low=路徑最低跌破、high=路徑最高突破)；乘數為全樣本擬合，走動式約再高 0~2pt"})
+    return out
 
 
 # ------------------------------------------------------------------ predict
@@ -651,11 +772,12 @@ def attach_to_next_days(nd: list[dict], scored: pd.DataFrame, snapshot: dict | N
         ev_txt = (f"。隔天為休市後首日：{ev['why']}，" + ("1 日帶依休市期間美股平移並調寬 (2014~ 104 次：pinball −31%)" if shift_on else
                                                          "1 日帶已放寬 (驗收回測 2014+ 116 次休市：pinball −11%)"
                                                          + ("；休市期間美股尚未全部收盤，中心移待美股收盤後更新" if (cs and cs.get("status") == "pending_us") else "")))
-    return (f"買賣點改用路徑型水準 (sigma {nd[0]['range_sigma']:.2f}%/日" + ("，選擇權 IV" if nd[0].get("range_sigma_src") == "txo_iv" else "")
+    # r6：中性描述 (原「拉回 X 買 (停損 Y)、反彈 Z 賣 (目標 W)」)
+    return (f"上下緣參考改用路徑型水準 (sigma {nd[0]['range_sigma']:.2f}%/日" + ("，選擇權 IV" if nd[0].get("range_sigma_src") == "txo_iv" else "")
             + ("，含完整夜盤 " + format(night, "+.2f") + "%" if night is not None else
                (("，休市後首日不含夜盤 (夜盤只涵蓋 1 個美股交易日，改用 base 模式)；"
                  + (f"1 日帶 ×√n_US×{cs['wr']:g} 並依休市期間美股平移 {cs['c']:+.2f}%，k≥2 不放寬" if shift_on else "只有 1 日帶 × √n_US，k≥2 不放寬"))
                 if night_dropped else
                 ("，" + why if why else "，不含夜盤"))) + ")："
-            + "；".join(f"{x['label']} 拉回 {x['buy_at']:,} 買 (停損 {x['stop']:,})、反彈 {x['sell_at']:,} 賣 (目標 {x['target']:,})" for x in nd)
+            + "；".join(f"{x['label']} 下緣參考 {x['buy_at']:,} (一成 {x['stop']:,})、上緣參考 {x['sell_at']:,} (一成 {x['target']:,})" for x in nd)
             + touch_txt + ev_txt)

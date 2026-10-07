@@ -199,9 +199,13 @@ def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, sign
                     continue
                 tier = CF.label(x["call"], x.get("call_strength") or "", x.get("variant") or "base", night_v, rs, bull, hsi_v, kospi_v)
                 if tier:
-                    st_ = CF.stats_for(int(x["n"]), x.get("variant") or "base", tier) or {}
+                    st_raw = CF.stats_for(int(x["n"]), x.get("variant") or "base", tier) or {}
+                    st_ = CF.for_display(st_raw) or {}      # r6 C6(b)：n < 30 → conf_hit / conf_yr_min 為 null (conf_n 照給)
                     x["conf_tier"], x["conf_hit"], x["conf_cov"], x["conf_yr_min"] = tier, st_.get("hit"), st_.get("cov"), st_.get("yr_min")
-                    x["conf_note"] = f"信心{tier}：模型{'強' if x.get('call_strength') else ''}叫牌" + ("、夜盤同向" if night_v is not None and ((night_v > 0) == (x['call'] == '偏多')) else "") + (f"、規律{'同向' if (rs > 0) == (x['call'] == '偏多') and rs != 0 else '不反向' if rs == 0 else '反向'}" ) + ((f"、恆生{'同向' if (hsi_v > 0) == (x['call'] == '偏多') else '反向'}/KOSPI{'同向' if (kospi_v > 0) == (x['call'] == '偏多') else '反向'}") if hsi_v is not None and kospi_v is not None else "") + (f"；OOS 命中 {st_['hit']:.0%} (覆蓋 {st_['cov']:.0%}，逐年最低 {st_['yr_min']:.0%})" if st_.get("hit") else "")
+                    x["conf_n"] = st_raw.get("n")
+                    if st_.get("small_n"):
+                        x["conf_hit_raw"] = st_.get("hit_raw")
+                    x["conf_note"] = f"信心{tier}：模型{'強' if x.get('call_strength') else ''}叫牌" + ("、夜盤同向" if night_v is not None and ((night_v > 0) == (x['call'] == '偏多')) else "") + (f"、規律{'同向' if (rs > 0) == (x['call'] == '偏多') and rs != 0 else '不反向' if rs == 0 else '反向'}" ) + ((f"、恆生{'同向' if (hsi_v > 0) == (x['call'] == '偏多') else '反向'}/KOSPI{'同向' if (kospi_v > 0) == (x['call'] == '偏多') else '反向'}") if hsi_v is not None and kospi_v is not None else "") + (f"；OOS 命中 {st_['hit']:.0%} (覆蓋 {st_['cov']:.0%}，逐年最低 {st_['yr_min']:.0%})" if st_.get("hit") and st_.get("yr_min") is not None else f"；OOS 命中 {st_['hit']:.0%} (覆蓋 {st_['cov']:.0%})" if st_.get("hit") else f"；OOS 樣本不足 (n={st_raw.get('n')}，未滿 {CF.MIN_N_SHOW} 不顯示命中率)" if st_.get("small_n") else "")
         except Exception as e:  # noqa: BLE001
             log.warning("confidence: %s", e)
         calls = "、".join(f"{x['label']} {x.get('call')}{x.get('call_strength') or ''} ({(x.get('call_hit') or 0):.0%})" for x in nd if x.get("call"))
@@ -246,6 +250,10 @@ def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, sign
             rn = RLV.attach_to_next_days(nd, scored, snap, base_px, live=live, sigma_factor=sf, ivk_live=ivk_live, us_px=us_px)
             if rn:
                 notes.append(rn)
+                # r6 C6(a)：「約兩成機率觸及」旁的近 250 日實際觸及率 (range_levels coverage.last250，與本次使用的帶同模式)
+                tl = RLV.touch_last250(nd)
+                if tl:
+                    fc["range_touch_last250"] = tl
         except Exception as e:  # noqa: BLE001
             log.warning("range_levels: %s", e)
     # 0c) 事件預判 (2026-09-27, events)：休市/選舉/總經/法說的歷史統計 + 已驗證的寬度/跳空/IV 預期；方向投票權重固定 0 (不影響叫牌)
@@ -327,10 +335,10 @@ def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, sign
              "drivers_toward_down": [], "drivers_toward_up": [], "oos": {}, "horizon_note": "7 個交易日"}
     fc["trend7"] = g
     if g.get("available"):
-        if g.get("state") == "down":
-            notes.append(f"7 個交易日趨勢閘門 [{g.get('confidence')}]：偏下 → 不推薦買點，僅賣點/觀望 (" + "；".join(g.get("reasons") or []) + ")")
+        if g.get("state") == "down":   # r6：中性描述 (原「不推薦買點，僅賣點/觀望」)
+            notes.append(f"7 個交易日趨勢閘門 [{g.get('confidence')}]：偏下 → 下緣參考價可信度降低 (" + "；".join(g.get("reasons") or []) + ")")
         elif g.get("state") == "up":
-            notes.append("7 個交易日趨勢閘門：偏上 → 不推薦賣點 (" + "；".join(g.get("reasons") or []) + ")")
+            notes.append("7 個交易日趨勢閘門：偏上 → 上緣參考價可信度降低 (" + "；".join(g.get("reasons") or []) + ")")
     fc["next_days"], fc["horizons"], fc["short_term_notes"] = nd, hz, notes
     fc["summary"] = summarize(fc)
     return fc

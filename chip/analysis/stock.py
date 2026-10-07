@@ -16,7 +16,7 @@ WEIGHTS = {"foreign": 3.0, "trust": 2.0, "dealer": 0.5, "gov8": 1.5, "concentrat
            "short": 1.0, "sbl": 1.0, "holding": 1.0, "rs": 1.5, "volume": 1.5, "trend": 2.0}
 NAMES = {"foreign": "外資買賣超", "trust": "投信買賣超", "dealer": "自營商買賣超", "gov8": "八大行庫買賣超",
          "concentration": "法人籌碼集中度 (20日淨買/成交量)", "margin": "融資量價象限", "short": "融券/券資比",
-         "sbl": "借券賣出餘額", "holding": "外資持股比率趨勢", "rs": "相對大盤強弱 (20日)", "volume": "量價關係", "trend": "股價趨勢"}
+         "sbl": "借券餘額", "holding": "外資持股比率趨勢", "rs": "相對大盤強弱 (20日)", "volume": "量價關係", "trend": "股價趨勢"}
 
 
 def build_frame(stock_id: str) -> tuple[pd.DataFrame, dict]:
@@ -127,7 +127,7 @@ def score_row(d: pd.DataFrame, sbl_today: dict | None, market_ret20: float | Non
     bonus = 0.5 if (pd.notna(g5) and g5 > 0 and r["ret5"] < 0) else 0
     add("gov8", (0 if np.isnan(zg) else zg) + bonus,
         f"今 {fmt(r['gov8_net'], 0)} 萬｜5日 {fmt(g5, 0)} 萬｜20日 {fmt(r['gov8_net_20d'], 0)} 萬｜5日 {fmt(r['gov8_lots_5d'], 0)} 張",
-        "官股逆勢買進 (護盤/低接)" if bonus else "官股買超" if (g5 or 0) > 0 else "官股賣超" if (g5 or 0) < 0 else "無官股動作",
+        "官股逆勢買超 (護盤)" if bonus else "官股買超" if (g5 or 0) > 0 else "官股賣超" if (g5 or 0) < 0 else "無官股動作",
         available=pd.notna(g5), tags=["官股護盤"] if bonus else [])
     cc = r["concentration"]
     add("concentration", np.select([cc > 15, cc > 5, cc > -5, cc > -15], [2, 1, 0, -1], -2) if pd.notna(cc) else 0,
@@ -164,8 +164,8 @@ def score_row(d: pd.DataFrame, sbl_today: dict | None, market_ret20: float | Non
     if sbl_today:
         chg = (sbl_today["sbl_today"] or 0) - (sbl_today["sbl_prev"] or 0)
         add("sbl", float(np.select([chg < -500, chg < 0, chg <= 0, chg < 500], [1, 0.5, 0, -0.5], -1.5)),
-            f"借券賣出餘額 {fmt(sbl_today['sbl_today'], 0, ' 張', sign=False)}｜今變 {fmt(chg, 0)}",
-            "借券賣出回補" if chg < 0 else "借券賣出增加 (法人放空)" if chg > 0 else "無變化")
+            f"借券餘額 {fmt(sbl_today['sbl_today'], 0, ' 張', sign=False)}｜今變 {fmt(chg, 0)}",
+            "借券回補" if chg < 0 else "借券增加 (空方部位上升)" if chg > 0 else "無變化")
     else:
         add("sbl", 0, "N/A", "無借券資料", available=False)
     hc = r["holding_chg20"]
@@ -219,21 +219,21 @@ def assess(stock_id: str, market_assessment: dict | None = None) -> dict:
     weak_combo = "外資投信雙賣" in tags or "散戶接刀" in tags
     # 進場邏輯：個股籌碼 + 趨勢 + 大盤狀態
     if final >= 30 and trend_up and not weak_combo:
-        action = "可進場（籌碼+趨勢同向）" + ("，法人共識強" if strong_combo else "")
+        action = "籌碼與趨勢同向偏多" + ("，法人共識強" if strong_combo else "")
     elif final >= 15 and trend_up:
         action = "可分批布局"
     elif final >= 15 and not trend_up:
         action = "籌碼轉佳但趨勢未翻多，等站上月線再進"
     elif final <= -25 or weak_combo:
-        action = "不宜進場／減碼"
+        action = "籌碼與趨勢偏弱"
     elif "官股護盤" in tags or ("外資連賣" in tags and r["bias20"] < -10) or "融資斷頭清洗" in tags:
-        action = "超跌觀察，小量試單"
+        action = "超跌觀察"
     else:
         action = "觀望"
     if mstate == "空頭" and action.startswith("可"):
         action += "；大盤空頭，部位減半、只做強勢股"
     elif mreg in ("偏空", "空方") and action.startswith("可"):
-        action += "；大盤偏空請縮小部位"
+        action += "；大盤偏空"
     name = quote["name"] if quote else stock_id
     return {"stock_id": stock_id, "name": name, "date": str(r["date"]), "close": float(r["close"]),
             "composite_raw": comp, "market_adj": adj, "composite": final, "regime": reg, "action": action,

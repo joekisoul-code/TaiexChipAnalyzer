@@ -130,13 +130,13 @@ def market_view(hist: pd.DataFrame, scored: pd.DataFrame | None) -> tuple[dict, 
     tail = h.tail(60)
     corr60 = float(tail["gov8_net"].corr(tail["ret1"])) if tail["ret1"].notna().sum() > 20 else None
     if st >= 3 and ret5 < 0:
-        mode, mtxt = "逆勢護盤", f"指數 5 日 {ret5:+.1f}% 但官股連買 {st} 日，國家隊進場跡象"
+        mode, mtxt = "逆勢護盤", f"指數 5 日 {ret5:+.1f}% 但官股連買 {st} 日，國家隊護盤跡象"
     elif cum5 > 30 and ret5 > 0:
-        mode, mtxt = "順勢加碼", f"指數上漲官股 5 日仍買 {cum5:+.0f} 億，官股與市場同向"
+        mode, mtxt = "順勢買超", f"指數上漲官股 5 日仍買 {cum5:+.0f} 億，官股與市場同向"
     elif st <= -3 and ret5 > 0:
         mode, mtxt = "高檔調節", f"指數 5 日 {ret5:+.1f}% 官股連賣 {abs(st)} 日，高檔獲利了結"
     elif cum5 < -30 and ret5 < 0:
-        mode, mtxt = "順勢減碼", f"指數下跌官股 5 日賣 {cum5:+.0f} 億，未護盤反而減碼 (偏空)"
+        mode, mtxt = "順勢賣超", f"指數下跌官股 5 日賣 {cum5:+.0f} 億，未護盤反而賣超 (偏空)"
     elif net > 0:
         mode, mtxt = "小幅買超", "官股買超但未成趨勢"
     elif net < 0:
@@ -187,10 +187,10 @@ def market_view(hist: pd.DataFrame, scored: pd.DataFrame | None) -> tuple[dict, 
     # 護盤力道 -100..100：單日 z、5 日 z、連續天數、行為模式 綜合
     z1v = float(last["z1"]) if pd.notna(last["z1"]) else 0.0
     z5v = float(last["z5"]) if pd.notna(last["z5"]) else 0.0
-    mode_pts = {"逆勢護盤": 25, "順勢加碼": 15, "小幅買超": 5, "中性": 0, "小幅賣超": -5, "高檔調節": -15, "順勢減碼": -25}[mode]
+    mode_pts = {"逆勢護盤": 25, "順勢買超": 15, "小幅買超": 5, "中性": 0, "小幅賣超": -5, "高檔調節": -15, "順勢賣超": -25}[mode]
     power = max(-100, min(100, 30 * max(-2, min(2, z1v)) / 2 + 30 * max(-2, min(2, z5v)) / 2 + 20 * max(-5, min(5, st)) / 5 + mode_pts))
-    power_text = ("強力護盤" if power >= 60 else "積極買進" if power >= 30 else "小幅偏買" if power >= 10 else
-                  "強力出貨" if power <= -60 else "明顯賣出" if power <= -30 else "小幅偏賣" if power <= -10 else "觀望中性")
+    power_text = ("強力護盤" if power >= 60 else "積極買超" if power >= 30 else "小幅偏買" if power >= 10 else
+                  "強力出貨" if power <= -60 else "明顯賣超" if power <= -30 else "小幅偏賣" if power <= -10 else "觀望中性")
     # 存量位置：目前累計淨部位在歷史區間的位置 (100% = 歷史最高持有)
     inv = h["inv"].astype(float)
     inv_rng = float(inv.max() - inv.min())
@@ -331,7 +331,7 @@ def watchlist(res: dict | None) -> dict:
 def alerts(view: dict, rank: dict, wl: dict) -> list[str]:
     al = []
     if view:
-        if view["mode"] in ("逆勢護盤", "高檔調節", "順勢減碼"):
+        if view["mode"] in ("逆勢護盤", "高檔調節", "順勢賣超"):
             al.append(f"八大行庫{view['mode']}：{view['mode_text']}")
         if view.get("z1") is not None and abs(view["z1"]) >= 2:
             al.append(f"八大行庫單日{'買超' if view['net'] > 0 else '賣超'} {abs(view['net']):.0f} 億，為 60 日 {view['z1']:+.1f} 個標準差 (歷史百分位 {view['percentile']:.0f}%)")

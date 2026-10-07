@@ -476,9 +476,9 @@ def _honesty_note(h: int, variant: str, phase: str | None = None) -> str:
     if h == 1 and variant == "base":
         parts.append("OOS 命中約 56% (基準 55%)")
     elif h == 1 and variant == "night":
-        parts.append("命中為收盤到收盤,主要來自隔夜跳空;台指期開盤才進場約 50% (無優勢)")
+        parts.append("命中為收盤到收盤,主要來自隔夜跳空;台指期開盤後才看 (開盤到收盤) 約 50% (無優勢)")   # r6：中性用語 (原「開盤才進場」)
     elif variant == "night":
-        parts.append("命中為收盤到收盤,含已發生的隔夜跳空;開盤後才進場無明顯優勢")
+        parts.append("命中為收盤到收盤,含已發生的隔夜跳空;開盤後才看 (開盤到收盤) 無明顯優勢")
     if phase == "open":
         parts.append("盤中以未收盤 K 棒計算,屬暫定")
     return "；".join(parts)

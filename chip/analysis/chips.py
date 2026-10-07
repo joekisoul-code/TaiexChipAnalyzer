@@ -245,14 +245,14 @@ def broker_summary(broker: list, price: float | None) -> pd.DataFrame:
         return pd.DataFrame()
     df = pd.DataFrame(broker)
     cols = {c: c for c in df.columns}
-    rename = {"brokerName": "券商", "buyPriceAvg": "買進均價", "sellPriceAvg": "賣出均價", "buyQuantity": "買進張", "sellQuantity": "賣出張",
-              "buyQuantities": "買進張", "sellQuantities": "賣出張", "diff": "買賣超", "netBuySell": "買賣超", "quantityDiff": "買賣超"}
+    rename = {"brokerName": "券商", "buyPriceAvg": "買方均價", "sellPriceAvg": "賣方均價", "buyQuantity": "買張", "sellQuantity": "賣張",
+              "buyQuantities": "買張", "sellQuantities": "賣張", "diff": "買賣超", "netBuySell": "買賣超", "quantityDiff": "買賣超"}
     df = df.rename(columns={k: v for k, v in rename.items() if k in cols})
-    if "買賣超" not in df and {"買進張", "賣出張"} <= set(df.columns):
-        df["買賣超"] = df["買進張"] - df["賣出張"]
-    if price and "買進均價" in df:
-        df["現價vs買進均價%"] = ((price / df["買進均價"] - 1) * 100).round(2)
-    keep = [c for c in ("券商", "買賣超", "買進張", "賣出張", "買進均價", "賣出均價", "現價vs買進均價%") if c in df.columns]
+    if "買賣超" not in df and {"買張", "賣張"} <= set(df.columns):
+        df["買賣超"] = df["買張"] - df["賣張"]
+    if price and "買方均價" in df:
+        df["現價vs買方均價%"] = ((price / df["買方均價"] - 1) * 100).round(2)
+    keep = [c for c in ("券商", "買賣超", "買張", "賣張", "買方均價", "賣方均價", "現價vs買方均價%") if c in df.columns]
     df = df[keep] if keep else df
     if "買賣超" in df:
         df = df.sort_values("買賣超", ascending=False)
@@ -288,7 +288,7 @@ def assess(stock_id: str, wg: dict | None = None, quote: dict | None = None) -> 
                     notes.append(f"{label} 20 日淨買 {net:,.0f} 張、成本約 {c:,.1f}，現價高於成本 {rel:.1f}% (獲利中，籌碼穩)")
                     score += 0.5 if label != "融資" else -0.25
                 else:
-                    notes.append(f"{label} 20 日淨買 {net:,.0f} 張、成本約 {c:,.1f}，現價低於成本 {abs(rel):.1f}% (套牢，{'可能停損' if label == '融資' else '有護盤/加碼動機'})")
+                    notes.append(f"{label} 20 日淨買 {net:,.0f} 張、成本約 {c:,.1f}，現價低於成本 {abs(rel):.1f}% (套牢，{'可能停損' if label == '融資' else '有護盤/買超動機'})")
                     score += -0.5 if label == "融資" else 0.25
             else:
                 notes.append(f"{label} 20 日淨賣 {abs(net):,.0f} 張、出貨均價約 {c:,.1f}，現價{'低於' if rel < 0 else '高於'}出貨價 {abs(rel):.1f}%")
@@ -314,7 +314,7 @@ def assess(stock_id: str, wg: dict | None = None, quote: dict | None = None) -> 
         notes.append("價格已還原分割：" + "、".join(f"{s['date']} ×{s['factor']:g}" for s in d["splits"]) + "（分割前的融資/法人張數未換算，成本估算以分割後區間為準）")
     if "sbl_bal" in flows and pd.notna(fl.get("sbl_bal")):
         chg5 = flows["sbl_bal"].diff(5).iloc[-1] if flows["sbl_bal"].notna().sum() > 5 else np.nan
-        notes.append(f"借券賣出餘額 {fl['sbl_bal']:,.0f} 張" + (f"，5 日 {chg5:+,.0f}" if pd.notna(chg5) else ""))
+        notes.append(f"借券餘額 {fl['sbl_bal']:,.0f} 張" + (f"，5 日 {chg5:+,.0f}" if pd.notna(chg5) else ""))
         score += -0.5 if pd.notna(chg5) and chg5 > 0 and chg5 > 0.02 * fl["sbl_bal"] else 0
     label = "籌碼偏多" if score >= 1.5 else "籌碼偏空" if score <= -1.5 else "籌碼中性"
     return {"stock_id": stock_id, "name": quote.get("name") if quote else stock_id, "price": price, "date": str(price_df["date"].iloc[-1]),
