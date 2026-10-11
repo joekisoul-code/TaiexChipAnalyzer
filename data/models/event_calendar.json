@@ -1,7 +1,7 @@
 {
- "generated": "2026-10-04 08:38:47",
+ "generated": "2026-10-11 08:53:55",
  "schema": "event_calendar/v1",
- "asof": "2026-10-04",
+ "asof": "2026-10-11",
  "params_version": "2026-09-27",
  "horizon_days": 120,
  "health": {
@@ -20,17 +20,6 @@
   "us_calendar": "NYSE 規則 + ^GSPC 實際交易日 (過去)"
  },
  "events": [
-  {
-   "date": "2026-10-08",
-   "tw_session": "2026-10-08",
-   "event_type": "pre_holiday_session",
-   "title_zh": "國慶日連假前最後交易日",
-   "date_confidence": "confirmed",
-   "source": "TWSE holidaySchedule API",
-   "n_us": 1,
-   "next_td": "2026-10-12",
-   "beyond_horizon": false
-  },
   {
    "date": "2026-10-09",
    "tw_session": "2026-10-12",
@@ -427,6 +416,33 @@
    "title_zh": "美國 2 月非農就業 (估計)",
    "date_confidence": "estimated",
    "source": "規則估計：月初第一個週五；待 BLS 公告",
+   "beyond_horizon": true
+  },
+  {
+   "date": "2027-03-16",
+   "tw_session": "2027-03-17",
+   "event_type": "us_cpi",
+   "title_zh": "美國 2 月 CPI (估計)",
+   "date_confidence": "estimated",
+   "source": "規則估計：月 10~15 日週中；待 BLS 公告",
+   "beyond_horizon": true
+  },
+  {
+   "date": "2027-03-17",
+   "tw_session": "2027-03-18",
+   "event_type": "fomc",
+   "title_zh": "FOMC 利率決策 + 經濟預測 (SEP)",
+   "date_confidence": "scheduled",
+   "source": "federalreserve.gov fomccalendars (暫定)",
+   "beyond_horizon": true
+  },
+  {
+   "date": "2027-03-18",
+   "tw_session": "2027-03-19",
+   "event_type": "tw_cbc",
+   "title_zh": "央行理監事會 (約 16:00 公布) (估計)",
+   "date_confidence": "estimated",
+   "source": "規則估計：季末月第三個週四",
    "beyond_horizon": true
   }
  ]

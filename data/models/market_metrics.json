@@ -1,22 +1,22 @@
 {
  "1": {
-  "n": 3110,
-  "rank_ic": 0.049,
-  "ic_year_mean": 0.053,
+  "n": 3114,
+  "rank_ic": 0.048,
+  "ic_year_mean": 0.052,
   "ic_positive_years": "10/13",
   "base_hit": 0.55,
   "base_mean": 0.06,
   "bin_hit": [
    0.526,
    0.547,
-   0.543,
+   0.54,
    0.571,
-   0.564
+   0.565
   ],
   "bin_mean": [
    0.01,
    0.03,
-   0.0,
+   -0.0,
    0.11,
    0.16
   ],
@@ -120,36 +120,36 @@
    },
    {
     "year": 2026,
-    "n": 180.0,
-    "ic": 0.224,
-    "top_q_mean": 0.982,
-    "bot_q_mean": 0.067,
-    "base_mean": 0.296
+    "n": 184.0,
+    "ic": 0.207,
+    "top_q_mean": 0.956,
+    "bot_q_mean": 0.135,
+    "base_mean": 0.3
    }
   ]
  },
  "2": {
-  "n": 3109,
-  "rank_ic": 0.053,
-  "ic_year_mean": 0.073,
+  "n": 3113,
+  "rank_ic": 0.052,
+  "ic_year_mean": 0.071,
   "ic_positive_years": "10/13",
   "base_hit": 0.562,
-  "base_mean": 0.12,
+  "base_mean": 0.13,
   "bin_hit": [
-   0.534,
+   0.535,
    0.551,
-   0.543,
+   0.544,
    0.608,
-   0.576
+   0.575
   ],
   "bin_mean": [
-   0.01,
+   0.02,
    0.09,
    0.16,
    0.21,
    0.14
   ],
-  "spread_top_bottom": 0.13,
+  "spread_top_bottom": 0.12,
   "by_year": [
    {
     "year": 2014,
@@ -249,33 +249,33 @@
    },
    {
     "year": 2026,
-    "n": 179.0,
-    "ic": 0.21,
-    "top_q_mean": 1.12,
-    "bot_q_mean": -0.681,
-    "base_mean": 0.583
+    "n": 183.0,
+    "ic": 0.19,
+    "top_q_mean": 1.131,
+    "bot_q_mean": -0.587,
+    "base_mean": 0.597
    }
   ]
  },
  "3": {
-  "n": 3108,
+  "n": 3112,
   "rank_ic": 0.046,
   "ic_year_mean": 0.068,
   "ic_positive_years": "10/13",
   "base_hit": 0.565,
   "base_mean": 0.19,
   "bin_hit": [
-   0.532,
-   0.538,
+   0.533,
+   0.537,
    0.566,
-   0.609,
-   0.58
+   0.611,
+   0.579
   ],
   "bin_mean": [
    0.07,
    0.17,
    0.17,
-   0.39,
+   0.4,
    0.13
   ],
   "spread_top_bottom": 0.06,
@@ -378,33 +378,33 @@
    },
    {
     "year": 2026,
-    "n": 178.0,
-    "ic": 0.203,
-    "top_q_mean": 1.425,
-    "bot_q_mean": -0.728,
-    "base_mean": 0.855
+    "n": 182.0,
+    "ic": 0.204,
+    "top_q_mean": 1.391,
+    "bot_q_mean": -0.897,
+    "base_mean": 0.884
    }
   ]
  },
  "5": {
-  "n": 3106,
+  "n": 3110,
   "rank_ic": 0.052,
   "ic_year_mean": 0.075,
   "ic_positive_years": "10/13",
-  "base_hit": 0.585,
+  "base_hit": 0.586,
   "base_mean": 0.31,
   "bin_hit": [
-   0.557,
-   0.597,
+   0.556,
+   0.598,
    0.585,
-   0.617,
+   0.619,
    0.571
   ],
   "bin_mean": [
    0.11,
-   0.39,
+   0.4,
    0.17,
-   0.58,
+   0.59,
    0.3
   ],
   "spread_top_bottom": 0.19,
@@ -507,36 +507,36 @@
    },
    {
     "year": 2026,
-    "n": 176.0,
-    "ic": 0.259,
+    "n": 180.0,
+    "ic": 0.251,
     "top_q_mean": 1.804,
-    "bot_q_mean": -0.824,
-    "base_mean": 1.415
+    "bot_q_mean": -0.547,
+    "base_mean": 1.461
    }
   ]
  },
  "10": {
-  "n": 3101,
-  "rank_ic": 0.078,
-  "ic_year_mean": 0.108,
+  "n": 3105,
+  "rank_ic": 0.075,
+  "ic_year_mean": 0.106,
   "ic_positive_years": "11/13",
-  "base_hit": 0.607,
+  "base_hit": 0.608,
   "base_mean": 0.62,
   "bin_hit": [
    0.597,
-   0.608,
+   0.61,
    0.591,
    0.593,
    0.647
   ],
   "bin_mean": [
-   0.43,
-   0.57,
+   0.46,
+   0.58,
    0.46,
    0.52,
    1.1
   ],
-  "spread_top_bottom": 0.67,
+  "spread_top_bottom": 0.64,
   "by_year": [
    {
     "year": 2014,
@@ -636,36 +636,36 @@
    },
    {
     "year": 2026,
-    "n": 171.0,
-    "ic": 0.117,
+    "n": 175.0,
+    "ic": 0.093,
     "top_q_mean": 3.421,
-    "bot_q_mean": 2.201,
-    "base_mean": 2.806
+    "bot_q_mean": 2.605,
+    "base_mean": 2.859
    }
   ]
  },
  "20": {
-  "n": 3091,
-  "rank_ic": 0.069,
-  "ic_year_mean": 0.18,
+  "n": 3095,
+  "rank_ic": 0.068,
+  "ic_year_mean": 0.179,
   "ic_positive_years": "12/13",
   "base_hit": 0.626,
   "base_mean": 1.24,
   "bin_hit": [
-   0.595,
-   0.618,
-   0.653,
+   0.596,
+   0.619,
+   0.654,
    0.64,
    0.624
   ],
   "bin_mean": [
-   1.07,
-   0.81,
-   1.21,
-   1.15,
+   1.08,
+   0.83,
+   1.22,
+   1.14,
    1.94
   ],
-  "spread_top_bottom": 0.87,
+  "spread_top_bottom": 0.86,
   "by_year": [
    {
     "year": 2014,
@@ -765,11 +765,11 @@
    },
    {
     "year": 2026,
-    "n": 161.0,
-    "ic": 0.371,
+    "n": 165.0,
+    "ic": 0.352,
     "top_q_mean": 10.011,
-    "bot_q_mean": 4.336,
-    "base_mean": 5.513
+    "bot_q_mean": 4.758,
+    "base_mean": 5.533
    }
   ]
  }
