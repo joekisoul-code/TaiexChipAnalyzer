@@ -39,6 +39,7 @@ SURGE_NEW = ["range10", "maxpct20", "ret120", "dd_hi120", "big20",
 FEATS = ["pct", "amp", "lval", "b5", "b10", "b20", "b60", "align", "ret5", "ret20", "ret60", "dd_hi20", "dd_hi60", "lo20_dist", "clv", "uw", "lw",
          "vol_ratio", "vola20", "streak", "lag", "rs20", "m_ret1", "m_bias20"]
 SURGE_FEATS = FEATS + SURGE_NEW
+SHADOW_Q = 0.92   # 影子觀察「嚴格 A」(radar5 C1：全池 + 閘門 ≤−1.5 + qA≥.92 方向一致但不顯著 → needs-more-data，前瞻追蹤)
 Q_APLUS = 0.97     # A+：分數 ≥ 前一年 97 分位 ∧ 大盤月線下 (tr_k.py：58.2%、+11.3%、勝率 76%，n=165；逐年 61/54/63/45%)
 GATE_MBIAS = 0.0   # A 級閘門：大盤月線乖離 < 0 (大盤在月線下)
 PARAMS = dict(n_estimators=160, learning_rate=0.04, num_leaves=15, min_child_samples=400, subsample=0.8, subsample_freq=1, colsample_bytree=0.8, verbose=-1)
@@ -215,7 +216,9 @@ def train(panel: pd.DataFrame | None = None, write: bool = True, verbose: bool =
     th_final = float(np.quantile(_pl, 0.9)); th_plus = float(np.quantile(_pl, Q_APLUS))
     imp = fm.booster_.feature_importance("gain"); imp = imp / imp.sum()
     out = {"trained_at": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M:%S"), "features": FEATS, "init": float(fm.booster_.dump_model().get("average_output", 0) or 0),
-           "trees": _dump_trees(fm.booster_), "th_A": round(th_final, 4), "th_Aplus": round(th_plus, 4), "gate": {"m_bias20_lt": GATE_MBIAS, "note": "A 級需大盤在月線下；大盤在月線上的高分股標 B+"}, "exit": {"note": "出場研究 (scratch tr_g.py，2022~ 走動式 A 級 n=330)：持有 21 交易日平均 +7.5%、勝率 67%、最差年 +5.1%；+6% 停利/−8% 停損只剩 +1.7%，+10%/−8% +2.5%，+6% 後移動停利 +3.2% → 建議持有滿 30 天，不提早停利；B 級持有 21 日 +3.3%、最差年 −1.6%", "A_hold": 7.48, "A_tp6": 1.68, "A_trail": 3.24, "trail": TREASURE_TRAIL},
+           "trees": _dump_trees(fm.booster_), "th_A": round(th_final, 4), "th_Aplus": round(th_plus, 4),
+           "th_q92": round(float(np.quantile(_pl, SHADOW_Q)), 4),   # 2026-10-12：影子觀察「嚴格 A」的 0.92 分位門檻 (不影響正式等級)
+           "gate": {"m_bias20_lt": GATE_MBIAS, "note": "A 級需大盤在月線下；大盤在月線上的高分股標 B+"}, "exit": {"note": "出場研究 (scratch tr_g.py，2022~ 走動式 A 級 n=330)：持有 21 交易日平均 +7.5%、勝率 67%、最差年 +5.1%；+6% 停利/−8% 停損只剩 +1.7%，+10%/−8% +2.5%，+6% 後移動停利 +3.2% → 建議持有滿 30 天，不提早停利；B 級持有 21 日 +3.3%、最差年 −1.6%", "A_hold": 7.48, "A_tp6": 1.68, "A_trail": 3.24, "trail": TREASURE_TRAIL},
            "entry": {"note": "起算點研究 (scratch tr_h.py，A 級 n=330，出場固定第 21 交易日)：推薦當天收盤 +7.5%；隔天開盤 +6.8%；掛低 1/2/3% 等 3 天成交率 69/57/45%、整體 +4.6/+4.4/+4.3% (沒成交的那批若當天買平均 +9~14%) → 推薦當天就進場，不要等回檔", "A_close": 7.48, "A_open": 6.84, "A_lim1": 4.55, "A_lim2": 4.41, "fill_lim2": 0.57}, "n_rows": int(len(D)), "n_stocks": int(D["code"].nunique()),
            "universe": sorted(D["code"].unique().tolist()), "importance": sorted(({"f": f, "w": round(float(w), 3)} for f, w in zip(FEATS, imp)), key=lambda z: -z["w"])[:10],
            "oos": res, "def": {"H": H, "target": TGT, "stop": STOP, "rel": REL}}

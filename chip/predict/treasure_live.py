@@ -502,7 +502,8 @@ def record(prev: dict, sc: dict, tm: dict | None = None, scan_src: str = "live")
     if not D:
         return prev
     tm = tm or {}
-    meta = {"model_ver": tm.get("trained_at"), "th_A": tm.get("th_A"), "th_Aplus": tm.get("th_Aplus"), "mkt_bias20": sc.get("mkt_bias20"), "scan_src": scan_src}
+    meta = {"model_ver": tm.get("trained_at"), "th_A": tm.get("th_A"), "th_Aplus": tm.get("th_Aplus"), "mkt_bias20": sc.get("mkt_bias20"), "scan_src": scan_src,
+            **({"th_q92": tm["th_q92"]} if tm.get("th_q92") is not None else {})}   # 2026-10-12：影子觀察嚴格 A 用
     led = prev["ledger"]
     tre = led["treasure"]
     active = [x for x in tre if x.get("status") == "追蹤"]
@@ -778,6 +779,37 @@ def evaluate(prev: dict, mk: dict, max_fetch: int = 200, upto: str | None = None
     return n
 
 
+# 2026-10-12 影子觀察「嚴格 A」：正式 A/A+ 裡，大盤月線乖離 ≤ −1.5% 且模型分 ≥ 0.92 分位 (radar5 研究：回測方向一致、差距不顯著 → 前瞻追蹤)。
+# 只統計、不改正式等級與推薦。舊列沒有 th_q92 → 以 0.90 (th_A) 與 0.97 (th_Aplus) 分位間線性內插近似。
+SHADOW_STRICT = {"gate": -1.5, "q": 0.92}
+
+
+def strict_a_th(x: dict, tm: dict | None = None) -> tuple[float | None, bool]:
+    """(門檻, 是否為近似)。順序：列的 th_q92 → 列的 0.90/0.97 分位內插 → 目前模型的 th_q92 / 內插 (舊列沒記門檻，近似)。"""
+    if x.get("th_q92") is not None:
+        return float(x["th_q92"]), False
+    for src in (x, tm or {}):
+        if src is not tm and src.get("th_q92") is not None:
+            return float(src["th_q92"]), False
+        if src is tm and src.get("th_q92") is not None:
+            return float(src["th_q92"]), True
+        a, b = src.get("th_A"), src.get("th_Aplus")
+        if a is not None and b is not None:
+            return float(a) + (float(b) - float(a)) * (SHADOW_STRICT["q"] - 0.90) / (0.97 - 0.90), True
+    return None, True
+
+
+def is_strict_a(x: dict, tm: dict | None = None, mb_by_date: dict | None = None) -> bool | None:
+    """True/False；資料不足 (沒有 p / 大盤乖離 / 門檻) → None。舊列沒記 mkt_bias20 → 用當日掃描紀錄 (scans) 的大盤乖離。"""
+    if x.get("tier") not in ("A", "A+"):
+        return False
+    th, _ = strict_a_th(x, tm)
+    mb = x.get("mkt_bias20") if x.get("mkt_bias20") is not None else (mb_by_date or {}).get(x.get("date"))
+    if x.get("p") is None or mb is None or th is None:
+        return None
+    return float(mb) <= SHADOW_STRICT["gate"] and float(x["p"]) >= th
+
+
 def stats(prev: dict, tm: dict) -> dict:
     for kind in ("treasure", "surge"):
         prev["ledger"][kind].sort(key=lambda x: (x.get("date") or "", x.get("code") or ""))
@@ -828,6 +860,16 @@ def stats(prev: dict, tm: dict) -> dict:
             return {k: g[k] for k in ("n", "hit", "rate", "win21", "n_fin21", "n_published")} if g else None
         signal["by_rule"] = {REC_RULE_A: _brief([x for x in sig_rows if x.get("rec_rule") == REC_RULE_A]),
                              "legacy": _brief([x for x in sig_rows if x.get("rec_rule") != REC_RULE_A])}
+    sig_all = [x for x in tre if x.get("tier") in ("A+", "A")]
+    mbd = {sc_["date"]: sc_.get("mkt_bias20") for sc_ in (prev.get("scans") or []) if sc_.get("date") and sc_.get("mkt_bias20") is not None}
+    st_rows = [x for x in sig_all if is_strict_a(x, tm, mbd)]
+    st_done = [x for x in st_rows if x.get("status") != "追蹤"]
+    g_st = agg(st_done)
+    shadow = {"strict_A": {**({k: g_st[k] for k in ("n", "hit", "rate", "win21", "avg_fin21", "n_fin21", "n_published")} if g_st else {"n": 0}),
+                           "tracking": len(st_rows) - len(st_done), "n_unknown": sum(1 for x in sig_all if is_strict_a(x, tm, mbd) is None),
+                           "n_approx_th": sum(1 for x in st_rows if strict_a_th(x, tm)[1]), "n_signal": len(sig_all), "since": st_rows[0]["date"] if st_rows else None,
+                           "rule": f"A/A+ 裡，大盤月線乖離 ≤ {SHADOW_STRICT['gate']}% 且模型分在前 {round((1 - SHADOW_STRICT['q']) * 100)}% 的推薦",
+                           "note": "前瞻觀察，不是正式訊號；回測方向一致但差距不顯著 (radar5)，累積真實發布結案後再判斷"}}
     by_source = {"published": agg(pub), "backfill": agg([x for x in done if x.get("backfill")])}
     by_month = {}
     for x in done:
@@ -843,7 +885,7 @@ def stats(prev: dict, tm: dict) -> dict:
              "bt_fin": RADAR_BT["S3"]["fin21"] if RADAR_BT.get("method") else sg_oos.get("app_fin", sg_oos.get("fin")),   # 10-07 時點正確回測
              "since": sur[0]["date"] if sur else None}
     surge["drift"] = bool(surge["done"] >= 20 and surge["bt_hit"] is not None and surge["rate"] is not None and surge["rate"] < surge["bt_hit"] - 0.12)
-    return {"treasure": {"all": agg(done), "signal": signal, "by_source": by_source, "tracking": sum(1 for x in tre if x.get("status") == "追蹤"), "by_tier": by_tier, "by_month": by_month,
+    return {"treasure": {"all": agg(done), "signal": signal, "shadow": shadow, "by_source": by_source, "tracking": sum(1 for x in tre if x.get("status") == "追蹤"), "by_tier": by_tier, "by_month": by_month,
                          "since": tre[0]["date"] if tre else None, "roles": dict(ROLE), "expect_AAplus": list(EXPECT_AAPLUS), "note_tiers": NOTE_TIERS,
                          "def": "結案採回測定義：21 交易日、峰值取收盤、停損 −8% 取盤中低點 (先後順序)、相對大盤任一日 ≥ +4pt；與 App 本機帳本 (30 日曆天) 不同。"
                                 "avg_fin = 結案日報酬 (含停損提早結案)；avg_fin21 = 第 21 個交易日報酬 (同回測口徑)",
