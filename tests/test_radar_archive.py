@@ -6,7 +6,8 @@
 (b) pool_block 形狀 (只列評到分的、srank 空號、欄位順序與 cols 一致、四捨五入、整數壓縮、pick 旗標、th_q92 有才有、可 JSON)；
 (c) scan() 回傳 pool (假 market_snapshot / twii_hist / valuation / score_one)：conc10 用全部 MI 列不只宇宙；pool_block 壞掉時 scan 其他輸出完全一樣；
 (d) build()：pool 不進 out['scan'] / LOCAL，交給 out['_pools'] (live / backfill 標記)，serialize.clean 會丟掉 _pools；
-(e) 歸檔：line_from 驗證、同日去重 (有列 > 0 列、live > backfill、asof 新者勝)、CAP、carry (Pages ∪ 備份 ∪ 本機、冪等、Pages 失敗保留)、縮水保護、壞行容錯、緊湊格式；
+(e) 歸檔：line_from 驗證、同日去重 (有列 > 0 列、live > backfill、事後新模型不蓋、遲到的重掃不蓋準時的、準時的裡 asof 新者勝)、CAP、
+    carry (Pages ∪ 備份 ∪ 本機、冪等、Pages 失敗保留)、縮水保護 (以不同的有效掃描日計)、壞行容錯、緊湊格式；
 (f) publish() 掛鉤：fast 只帶回、沒掃描日不追加、fetch / append 例外不外拋、大小估計；export_static 原始碼有掛鉤且包在 try 內。
 """
 from __future__ import annotations
@@ -266,6 +267,44 @@ def test_append_dedupe_and_priority():
         # cache=False → 不碰備份
         RA.append(p, _line("2026-10-13"), cache=False)
         assert len(RA.PL.load(p)) == 4 and len(RA.PL.load(c)) == 3
+
+
+def test_late_rescan_does_not_replace_on_time():
+    # review 2026-10-13：平日休市 (颱風假 / 連假) 或模型沒變的週日 train → market_snapshot 退回最後交易日、同模型再掃 (遲到)，
+    # 原本 latest wins 會用遲到的那行蓋掉當天準時的那行 (r6 shadow_spec 的 late 規則會把整天排除)
+    mv = "2026-10-04 08:00:00"
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "r.jsonl"
+        RA.append(p, _line("2026-10-09", 6, asof="2026-10-09 15:50:00", model_ver=mv), cache=False)
+        RA.append(p, _line("2026-10-09", 7, asof="2026-10-10 00:40:00", model_ver=mv), cache=False)      # 21:45 排程延遲到隔天凌晨：仍準時 → 新的勝
+        assert {x["ts"]: x["n"] for x in RA.PL.load(p)}["2026-10-09"] == 7
+        RA.append(p, _line("2026-10-09", 8, asof="2026-10-12 15:50:00", model_ver=mv), cache=False)      # 週一休市重掃上週五 (遲到) → 不蓋
+        RA.append(p, _line("2026-10-09", 9, asof="2026-10-11 06:30:00", model_ver=mv), cache=False)      # 週日 train、模型沒變 (遲到) → 不蓋
+        assert {x["ts"]: x["n"] for x in RA.PL.load(p)}["2026-10-09"] == 7
+        # carry 的順序 (Pages 先、本機後) 也一樣：本機的遲到行不蓋 Pages 的準時行
+        q = Path(td) / "q.jsonl"
+        RA.append(q, _line("2026-10-09", 8, asof="2026-10-12 15:50:00", model_ver=mv), cache=False)
+        assert RA.carry(q, "u", fetch=lambda u: [_line("2026-10-09", 7, asof="2026-10-09 21:50:00", model_ver=mv)], cache=False) == 1
+        assert RA.PL.load(q)[0]["n"] == 7
+        # 只有遲到行 (當天兩次都失敗) → 照收 (比沒有好；asof 看得出遲到)
+        assert RA.merge([_line("2026-10-14", 3, asof="2026-10-16 15:50:00")])[0]["n"] == 3
+    assert RA._on_time({"ts": "2026-10-09", "asof": "2026-10-10 08:59:59"}) and not RA._on_time({"ts": "2026-10-09", "asof": "2026-10-10 09:00:00"})
+    assert RA._on_time({"ts": "2026-10-09"}) and RA._on_time({"ts": "bad", "asof": "2027-01-01 00:00:00"})
+
+
+def test_shrink_count_ignores_dup_and_bad_lines():
+    # review 2026-10-13：縮水保護原本用「可解析的行數」比，檔內有重複日 / ts 壞掉的行時 merge 後一定比較少 → 之後每次追加都被拒 (歸檔默默停住)
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "r.jsonl"
+        good = [_line(f"2026-10-{d:02d}") for d in range(1, 4)]
+        junk = [_line("2026-10-02", 5, asof="2026-10-02 10:00:00"), _line("2026-10-03", 5, asof="2026-10-03 10:00:00"), {"ts": "bad", "x": 1}]
+        p.write_text("".join(RA._dumps(r) + "\n" for r in good + junk), encoding="utf-8")
+        assert len(RA.PL.load(p)) == 6
+        assert RA.append(p, _line("2026-10-06"), cache=False) == 4
+        assert [x["ts"] for x in RA.PL.load(p)] == ["2026-10-01", "2026-10-02", "2026-10-03", "2026-10-06"]
+        # 真的縮水 (有效掃描日變少) 仍拒寫
+        before = p.read_text(encoding="utf-8")
+        assert RA._write(p, good[:2]) is False and p.read_text(encoding="utf-8") == before
 
 
 def test_cap():

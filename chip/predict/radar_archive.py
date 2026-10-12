@@ -5,13 +5,15 @@
 但正式 treasure_live 的 scans 每天只留挖寶前 6 + 飆股前 3，整個評分過的候選池沒有存 → 之後無法重算同日池、等量對照、換門檻的結果。
 
 來源：treasure_live.scan() 回傳的 'pool' (本模組 pool_block() 組；treasure_live.build() 會把它從 scan 拿掉 → treasure_live.json 內容不變，
-另以私有鍵 '_pools' 交給 tools/export_static.py → publish())。backfill 補掃的日子也存，但標 src=backfill (補掃當時的模型，不一定時點正確)。
+另以私有鍵 '_pools' 交給 tools/export_static.py → publish())。backfill 補掃的日子也存，但標 src=backfill (補掃當時的模型，不一定時點正確；
+另外 pbr / power / srank / 誰進候選池 用的是補掃當下抓的 BWIBBU_ALL (treasure_live.valuation() 只有「現在」)，日 K 是事後的 Yahoo 還原價 → 不是時點正確)。
 App 不讀，純研究用。
 
 檔案 = JSON Lines：Pages data/radar_pool.jsonl (+ data/cache/radar_pool.jsonl 備份，在 Actions cache 內)。每個掃描日一行，依 ts 排序、保留最後 CAP 行。
 發布流程同 exdiv_archive / pit_ledger：Pages 整站覆蓋 → 每次 (含 fast) 先帶回上一版 (Pages → raw gh-pages 備援 ∪ data/cache 備份 ∪ 本機)，
 完整模式且掃描有日期才追加；同一天只留一行 (取捨順序：有列 > 0 列、live > backfill、模型在掃描日已存在 (model_ver 日期 ≤ ts) > 事後新模型重掃、
-asof 較新 > 較舊 = latest wins)；
+準時 (asof < ts 隔天 09:00 台北，同 r6 shadow_spec 的 late 規則) > 遲到的重掃、asof 較新 > 較舊 = 準時的裡面 latest wins)；
+遲到的重掃 = 平日休市 (颱風假 / 連假) 或週日 train 時 market_snapshot 退回最後交易日再掃一次 — 不該蓋掉當天準時的那一行。
 縮水保護：不用 0 行覆蓋、也不用比既有檔少的行數覆蓋 (CAP 截掉的除外)；任何錯誤只記 log，不讓發布失敗。
 
 每行：
@@ -43,6 +45,12 @@ conc10 (當日成交集中度水準；radar6 E1 的 conc20 = 這個序列的 5 �
   conc10_stk = 同上但只算 4 碼普通股 (代號 ^[1-9]\\d{3}$：排除 00 開頭 ETF 與帶字母者) 且 |pct| ≤ 11% (同 E1 去掉 |日報酬| > 11% 的股日)，
          對應研究面板 twse_10y 的口徑 (研究驗證 MI 股票口徑與面板水準相關 .985、日變化 .966；含 ETF 口徑 .978 / .949)；mkt_n_stk = 列數。
   有效列 < 20 → null (不完整的表)。
+  與研究 E1 (exp/E1_conc/feat.py) 的差異 (review 2026-10-13，本機快取 65 天 2026-07-01~10-02 實算)：
+    E1 成交金額 = Yahoo 收盤 × 股數、面板只有 2026-10-02 仍上市的 1,084 檔 (倖存者)、去掉「對自己前一日收盤」|r1| > 11% 的股日 (抓減資/分割假跳動)；
+    這裡用證交所成交金額、當天所有上市股票、|pct| 是對參考價 (除權息已調整 → 實際上只會去掉無漲跌幅限制的日子，例如新上市前 5 日)。
+    水準有偏移：conc10_stk 平均比 E1 conc_10 高 0.008、conc10 (含 ETF；前 10 大平均 0.17 檔 ETF、最多 3 檔) 低 0.018 →
+    E1 的過去三分位門檻是在面板序列上算的，不能直接套在這裡的水準上 (conc20 是差分，偏移大多抵銷，但仍應以這裡的序列自己重算門檻)。
+    E1 的穩健性變體 (b) 用前 5 / 前 20 大，這裡沒存 (要的話 MI_INDEX 有歷史，可事後重抓重算)。
 
 大小 (2026-10-02 實際 MI_INDEX 1372 列、宇宙內前 80 候選、78 檔評到分的模擬)：每列約 64 bytes、一行約 5.5 KB (表頭約 0.5 KB)
   → CAP 1250 行 (約 5 年交易日) 約 6.8 MB；export_static 每次印本次一行、檔案大小與 CAP 估計。
@@ -164,11 +172,24 @@ def line_from(pool: dict | None, src: str | None = None, asof: str | None = None
                   "n": len(pool["rows"]), "cols": list(pool.get("cols") or COLS), "rows": pool["rows"]})
 
 
+def _on_time(x: dict) -> bool:
+    """asof (台北) 早於掃描日隔天 09:00 = 準時 (r6 shadow_spec：之後才寫的是 late)。沒有 asof / 日期壞掉 → 視為準時 (不扣分)。"""
+    a = str(x.get("asof") or "")
+    try:
+        cut = (dt.date.fromisoformat(str(x.get("ts") or "")[:10]) + dt.timedelta(days=1)).isoformat() + " 09:00:00"
+    except ValueError:
+        return True
+    return not a or a < cut
+
+
 def _rank(x: dict) -> tuple:
-    """同一天兩行取哪個：有列 > 0 列、live > backfill、模型在掃描日當時已存在 (model_ver 日期 ≤ ts) > 事後的新模型、asof 較新 (latest wins)。
-    第三項防的是：週日重訓後，週一盤後表還沒公布 → scan 退回上週五、用新模型重掃，不該蓋掉上週五當時真正的那一行。"""
+    """同一天兩行取哪個：有列 > 0 列、live > backfill、模型在掃描日當時已存在 (model_ver 日期 ≤ ts) > 事後的新模型、
+    準時 (asof < ts 隔天 09:00) > 遲到、asof 較新 (準時的裡面 latest wins，例如 15:40 與 21:45 兩次完整發布取 21:45)。
+    第三項防的是：週日重訓後，週一盤後表還沒公布 → scan 退回上週五、用新模型重掃，不該蓋掉上週五當時真正的那一行。
+    第四項防的是：平日休市 (颱風假 / 連假) 或模型沒變的週日 train，market_snapshot 退回最後交易日再掃 → 遲到的重掃不蓋掉準時的那一行。"""
     mv = str(x.get("model_ver") or "")[:10]
-    return ((x.get("n") or len(x.get("rows") or [])) > 0, x.get("src") != "backfill", not mv or mv <= str(x.get("ts") or "")[:10], str(x.get("asof") or ""))
+    return ((x.get("n") or len(x.get("rows") or [])) > 0, x.get("src") != "backfill", not mv or mv <= str(x.get("ts") or "")[:10], _on_time(x),
+            str(x.get("asof") or ""))
 
 
 def merge(*groups, cap: int = CAP) -> list[dict]:
@@ -192,7 +213,7 @@ def _dumps(r: dict) -> str:
 def _write(path: Path | str, rows: list[dict], cap: int = CAP) -> bool:
     """寫檔 (緊湊 JSON，每行一個掃描日)。縮水保護：0 行不寫 (不建空檔)；比既有檔少 (且不是 CAP 截掉的) 不寫。回傳是否有寫。"""
     p = Path(path)
-    n_old = len(PL.load(p)) if p.exists() else 0
+    n_old = len(merge(PL.load(p), cap=0)) if p.exists() else 0   # 既有檔「不同的有效掃描日」數 (重複日 / ts 壞掉的行不算，否則 merge 後永遠比較少 → 永遠拒寫)
     if not rows:
         if n_old:
             log.warning("radar_archive: refuse to overwrite %s (%d lines) with 0 lines", p, n_old)
