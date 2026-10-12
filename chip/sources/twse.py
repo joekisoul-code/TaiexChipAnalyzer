@@ -208,6 +208,92 @@ def index_1min(date: str) -> list[list]:
     return cached(f"twse:idx1m:{date}", 10 * 365 * 86400, load)
 
 
+# ---------------------------------------------------------------- 盤中時間點 (小時模型訓練資料，2016~)
+# 2026-10-12：小時模型原本用 Yahoo ^TWII 60m (只有約 2 年，且「開盤價」是 09:00:05 失真的第一筆，只反映約 53% 的真實跳空，
+# 與盤中即時用 09:05 的定義不一致)。改用 TWSE 每 5 秒指數 (MI_5MINS_INDEX) 萃取各時間點價格 + 累積高低；開盤價一律取 09:05。
+# 歷史 (2016-01~) 存在 data/intraday_marks.json (進 git，約 1 MB)；之後的交易日在訓練時逐日補抓 (每日 1 次請求，結果進快取)。
+INTRADAY_MARKS_FILE = config.DATA_DIR / "intraday_marks.json"
+MARK_TIMES = ("09:15", "09:30", "10:00", "11:00", "12:00", "13:00", "13:30")
+OPEN_AT = "09:05"
+
+
+def day_marks(rows: list) -> dict | None:
+    """MI_5MINS_INDEX 一日資料 [['HH:MM:SS', 加權指數], ...] → {'prev_close','open','09:15'..'13:30','hi':{mark:累積高},'lo':{...}}。
+    09:00:00 那筆 = 前一日收盤；沒有 13:30:00 (盤中/資料不完整) → None。高低從 09:05 起算 (避開開盤失真)。"""
+    pts = [(str(t)[:8], float(v)) for t, v in rows if v is not None]
+    if not pts or pts[0][0] != "09:00:00" or not any(t == "13:30:00" for t, _ in pts):
+        return None
+    prev_close = pts[0][1]
+    xs = [(t, v) for t, v in pts if f"{OPEN_AT}:00" <= t <= "13:30:00"]
+    if len(xs) < 100:
+        return None
+    rec = {"prev_close": round(prev_close, 2), "open": round(xs[0][1], 2), "hi": {}, "lo": {}}
+    hi = lo = xs[0][1]
+    i = 0
+    for m in MARK_TIMES:
+        T = m + ":00"
+        while i < len(xs) and xs[i][0] <= T:
+            hi, lo = max(hi, xs[i][1]), min(lo, xs[i][1])
+            last = xs[i][1]
+            i += 1
+        rec[m], rec["hi"][m], rec["lo"][m] = round(last, 2), round(hi, 2), round(lo, 2)
+    return rec
+
+
+def _fetch_day_marks(ymd: str) -> dict | None:
+    """單日：抓 MI_5MINS_INDEX → day_marks。非 OK 丟例外 (不讓 cached 把暫時失敗存成空值)。"""
+    def load():
+        j = get_json(f"{BASE}/TAIEX/MI_5MINS_INDEX", params={"date": ymd, "response": "json"}, timeout=60)
+        if not _ok(j) or not j.get("data"):
+            raise RuntimeError(f"MI_5MINS_INDEX {ymd}: {j.get('stat') if isinstance(j, dict) else type(j)}")
+        rec = day_marks([[r[0], num(r[1])] for r in j["data"]])
+        if rec is None:
+            raise RuntimeError(f"MI_5MINS_INDEX {ymd}: 資料不完整")
+        return rec
+    return cached(f"twse:mi5marks:{ymd}", 10 * 365 * 86400, load, allow_stale=False)
+
+
+def intraday_marks(fetch_missing: bool = True, max_fetch: int = 60) -> dict[str, dict]:
+    """{ISO 日期: day_marks}。先讀 data/intraday_marks.json，再補抓檔案最後一天之後到最近收盤日 (最多 max_fetch 天)。"""
+    import json as _json
+    import time as _t
+    days: dict[str, dict] = {}
+    if INTRADAY_MARKS_FILE.exists():
+        try:
+            days = dict(_json.loads(INTRADAY_MARKS_FILE.read_text(encoding="utf-8")).get("days") or {})
+        except Exception as e:  # noqa: BLE001
+            log.warning("intraday_marks.json 讀取失敗: %s", e)
+    if fetch_missing:
+        now = dt.datetime.now(config.TZ)
+        end = now.date() if now.strftime("%H:%M") >= "13:45" else now.date() - dt.timedelta(days=1)
+        d = dt.date.fromisoformat(max(days)) + dt.timedelta(days=1) if days else dt.date(2016, 1, 1)
+        hol: dict[int, set[str]] = {}
+        n = 0
+        while d <= end and n < max_fetch:
+            iso = d.isoformat()
+            if d.weekday() < 5:
+                if d.year not in hol:
+                    try:
+                        hol[d.year] = holidays(d.year)
+                    except Exception:  # noqa: BLE001
+                        hol[d.year] = set()
+                if iso not in hol[d.year]:
+                    n += 1
+                    try:
+                        days[iso] = _fetch_day_marks(d.strftime("%Y%m%d"))
+                    except Exception as e:  # noqa: BLE001   未列入休市表的休市日 / 暫時失敗：略過，下次再試
+                        log.info("intraday marks %s skipped: %s", iso, e)
+                    _t.sleep(1.0)
+            d += dt.timedelta(days=1)
+    return dict(sorted(days.items()))
+
+
+def save_intraday_marks(days: dict[str, dict]) -> None:
+    import json as _json
+    INTRADAY_MARKS_FILE.write_text(_json.dumps({"source": "TWSE MI_5MINS_INDEX", "open_at": OPEN_AT, "marks": list(MARK_TIMES),
+                                                "days": days}, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+
+
 def holidays(year: int | None = None) -> set[str]:
     """TWSE 休市日 (ISO 日期)。"""
     year = year or dt.date.today().year

@@ -158,8 +158,11 @@ def cmd_train(args):
         from chip.analysis import backtest
         range_levels.fit_multipliers(backtest.load_long(), short_term._night_hist(), verbose=True, ivk_hist=range_levels.ivk_history())   # + TXO IV 乘數
     if args.intraday or args.intraday_only or not only:
-        print("\n═══ 訓練小時模型 (Yahoo ^TWII 小時 K 近 2 年 + 前日籌碼 + 夜盤；逐月 walk-forward) ═══")
+        print("\n═══ 訓練小時模型 (TWSE 5 秒指數 2016~ 與 Yahoo 小時 K 2 年擇一 + 前日籌碼 + 夜盤；逐季 walk-forward) ═══")
         for tm, m in intraday.train().items():
+            if tm == "_source":   # 2026-10-12：TWSE 2016~ vs Yahoo 2 年 共同月份盤中 IC，擇一
+                print(f"  資料來源：{m}")
+                continue
             if m:
                 print(f"  到 {tm}：n={m['n']}  rank-IC {m['rank_ic']:+.3f} (逐月平均 {m['ic_year_mean']:+.3f}，正 IC 月份 {m['ic_positive_years']})  "
                       f"基準上漲率 {m['base_hit']:.0%}  五分位上漲率 {[round(x * 100) if x is not None else None for x in m['bin_hit']]}  平均 {m['bin_mean']}")
