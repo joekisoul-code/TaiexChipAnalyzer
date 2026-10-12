@@ -428,7 +428,10 @@ def scan(tm: dict, date: str | None = None) -> dict:
     for t in tre:   # 10-06：A/A+ 附原因 (模型分拆解 + 大盤閘門)
         if t["tier"] in ("A", "A+"):
             try:
-                t["why"] = [w["txt"] for w in explain(tm, res[t["code"]]["_x"], med)]
+                ex = explain(tm, res[t["code"]]["_x"], med)
+                t["why"] = [w["txt"] for w in ex]
+                t["why_d"] = [round(float(w["d"]), 3) for w in ex]     # 2026-10-12 r13：每項原因的模型分下降 (與 why 同順序)，App 畫小橫條
+
                 t["why_gate"] = gate_txt(t["tier"], t.get("m_bias20"))
                 t["d0"] = day0_prob(t.get("p"), tm.get("th_A"))      # 10-07 同分數組歷史命中 (參考)
             except Exception as e:  # noqa: BLE001
