@@ -433,11 +433,12 @@ def main() -> None:
     except Exception as e:  # noqa: BLE001
         print("  gov8 failed:", e)
     # 挖寶/飆股雷達雲端追蹤 (2026-10-05)：盤後 (完整模式) 以 App 同款模型掃描 + 永久帳本對帳；fast 模式只帶回上次發布 (Pages 整站覆蓋)
-    _tlo = None
+    _tlo, _pools = None, None
     try:
         from chip.predict import treasure_live as _tl
         if not args.fast:
             _tlo = _tl.build(backfill_days=int(__import__("os").getenv("TREASURE_BACKFILL_DAYS", "0") or 0))
+            _pools = _tlo.pop("_pools", None)    # r14：整個候選池另存 radar_pool.jsonl (下方)，不進 treasure_live.json
             dump("treasure_live", _tlo)
             print(f"  treasure_live: scan {(_tlo.get('scan') or {}).get('date')} ledger {len(_tlo['ledger']['treasure'])}/{len(_tlo['ledger']['surge'])} alerts {len(_tlo.get('alerts') or [])}")
         elif not (DATA / "treasure_live.json").exists():
@@ -454,6 +455,14 @@ def main() -> None:
                     (DATA / "treasure_live.json").write_text(r.text, encoding="utf-8"); print("  carried over treasure_live.json")
         except Exception as e2:  # noqa: BLE001
             print("  carry treasure_live failed:", e2)
+    # 雷達候選池每日歸檔 (r14，2026-10-13)：radar6 剩下的點子 (A+ 訊號級 / 嚴格 A / conc20 閘門 / 飆股排名) 只能前瞻檢定 → 每個掃描日存整個評分過的候選池
+    # (~80 檔 + 門檻 + 大盤 + 成交集中度 conc10)；同 exdiv_announce：Pages 整站覆蓋 → 每次 (含 fast) 先帶回上一版，完整模式且掃描有日期才追加；失敗只印出
+    try:
+        from chip.predict import radar_archive as _ra
+        _rp = _ra.publish(DATA / _ra.NAME, _pools, fast=args.fast, urls=(gov8.PAGES_URL.rstrip("/") + "/data/" + _ra.NAME, _ra.RAW_URL))
+        print("  " + _ra.report_txt(_rp, fast=args.fast))
+    except Exception as e:  # noqa: BLE001
+        print("  radar_pool failed:", e)
     # 時點帳本 (pr2 P5，2026-10-05)：force_orphan 讓 forecast.json 沒有歷史 → 每次完整發布追加一行「真的顯示過什麼」(叫牌/水準/verdict 桶/挖寶 A/A+)；
     # 先把上一版帶回：Pages (備援 raw gh-pages) ∪ data/cache 備份 (在 Actions cache 內) ∪ 本機，ts 去重、保留最後 400 行、寫回兩處 → 單次抓取失敗不會洗掉歷史；
     # fast 模式只帶回不追加

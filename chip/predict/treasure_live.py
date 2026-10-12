@@ -398,7 +398,9 @@ def pool_rows(rows: dict, tm: dict) -> dict:
 
 
 def scan(tm: dict, date: str | None = None) -> dict:
-    """當日掃描：回傳 {date, pool_n, treasure[(前 40 中 pct<9.4、依 p 排序)], surge[前 3], mkt_close, mkt_bias20, errors}。"""
+    """當日掃描：回傳 {date, pool_n, treasure[(前 40 中 pct<9.4、依 p 排序)], surge[前 3], mkt_close, mkt_bias20, errors}。
+    r14 (2026-10-13) 另回傳 pool = radar_archive.pool_block()：所有評到分的候選 (緊湊列) + 門檻 / 大盤 / 成交集中度 conc10；
+    只給 radar_archive 歸檔 (build()/backfill() 會從 scan 拿掉，不進 treasure_live.json)。"""
     D, rows = market_snapshot(date)
     if not D:
         return {"date": None, "error": "no market snapshot"}
@@ -435,9 +437,15 @@ def scan(tm: dict, date: str | None = None) -> dict:
     sg_k = int(((tm.get("surge") or {}).get("def") or {}).get("topk") or 3)
     sur = sorted([{"code": r["code"], "name": r["name"], "close": r["close"], "pct": round(r["pct"], 2), "ps": res[r["code"]]["ps"]} for r in pool if r["code"] in res and res[r["code"]]["ps"] is not None and r["pct"] < 9.4],
                  key=lambda x: -x["ps"])[:sg_k]
-    return {"date": D, "pool_n": len(pool), "scored_n": len(res), "errors": errors, "treasure": tre, "surge": sur, "pool_rule": "universe" if tm.get("universe") else "all", "uni_n": len(tm.get("universe") or []),
-            "mkt_close": mk.get(D), "mkt_bias20": round(float(mkf["m_bias20"].iloc[-1]), 3) if len(mkf) and pd.notna(mkf["m_bias20"].iloc[-1]) else None,
-            "mkt_pct": round(mkt_pct, 2)}
+    out = {"date": D, "pool_n": len(pool), "scored_n": len(res), "errors": errors, "treasure": tre, "surge": sur, "pool_rule": "universe" if tm.get("universe") else "all", "uni_n": len(tm.get("universe") or []),
+           "mkt_close": mk.get(D), "mkt_bias20": round(float(mkf["m_bias20"].iloc[-1]), 3) if len(mkf) and pd.notna(mkf["m_bias20"].iloc[-1]) else None,
+           "mkt_pct": round(mkt_pct, 2)}
+    try:   # 2026-10-13 r14：整個評分過的候選池 + 當日成交集中度 (radar_archive 每日歸檔；build()/backfill() 會拿掉，treasure_live.json 不變)
+        from . import radar_archive as RA
+        out["pool"] = RA.pool_block(D, pool, res, tre, sur, tm, rows, out)
+    except Exception as e:  # noqa: BLE001
+        log.warning("radar pool block: %s", e)
+    return out
 
 
 # ------------------------------------------------------------------ 帳本
@@ -998,8 +1006,11 @@ def backfill(prev: dict, tm: dict, dates: list[str], mk: dict | None = None) -> 
             sc = scan(tm, D)
         except Exception as e:  # noqa: BLE001
             log.warning("backfill %s: %s", D, e); continue
+        pl = sc.pop("pool", None)          # r14：候選池交給 build() 的 _pools (radar_archive，標 backfill)
         if sc.get("date") != D:
             continue
+        if pl:
+            prev.setdefault("_pools", []).append({**pl, "src": "backfill"})
         n0 = len(prev["ledger"]["treasure"]); n1 = len(prev["ledger"]["surge"])
         prev = record(prev, sc, tm, scan_src="backfill")
         for x in prev["ledger"]["treasure"][n0:] + prev["ledger"]["surge"][n1:]:
@@ -1017,9 +1028,13 @@ def build(date: str | None = None, do_scan: bool = True, backfill_days: int = 0)
         end = dt.datetime.now(config.TZ).date() - dt.timedelta(days=1)
         days = [d for d in sorted(mk) if (end - dt.timedelta(days=backfill_days)).isoformat() <= d <= end.isoformat()]
         prev = backfill(prev, tm, days, mk)
+    pools = prev.pop("_pools", None) or []                      # r14：backfill 掃描的候選池
     sc = scan(tm, date) if (do_scan and tm.get("trees")) else {"date": None}
+    pool = sc.pop("pool", None)                                 # r14：候選池不進 treasure_live.json / LOCAL (App 不讀)
     if sc.get("date"):
         prev = record(prev, sc, tm, scan_src="live")
+        if pool:
+            pools.append({**pool, "src": "live"})
     n_fetch = evaluate(prev, mk)
     st = stats(prev, tm)
     out = {"asof": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M:%S"), "scan": sc, "ledger": prev["ledger"], "scans": prev["scans"], "stats": st,
@@ -1034,4 +1049,5 @@ def build(date: str | None = None, do_scan: bool = True, backfill_days: int = 0)
         LOCAL.write_text(json.dumps(out, ensure_ascii=False, default=str), encoding="utf-8")
     except Exception as e:  # noqa: BLE001
         log.debug("local save: %s", e)
+    out["_pools"] = pools    # r14：只給 tools/export_static.py → radar_archive.publish() (pop 掉；serialize.clean 也會丟掉 _ 開頭的鍵)
     return out
