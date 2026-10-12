@@ -12,14 +12,14 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "fast | full | train | research (挖寶研究，不發布)"
+        description: "fast | full | train | research (挖寶研究，不發布) | research_intraday (小時模型資料來源研究，不發布)"
         default: "full"
 
 permissions:
   contents: write
 
 concurrency:
-  group: ${{ github.event.inputs.mode == 'research' && 'research' || 'publish' }}   # 研究模式另排佇列，不擋盤中 5 分鐘發布
+  group: ${{ startsWith(github.event.inputs.mode, 'research') && 'research' || 'publish' }}   # 研究模式另排佇列，不擋盤中 5 分鐘發布
   cancel-in-progress: false
 
 jobs:
@@ -53,7 +53,7 @@ jobs:
           fi
           echo "mode=$MODE" >> $GITHUB_OUTPUT
       - name: restore data cache (快取 / SQLite；模型不進 cache，一律以 git 版本為準)
-        if: steps.mode.outputs.mode != 'research'
+        if: ${{ !startsWith(steps.mode.outputs.mode, 'research') }}
         uses: actions/cache@v4
         with:
           path: |
@@ -62,7 +62,7 @@ jobs:
           key: chip-data-${{ github.run_id }}
           restore-keys: chip-data-
       - name: restore data cache (research：只讀，不存回，免得較舊的快取蓋掉同時段發布的資料)
-        if: steps.mode.outputs.mode == 'research'
+        if: ${{ startsWith(steps.mode.outputs.mode, 'research') }}
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -71,19 +71,22 @@ jobs:
           key: chip-data-${{ github.run_id }}
           restore-keys: chip-data-
       - name: playwright (玩股網)
-        if: steps.mode.outputs.mode != 'fast' && steps.mode.outputs.mode != 'research'
+        if: ${{ steps.mode.outputs.mode != 'fast' && !startsWith(steps.mode.outputs.mode, 'research') }}
         run: python -m playwright install --with-deps chromium
       - name: research (挖寶 A 級：法人/營收特徵研究，結果上傳 artifact，不發布)
         if: steps.mode.outputs.mode == 'research'
         run: python tools/treasure_research.py
+      - name: research_intraday (小時模型：TWSE 2016~ vs Yahoo 2 年 + 早盤模型，LightGBM 逐季 walk-forward；只上傳報告，不寫模型、不發布)
+        if: steps.mode.outputs.mode == 'research_intraday'
+        run: python tools/intraday_research.py
       - name: upload research
-        if: steps.mode.outputs.mode == 'research'
+        if: ${{ startsWith(steps.mode.outputs.mode, 'research') }}
         uses: actions/upload-artifact@v4
         with:
-          name: treasure-research
+          name: ${{ steps.mode.outputs.mode == 'research' && 'treasure-research' || 'intraday-research' }}
           path: research_out/
       - name: export
-        if: steps.mode.outputs.mode != 'research'
+        if: ${{ !startsWith(steps.mode.outputs.mode, 'research') }}
         run: |
           case "${{ steps.mode.outputs.mode }}" in
             fast)  python tools/export_static.py --fast --no-wantgoo ;;
@@ -98,7 +101,7 @@ jobs:
           git add data/models data/intraday_marks.json
           git diff --cached --quiet || (git commit -m "weekly retrain: update models [skip ci]" && git push origin HEAD:main)
       - name: deploy to GitHub Pages
-        if: steps.mode.outputs.mode != 'research'
+        if: ${{ !startsWith(steps.mode.outputs.mode, 'research') }}
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
