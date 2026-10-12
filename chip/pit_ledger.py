@@ -132,12 +132,12 @@ def _cache_path(cache) -> Path | None:
     return CACHE_PATH if cache is None else Path(cache)
 
 
-def carry_over(path: Path | str, url: str | list[str] | tuple[str, ...], fetch=fetch_published, cache=None) -> int:
+def carry_over(path: Path | str, url: str | list[str] | tuple[str, ...], fetch=fetch_published, cache=None, cap: int = PIT_MAX) -> int:
     """Pages 上一版 ∪ data/cache 備份 ∪ 本機 site/data → 寫回兩處；回傳合併後行數。三個來源都空時不建檔 (首次)。
     Pages 抓不到時以備份/本機為準 (不會把歷史洗成 0 行或 1 行)。"""
     cp = _cache_path(cache)
     prev = fetch(url)
-    rows = merge(merge(prev, load(cp) if cp else []), load(path))
+    rows = merge(merge(prev, load(cp) if cp else [], cap), load(path), cap)   # 2026-10-13：上限由呼叫端決定 (exdiv CAP 1200 原本被預設 400 截掉)
     if not rows:
         log.warning("pit_ledger: no rows from Pages / cache / local; leaving %s untouched", path)
         return 0

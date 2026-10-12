@@ -75,7 +75,7 @@ def line_from(rows: list[list], asof: str | None = None) -> dict | None:
 
 def carry(path: Path | str, urls, cache=None) -> int:
     """帶回上一版 (Pages ∪ raw gh-pages ∪ data/cache 備份 ∪ 本機)；回傳行數。"""
-    return PL.carry_over(path, urls, cache=CACHE_PATH if cache is None else cache)
+    return PL.carry_over(path, urls, cache=CACHE_PATH if cache is None else cache, cap=CAP)
 
 
 def snapshot(path: Path | str, cache=None, rows: list[list] | None = None, asof: str | None = None) -> int:
