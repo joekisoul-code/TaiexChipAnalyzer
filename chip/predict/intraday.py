@@ -33,13 +33,18 @@ FEATURES = ["mark_idx", "gap_pct", "ret_open", "ret_prev", "hi_pos", "range_pct"
             "prev_state_bull", "prev_state_bear", "dow", "days_to_settle",
             "g_sox_r1", "g_sp500_r1", "g_nasdaq_r1", "g_tsm_adr_r1", "g_vix_level", "g_vix_chg", "g_kospi_r1"]
 GLOBAL_COLS = ["g_sox_r1", "g_sp500_r1", "g_nasdaq_r1", "g_tsm_adr_r1", "g_vix_level", "g_vix_chg", "g_kospi_r1"]
+# 研究用可選特徵 (2026-10-14，未上線)：前一交易日的隔夜跳空 prev_og (前日 open / 前前日收 −1) 與前一日開盤→13:30 prev_oc。
+# 跳空研究 (ridge/logit) 顯示已知當日跳空下再加 og_D 對盤中段 ΔIC +0.02~0.04；需以正式 LightGBM 驗證 (tools/intraday_research.py) 才改 FEATURES。
+OG_FEATS = ["prev_og", "prev_oc"]
+FEATURES_OG = FEATURES + OG_FEATS
 NAMES = {"mark_idx": "時間點", "gap_pct": "開盤跳空%", "ret_open": "開盤至今%", "ret_prev": "前收至今%", "hi_pos": "位於當日區間位置",
          "range_pct": "當日振幅%", "ret_1h": "近 1 小時%", "night_chg_pct": "前晚夜盤台指期%",
          "prev_ret1": "前一日漲跌%", "prev_ret5": "前 5 日漲跌%", "prev_bias20": "前日月線乖離", "prev_vola20": "20 日波動率",
          "prev_composite_smooth": "籌碼綜合分", "prev_fut_foreign_pct": "外資期貨百分位", "prev_foreign_z5": "外資 5 日 z",
          "prev_state_bull": "多頭狀態", "prev_state_bear": "空頭狀態", "dow": "星期", "days_to_settle": "距結算日",
          "g_sox_r1": "前晚費半%", "g_sp500_r1": "前晚 S&P500%", "g_nasdaq_r1": "前晚 Nasdaq%", "g_tsm_adr_r1": "前晚台積電 ADR%",
-         "g_vix_level": "VIX 水準", "g_vix_chg": "VIX 變化%", "g_kospi_r1": "KOSPI 前日%"}
+         "g_vix_level": "VIX 水準", "g_vix_chg": "VIX 變化%", "g_kospi_r1": "KOSPI 前日%",
+         "prev_og": "前一日隔夜跳空%", "prev_oc": "前一日開盤→收盤%"}
 PARAMS = dict(n_estimators=120, learning_rate=0.03, num_leaves=4, min_child_samples=100, subsample=0.7, subsample_freq=1,
               colsample_bytree=0.6, reg_lambda=20.0, verbose=-1)
 
@@ -122,26 +127,57 @@ def _marks_source(source: str) -> dict[str, dict]:
     return yahoo.daily_marks()
 
 
-def build_history(source: str = "twse", marks_list: list[str] | None = None, marks: dict | None = None, _ctx: dict | None = None) -> pd.DataFrame:
-    """source: twse (2016~，開盤 09:05) / yahoo (舊，約 2 年)。_ctx 可傳入已算好的 daily / night_map 省時。"""
+def og_features(marks: dict) -> dict[str, dict]:
+    """由 marks dict 算每日的「前一交易日」隔夜跳空 / 日內特徵 (研究用，見 OG_FEATS)：{date: {prev_og, prev_oc}}。
+    前一交易日 = marks 中前一個 (日期排序) 有資料的日子；第一天或前一日缺 open / prev_close / 13:30 → NaN。
+    prev_og = 前日 open / 前日 prev_close −1 ×100 (開盤定義與 marks 來源相同：TWSE 09:05)；prev_oc = 前日 13:30 / 前日 open −1 ×100。"""
+    out = {}
+    prev = None
+    for d in sorted(marks):
+        rec = marks[d]
+        og = oc = np.nan
+        if prev:
+            o, pc, c = prev.get("open"), prev.get("prev_close"), prev.get("13:30")
+            if o and pc:
+                og = (o / pc - 1) * 100
+            if o and c:
+                oc = (c / o - 1) * 100
+        out[d] = {"prev_og": og, "prev_oc": oc}
+        prev = rec
+    return out
+
+
+def build_history(source: str = "twse", marks_list: list[str] | None = None, marks: dict | None = None, _ctx: dict | None = None,
+                  extra_feats: tuple[str, ...] = ()) -> pd.DataFrame:
+    """source: twse (2016~，開盤 09:05) / yahoo (舊，約 2 年)。_ctx 可傳入已算好的 daily / night_map 省時。
+    extra_feats: 研究用可選欄位 (OG_FEATS 的子集，見 og_features)；預設空 → 輸出欄位與正式路徑完全相同。"""
     if _ctx is None:
         mat = market_matrix(backtest.load_long("2010-01-01"))
         night = finmind.tx_night_history("2023-01-01")
         _ctx = {"daily": _daily_features(mat), "night_map": dict(zip(night["date"], night["night_chg_pct"])) if not night.empty else {}}
     daily, night_map = _ctx["daily"], _ctx["night_map"]
     marks = marks if marks is not None else _marks_source(source)
+    extra = [f for f in extra_feats if f in OG_FEATS]
+    og = og_features(marks) if extra else {}
     rows = []
     for d, rec in marks.items():
         if d not in daily:
             continue
-        rows += mark_rows(d, rec, daily[d], night_map.get(d), marks_list=marks_list)   # FinMind 夜盤 date = 該夜盤準備的交易日
+        day_rows = mark_rows(d, rec, daily[d], night_map.get(d), marks_list=marks_list)   # FinMind 夜盤 date = 該夜盤準備的交易日
+        if extra:
+            add = {f: og.get(d, {}).get(f, np.nan) for f in extra}
+            for r in day_rows:
+                r.update(add)
+        rows += day_rows
     return pd.DataFrame(rows)
 
 
 # ------------------------------------------------------------------ 訓練 / 驗證
 def _walk_forward_months(df: pd.DataFrame, target: str, min_train_days: int = 120, from_ym: str | None = None,
-                         quarterly: bool = False) -> pd.DataFrame:
-    """逐月 (或逐季：quarterly=True，每季重訓一次，測整季) walk-forward。year 欄 = 測試月份 (metrics 依此分組)。"""
+                         quarterly: bool = False, features: list[str] | None = None) -> pd.DataFrame:
+    """逐月 (或逐季：quarterly=True，每季重訓一次，測整季) walk-forward。year 欄 = 測試月份 (metrics 依此分組)。
+    features: 研究用特徵清單 (例如 FEATURES_OG)；預設正式 FEATURES。"""
+    feats = features or FEATURES
     d = df.dropna(subset=[target]).copy()
     d["ym"] = d["date"].str[:7]
     d["blk"] = d["ym"].map(lambda ym: f"{ym[:4]}Q{(int(ym[5:7]) - 1) // 3 + 1}") if quarterly else d["ym"]
@@ -151,9 +187,9 @@ def _walk_forward_months(df: pd.DataFrame, target: str, min_train_days: int = 12
         train = d[d["date"] < test["date"].min()]
         if train["date"].nunique() < min_train_days or test.empty:
             continue
-        models = M.fit_ensemble(train[FEATURES], train[target], PARAMS)
+        models = M.fit_ensemble(train[feats], train[target], PARAMS)
         rows.append(pd.DataFrame({"date": test["date"].values, "year": test["ym"].values, "mark": test["mark"].values,
-                                  "pred": M.predict_ensemble(models, test[FEATURES]), "actual": test[target].values}))
+                                  "pred": M.predict_ensemble(models, test[feats]), "actual": test[target].values}))
     return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
 
 

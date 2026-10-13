@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "fast | full | train | research (挖寶研究，不發布) | research_intraday (小時模型資料來源研究，不發布)"
+        description: "fast | full | train | research (挖寶研究，不發布) | research_intraday (小時模型資料來源研究 + 前一日隔夜跳空 prev_og 特徵驗證，不發布)"
         default: "full"
 
 permissions:
@@ -78,7 +78,7 @@ jobs:
       - name: research (挖寶 A 級：法人/營收特徵研究，結果上傳 artifact，不發布)
         if: steps.mode.outputs.mode == 'research'
         run: python tools/treasure_research.py
-      - name: research_intraday (小時模型：TWSE 2016~ vs Yahoo 2 年 + 早盤模型，LightGBM 逐季 walk-forward；只上傳報告，不寫模型、不發布)
+      - name: research_intraday (小時模型：TWSE 2016~ vs Yahoo 2 年 + 早盤模型 + prev_og 前一日隔夜跳空特徵驗證，LightGBM 逐季 walk-forward；只上傳報告，不寫模型、不發布)
         if: steps.mode.outputs.mode == 'research_intraday'
         run: python tools/intraday_research.py
       - name: upload research

@@ -50,6 +50,37 @@ check("早盤列：pre / 09:15 / 09:30，mark_idx 依早盤清單", [x["mark"] f
 check("09:30 的 ret_1h 以 09:15 價計、目標 = 到 13:30 報酬", abs(e30["ret_1h"] - (99.5 / 102 - 1) * 100) < 1e-9 and abs(e30["to_13:30"] - (101.5 / 99.5 - 1) * 100) < 1e-9)
 check("原主模型清單不受影響 (pre/10:00..13:00)", [x["mark"] for x in I.mark_rows("2026-01-02", rec, {}, None)] == I.MARKS)
 
+# ---------------------------------------------------------------- prev_og / prev_oc (研究用可選特徵，正式路徑不變)
+def _rec(pc, o, c):
+    return {"prev_close": pc, "open": o, "10:00": o, "11:00": o, "12:00": o, "13:00": o, "13:30": c, "hi": {}, "lo": {}}
+
+
+OGM = {"2026-01-05": _rec(100.0, 101.0, 102.0), "2026-01-06": _rec(102.0, 103.0, 101.0),            # 01-07 缺
+       "2026-01-08": _rec(101.0, 100.0, 104.0), "2026-01-09": {"prev_close": 104.0, "open": None, "hi": {}, "lo": {}},   # 01-09 無開盤
+       "2026-01-12": _rec(104.0, 105.0, 106.0)}
+og = I.og_features(OGM)
+check("prev_og = 前日 open/前收−1、prev_oc = 前日 13:30/open−1；第一天 NaN",
+      np.isnan(og["2026-01-05"]["prev_og"]) and np.isnan(og["2026-01-05"]["prev_oc"])
+      and abs(og["2026-01-06"]["prev_og"] - 1.0) < 1e-9 and abs(og["2026-01-06"]["prev_oc"] - (102 / 101 - 1) * 100) < 1e-9)
+check("前一日缺 (01-07) → 用 marks 中前一個有資料日 (01-06)；前一日無 open (01-09) → NaN",
+      abs(og["2026-01-08"]["prev_og"] - (103 / 102 - 1) * 100) < 1e-9 and abs(og["2026-01-08"]["prev_oc"] - (101 / 103 - 1) * 100) < 1e-9
+      and np.isnan(og["2026-01-12"]["prev_og"]) and np.isnan(og["2026-01-12"]["prev_oc"]))
+FEATURES_OFFICIAL = ["mark_idx", "gap_pct", "ret_open", "ret_prev", "hi_pos", "range_pct", "ret_1h", "night_chg_pct",
+                     "prev_ret1", "prev_ret5", "prev_bias20", "prev_vola20", "prev_composite_smooth", "prev_fut_foreign_pct", "prev_foreign_z5",
+                     "prev_state_bull", "prev_state_bear", "dow", "days_to_settle",
+                     "g_sox_r1", "g_sp500_r1", "g_nasdaq_r1", "g_tsm_adr_r1", "g_vix_level", "g_vix_chg", "g_kospi_r1"]
+check("正式 FEATURES 未變 (26 個，不含 prev_og)；FEATURES_OG = FEATURES + prev_og + prev_oc",
+      I.FEATURES == FEATURES_OFFICIAL and I.FEATURES_OG == FEATURES_OFFICIAL + ["prev_og", "prev_oc"] and I.OG_FEATS == ["prev_og", "prev_oc"])
+_ctx = {"daily": {d: {"prev_ret1": 0.0, "dow": 1} for d in OGM}, "night_map": {}}
+h0 = I.build_history("twse", marks=OGM, _ctx=_ctx)
+h1 = I.build_history("twse", marks=OGM, _ctx=_ctx, extra_feats=("prev_og", "prev_oc"))
+exp_cols = set().union(*[set(r) for d, r_ in OGM.items() for r in I.mark_rows(d, r_, _ctx["daily"][d], None)])
+check("build_history 不帶 extra_feats → 欄位 = mark_rows 欄位 (與以前相同，無 prev_og)",
+      set(h0.columns) == exp_cols and "prev_og" not in h0.columns and len(h0) == len(h1))
+check("帶 extra_feats → 多 prev_og / prev_oc 兩欄，值對齊日期",
+      set(h1.columns) == exp_cols | {"prev_og", "prev_oc"} and abs(h1.loc[h1.date == "2026-01-06", "prev_og"].iloc[0] - 1.0) < 1e-9
+      and h1.loc[h1.date == "2026-01-05", "prev_og"].isna().all())
+
 # ---------------------------------------------------------------- train()：來源比較 + 早盤模型 (合成資料、替換學習器)
 rng = np.random.default_rng(0)
 dates = pd.bdate_range("2016-01-04", "2026-09-30").strftime("%Y-%m-%d").tolist()
