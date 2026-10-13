@@ -44,4 +44,15 @@ p0 = {"ledger": {"treasure": [], "surge": []}, "scans": []}
 sc = {"date": "2026-10-12", "mkt_bias20": -2.0, "mkt_close": 1, "treasure": [{"code": "9", "name": "x", "close": 10, "p": 0.6, "tier": "A", "pct": 1.0}], "surge": []}
 r = L.record(p0, sc, {"th_A": 0.5, "th_Aplus": 0.64, "th_q92": 0.55, "trained_at": "t"})["ledger"]["treasure"][0]
 check("record：新列帶 th_q92 與 mkt_bias20 → 之後判定不用近似", r.get("th_q92") == 0.55 and r.get("mkt_bias20") == -2.0 and L.strict_a_th(r)[1] is False)
+
+# BE-9：舊列沒記 mkt_bias20 → record() 趁 scans 還在時寫進列本身 (mb_src='scan')；之後 scans 只留 400 天、那天被截掉也分得出嚴格 A
+legacy = row(code="7", date="2026-07-20", status="命中")
+p1 = {"ledger": {"treasure": [legacy], "surge": []}, "scans": [{"date": "2026-07-20", "mkt_bias20": -7.0}]}
+p1 = L.record(p1, sc, TM)
+check("record：舊 A 列補上當日掃描的大盤乖離 (mb_src=scan)", legacy.get("mkt_bias20") == -7.0 and legacy.get("mb_src") == "scan")
+new = next(x for x in p1["ledger"]["treasure"] if x["code"] == "9")
+check("record：列本身已有的大盤乖離不被覆蓋", new["mkt_bias20"] == -2.0 and "mb_src" not in new)
+p1["scans"] = [x for x in p1["scans"] if x["date"] != "2026-07-20"]          # 模擬 scans[-400:] 截掉那天
+mbd1 = {x["date"]: x.get("mkt_bias20") for x in p1["scans"]}
+check("那天的掃描紀錄被截掉後，舊列仍判得出嚴格 A (不是資料不足)", L.is_strict_a(legacy, TM, mbd1) is True and L.stats(p1, TM)["treasure"]["shadow"]["strict_A"]["n_unknown"] == 0)
 print(f"\ntreasure shadow: {ok} passed")

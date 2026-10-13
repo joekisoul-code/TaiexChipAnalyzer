@@ -33,6 +33,16 @@ pr2 (2026-10-05，LC-04 pass / T5-01~03 / T5-missed / LC-05~06 fail)：
 - BE-2 遲到的執行 (is_late：模型晚於推薦日、或推薦日隔天 09:00 後才跑) 不把推薦記成真實發布：已發布的日子不再記、不蓋 scans[D]、不發新推薦提醒；
   沒發布過的記成 scan_src='late' + backfill；同一推薦日多次記錄共用每日上限 (挖寶 6 / 飆股 topk)；既有的遲到列由 tag_late() 改標。
 - BE-3 缺當天 ^TWII 不再把大盤當 0% (相對大盤只在兩個收盤都有時算)；build() 把 scan 以盤後表補的加權收盤帶進對帳；追蹤中的列每次清掉上次的達標標記。
+- (上面 pr2「模型檔不動、無重訓」只指 pr2 那次；之後每週日重訓，門檻 / 宇宙會變，每列記 model_ver / th_A / th_Aplus / in_uni。)
+
+2026-10-13 雷達其餘審查項：
+- BE-4 新列 (挖寶 / 飆股) 記 in_uni = 掃描當時是否在模型宇宙內 (舊列不遷移，App 退回目前宇宙)。
+- N3 飆股列加 fin20 / fin20Date (第 20 個交易日收盤報酬)，飆 / 跌破 / trail 提早出場後仍追到第 20 日 (同 fin21)；stats.surge 加 n_fin20 / win20 / avg_fin20。
+- BE-7 stats.surge 加 n_published / n_backfill / published{done, hits, rate}；飆股失準只看真實發布結案 ≥20 筆。
+- N4 飆股提醒寫「飆股分 0.xx」(模型原始分數，未校準)，不再寫「機率 NN%」。
+- N8 / BE-5 radar_bt.same 加 from / to (推薦日界線，含頭尾)；N9 radar_bt.day0.period、radar_bt.path_period (2021~ 樣本外，不是 radar_bt.period)。
+- BE-6 build() 先掃當天再回填：第一次 full run 拖到午夜後 (GitHub 排程延遲) 時，當天仍記成真實發布 (隔天 09:00 前)，不被回填搶先標成 backfill。
+- BE-9 帳本超過 LEDGER_MAX 只刪最舊的描述級 (A/A+ 永不刪) 並記 log；舊列的大盤乖離趁 scans 還在時寫進列本身 (mb_src='scan')。
 """
 from __future__ import annotations
 
@@ -100,7 +110,7 @@ RADAR_BT = {
              "diff": {'A_win': {'d': 0.033, 'ci95': [-0.04, 0.073], 'noise': True}, 'A_hit': {'d': 0.04, 'ci95': [-0.013, 0.075], 'noise': True}, 'A+_win': {'d': 0.077, 'ci95': [-0.043, 0.168], 'noise': True}, 'S3_win': {'d': 0.041, 'ci95': [-0.004, 0.097], 'noise': True}, 'S3_surge': {'d': 0.016, 'ci95': [-0.012, 0.053], 'noise': True}, 'B_win': {'d': 0.029, 'ci95': [0.017, 0.041], 'noise': False}}, "within_noise": True,   # within_noise = App 顯示的 A / A+ / 飆股差值都在 95% 範圍內 (B 級另見 diff)
              "old_claim": {"A": [0.617, 0.695], "S3": [0.469, 0.552]}, "honest": True,
              "note": '時點正確重算 (訓練窗與正式相同 2020 起)：限定前 170 大的 A / A+ / 飆股都略好但在誤差內；B 級 (描述級) 勝率較高 (超出誤差)；之前的 62→70%、47→55% 主要來自用今天的名單回測'},
-    "same": {"period": "2026-07~09",
+    "same": {"period": "2026-07~09", "from": "2026-07-01", "to": "2026-09-03",   # N8：推薦日界線 (含頭尾)；App 只拿同一段的實際列來比
              "A": {'n': 49, 'hit': 0.514, 'win21': 0.804, 'fin21': 14.4, 'med21': 12.34, 'q10': -2.63, 'win_rng': [0.766, 0.86], 'hit_rng': [0.469, 0.571]},
              "S3": {'n': 36, 'surge': 0.289, 'hit': 0.444, 'win21': 0.599, 'fin21': 8.08, 'med21': 3.35, 'q10': -13.5, 'win_rng': [0.5, 0.657], 'surge_rng': [0.265, 0.316]},
              "B": {'n': 212, 'hit': 0.314, 'win21': 0.503, 'fin21': 1.08, 'med21': 0.18, 'q10': -18.07, 'win_rng': [0.478, 0.531], 'hit_rng': [0.285, 0.341]}},
@@ -118,7 +128,7 @@ RADAR_FAIL = {
               "S3": {'rule': '第 3 天收盤 ≤ −5%', 'share': 0.215, 'hit': 0.045, 'lose': 0.695, 'hold': -6.04, 'exit': -8.89, 'n': 147}},
 }
 # r6 10-07 推薦當天 A/A+ 分數校準 (訓練窗與正式相同 2020 起)：z = logit(p) − logit(th_A) 分 5 組 (邊界 edges)，各組歷史命中 (單調化)；走動式 Brier 2024 0.2426/0.2535, 2025 0.2285/0.2504, 2026 0.2332/0.2511 (3/3 年較好，小幅)
-RADAR_DAY0 = {"edges": [0.112, 0.288, 0.505, 0.937], "hit": [0.431, 0.454, 0.454, 0.613, 0.697], "n": [62, 62, 62, 62, 62], "base": 0.53, "note": "A/A+ 依推薦分數分 5 組的歷史命中 (2021~ 樣本外，訓練窗與正式相同 2020 起)；小幅優於只看等級平均，當參考"}
+RADAR_DAY0 = {"edges": [0.112, 0.288, 0.505, 0.937], "hit": [0.431, 0.454, 0.454, 0.613, 0.697], "n": [62, 62, 62, 62, 62], "base": 0.53, "period": "2021-01~2026-09", "note": "A/A+ 依推薦分數分 5 組的歷史命中 (2021~ 樣本外，訓練窗與正式相同 2020 起)；小幅優於只看等級平均，當參考"}
 
 _PATH_EDGES = (-8, -5, -2, 2, 5)
 _ISO = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -676,7 +686,7 @@ def load_prev() -> dict:
                 k = (x.get("code"), x.get("date"))
                 if k in have:
                     old = out["ledger"][kind][have[k]]
-                    if (x.get("status") != "追蹤" and old.get("status") == "追蹤") or (len(json.dumps(x)) > len(json.dumps(old)) and old.get("status") == "追蹤")                             or (old.get("status") != "追蹤" and x.get("status") == old.get("status") and x.get("fin21") is not None and old.get("fin21") is None):   # pr2：已結案但另一份已補 fin21
+                    if (x.get("status") != "追蹤" and old.get("status") == "追蹤") or (len(json.dumps(x)) > len(json.dumps(old)) and old.get("status") == "追蹤")                             or (old.get("status") != "追蹤" and x.get("status") == old.get("status") and ((x.get("fin21") is not None and old.get("fin21") is None) or (x.get("fin20") is not None and old.get("fin20") is None))):   # pr2：已結案但另一份已補 fin21 (N3：飆股 fin20)
                         out["ledger"][kind][have[k]] = x
                 else:
                     have[k] = len(out["ledger"][kind]); out["ledger"][kind].append(x)
@@ -755,6 +765,11 @@ def record(prev: dict, sc: dict, tm: dict | None = None, scan_src: str = "live")
     tm = tm or {}
     meta = {"model_ver": tm.get("trained_at"), "th_A": tm.get("th_A"), "th_Aplus": tm.get("th_Aplus"), "mkt_bias20": sc.get("mkt_bias20"), "scan_src": scan_src,
             **({"th_q92": tm["th_q92"]} if tm.get("th_q92") is not None else {})}   # 2026-10-12：影子觀察嚴格 A 用
+    # BE-4 (2026-10-13)：掃描當時是否在模型宇宙內 (in_uni)。宇宙每週重訓都會換 → App 不再用「目前」的宇宙回頭標舊列；
+    # 模型檔沒有 universe (全市場候選) → 不寫此欄 (App 退回目前宇宙)。舊列維持無欄位，不做歷史遷移。
+    uni = {str(c) for c in (tm.get("universe") or [])}
+    def _uni(code):
+        return {"in_uni": str(code) in uni} if uni else {}
     led = prev["ledger"]
     tre = led["treasure"]
     active = [x for x in tre if x.get("status") == "追蹤"]
@@ -780,7 +795,7 @@ def record(prev: dict, sc: dict, tm: dict | None = None, scan_src: str = "live")
         elif i >= 20 or len(active) + n >= MAX_ACTIVE or r["code"] in act_codes or r["code"] in recent_miss:
             continue
         tre.append({"code": r["code"], "name": r["name"], "date": D, "entry": r["close"], "mktEntry": sc.get("mkt_close"), "p": r["p"], "tier": r["tier"], "ps": r.get("ps"),
-                    "pct": r["pct"], "status": "追蹤", "peak": 0.0, "trough": 0.0, "cur": 0.0, "rel": 0.0, "days": 0, **meta, "rec_rule": REC_RULE_A if is_a else REC_RULE_B,
+                    "pct": r["pct"], "status": "追蹤", "peak": 0.0, "trough": 0.0, "cur": 0.0, "rel": 0.0, "days": 0, **meta, **_uni(r["code"]), "rec_rule": REC_RULE_A if is_a else REC_RULE_B,
                     **({"why": r["why"]} if r.get("why") else {}), **({"sPick": True} if r["code"] in s_codes else {})})
         have.add((r["code"], D)); recent_rec.add(r["code"]); act_codes.add(r["code"])
         n += 1
@@ -794,14 +809,41 @@ def record(prev: dict, sc: dict, tm: dict | None = None, scan_src: str = "live")
         tt = t_tier.get(r["code"])
         sur.append({"code": r["code"], "name": r["name"], "date": D, "entry": r["close"], "ps": r["ps"], "status": "追蹤", "days": 0,
                     **({"tier": tt[0], "p": tt[1]} if tt else {}),
-                    "model_ver": meta["model_ver"], "th_top10": (tm.get("surge") or {}).get("th_top10"), "scan_src": scan_src})
+                    "model_ver": meta["model_ver"], "th_top10": (tm.get("surge") or {}).get("th_top10"), "scan_src": scan_src, **_uni(r["code"])})
     scans = [x for x in prev.get("scans") or [] if x.get("date") != D]
     scans.append({"date": D, "n_treasure": len(sc["treasure"]), "n_A": sum(1 for r in sc["treasure"] if r["tier"] in ("A", "A+")), "mkt_bias20": sc.get("mkt_bias20"),
                   "top": [{"code": r["code"], "tier": r["tier"], "p": r["p"]} for r in sc["treasure"][:6]], "surge": [{"code": r["code"], "ps": r["ps"]} for r in sc["surge"]]})
+    # BE-9：舊列 (回填 / 早期 live) 沒記大盤乖離 → 趁當日掃描紀錄還在時寫進列本身 (mb_src='scan')，scans 只留 400 天後嚴格 A 影子統計仍分得出來
+    mbd = {s_["date"]: s_.get("mkt_bias20") for s_ in scans if s_.get("date") and s_.get("mkt_bias20") is not None}
+    for x in tre:
+        if x.get("mkt_bias20") is None and x.get("date") in mbd:
+            x["mkt_bias20"], x["mb_src"] = mbd[x["date"]], "scan"
     prev["scans"] = scans[-400:]
-    for kind in ("treasure", "surge"):
-        led[kind] = led[kind][-LEDGER_MAX:]
+    trimmed = trim_ledger(led)
+    if trimmed:
+        prev["trimmed"] = {k: (prev.get("trimmed") or {}).get(k, 0) + v for k, v in trimmed.items()}
     return prev
+
+
+def trim_ledger(led: dict) -> dict:
+    """BE-9：帳本每類最多 LEDGER_MAX 筆 (控制 JSON 大小)。挖寶的訊號級 (A/A+) 列永不刪 (約 90 筆/年)，只刪最舊的描述級 (B/B+)；
+    飆股照舊刪最舊。刪了就記 log 並回傳 {kind: 筆數} (不再無聲截斷)。"""
+    out = {}
+    tre = led.get("treasure") or []
+    if len(tre) > LEDGER_MAX:
+        sig = [x for x in tre if x.get("tier") in ("A", "A+")]
+        desc = sorted((x for x in tre if x.get("tier") not in ("A", "A+")), key=lambda x: (x.get("date") or "", x.get("code") or ""))
+        keep = desc[len(desc) - max(0, LEDGER_MAX - len(sig)):] if LEDGER_MAX > len(sig) else []
+        led["treasure"] = sorted(sig + keep, key=lambda x: (x.get("date") or "", x.get("code") or ""))
+        out["treasure"] = len(tre) - len(led["treasure"])
+    sur = led.get("surge") or []
+    if len(sur) > LEDGER_MAX:
+        led["surge"] = sur[-LEDGER_MAX:]
+        out["surge"] = len(sur) - LEDGER_MAX
+    out = {k: v for k, v in out.items() if v}
+    if out:
+        log.warning("treasure_live 帳本超過 %d 筆，刪去最舊的描述級 / 飆股列：%s (A/A+ 保留)", LEDGER_MAX, out)
+    return out
 
 
 def _fin21_of(x: dict):
@@ -844,8 +886,8 @@ def _px_repair(x: dict, b: list[dict]) -> bool:
     d0 = _bar_on(b, x["date"]); e = float(x["entry"]); c0 = float(d0["close"]) if d0 else 0.0
     if not (c0 > 0 and e > 0 and abs(c0 / e - 1) > PX_TOL):
         return False
-    x["orig"] = {k: x[k] for k in PX_KEYS if k in x}
-    for k in PX_KEYS:
+    x["orig"] = {k: x[k] for k in CAL_KEYS if k in x}     # CAL_KEYS = PX_KEYS + 飆股 fin20 (N3)
+    for k in CAL_KEYS:
         x.pop(k, None)
     x["status"] = "追蹤"; x["px_fix"] = 1
     return True
@@ -989,6 +1031,11 @@ def _eval_surge(x: dict, b: list[dict]) -> None:
     e = _basis(x, b); since = [r for r in b if str(r["date"])[:10] > x["date"] and r.get("close")][:T.SURGE_N]
     if not since:
         return
+    # N3 (2026-10-13)：fin20 = 第 20 個交易日收盤報酬 (回測口徑)，飆 / 跌破 / trail 提早出場後仍追到第 20 日補上 (同挖寶 fin21)
+    if len(since) >= T.SURGE_N and x.get("fin20") is None:
+        x["fin20"] = round((float(since[T.SURGE_N - 1]["close"]) / e - 1) * 100, 2); x["fin20Date"] = str(since[T.SURGE_N - 1]["date"])[:10]
+    elif len(since) < T.SURGE_N and x.get("fin20") is None and (pd.Timestamp(str(b[-1]["date"])[:10]) - pd.Timestamp(x["date"])).days > MAX_FIN21_WAIT_DAYS:
+        x["fin20_na"] = True      # 日 K 不足 (下市/停牌/資料斷)：不再重試
     w = _walk_surge(since, e)
     peak, res, trail, tdate = w["peak"], w["res"], w["trail"], w["tdate"]
     if x.get("status") == "追蹤":       # BE-3：追蹤中的列每次從頭走訪 → 先清掉上次的標記 (日 K 對齊後可能變)
@@ -1067,7 +1114,8 @@ def _todo(prev: dict, cal_on: bool = False) -> list[tuple]:
         if need or x.get("pxk") is None or (cal_on and x.get("calv") is None and _closed(x)):
             todo.append(("t", x, need))     # pr2：停損提早結案的列繼續追到第 21 日補 fin21；10-06：舊結案列補一次「第幾天」(chk)
     for x in prev["ledger"]["surge"]:
-        need = x.get("status") == "追蹤" or (x.get("trail") is None and (x.get("days") or 0) < T.SURGE_N) or x.get("chk") is None
+        need = x.get("status") == "追蹤" or (x.get("trail") is None and (x.get("days") or 0) < T.SURGE_N) or x.get("chk") is None \
+            or (x.get("fin20") is None and not x.get("fin20_na"))   # N3：trail 提早出場 / 舊列 (days 停在 20 以前或 =20 卻沒 fin20) 也追到補上 fin20
         if need or x.get("pxk") is None or (cal_on and x.get("calv") is None and _closed(x)):
             todo.append(("s", x, need))   # r7：pxk = 價格基準一次性檢查 (配股/減資回溯縮放)；只檢查不需修的列不重算 (結果維持原樣)
     return [t for t in todo if t[2]] + [t for t in todo if not t[2]]
@@ -1098,6 +1146,10 @@ def evaluate(prev: dict, mk: dict, max_fetch: int = 200, upto: str | None = None
                     ref = pd.Timestamp(upto) if upto else pd.Timestamp(dt.datetime.now(config.TZ).strftime("%Y-%m-%d"))
                     if (ref - pd.Timestamp(x["date"])).days > MAX_FIN21_WAIT_DAYS:
                         x["fin21_na"] = True
+                if kind == "s" and x.get("status") not in (None, "追蹤") and x.get("fin20") is None and not x.get("fin20_na"):   # N3：同上 (飆股 fin20)
+                    ref = pd.Timestamp(upto) if upto else pd.Timestamp(dt.datetime.now(config.TZ).strftime("%Y-%m-%d"))
+                    if (ref - pd.Timestamp(x["date"])).days > MAX_FIN21_WAIT_DAYS:
+                        x["fin20_na"] = True
                 continue
             fix = _px_repair(x, b) if x.get("pxk") is None else False
             if cal is not None and x.get("calv") is None and _closed(x):
@@ -1227,7 +1279,14 @@ def stats(prev: dict, tm: dict) -> dict:
              "trail_avg": round(float(np.mean([x["trail"] for x in trl])), 2) if trl else None, "bt_hit": RADAR_BT["S3"]["surge"] if RADAR_BT.get("method") else sg_oos.get("app_hit", sg_oos.get("hit")),
              "bt_fin": RADAR_BT["S3"]["fin21"] if RADAR_BT.get("method") else sg_oos.get("app_fin", sg_oos.get("fin")),   # 10-07 時點正確回測
              "since": sur[0]["date"] if sur else None}
-    surge["drift"] = bool(surge["done"] >= 20 and surge["bt_hit"] is not None and surge["rate"] is not None and surge["rate"] < surge["bt_hit"] - 0.12)
+    # BE-7 (2026-10-13)：真實發布 / 回填分開；失準只看真實發布結案 (≥20 筆，同挖寶只看 published)，回填 (樣本內) 不再稀釋或觸發
+    sp = [x for x in sd if _published(x)]; sph = sum(1 for x in sp if x["status"] == "飆")
+    surge.update(n_published=len(sp), n_backfill=len(sd) - len(sp),
+                 published=({"done": len(sp), "hits": sph, "rate": round(sph / len(sp), 3)} if sp else None))
+    # N3：第 20 個交易日收盤報酬 (fin20；同回測口徑，提早出場的也追到第 20 日)
+    f20 = [float(x["fin20"]) for x in sd if x.get("fin20") is not None]
+    surge.update(n_fin20=len(f20), win20=round(float(np.mean([v > 0 for v in f20])), 3) if f20 else None, avg_fin20=round(float(np.mean(f20)), 2) if f20 else None)
+    surge["drift"] = bool(sp and len(sp) >= 20 and surge["bt_hit"] is not None and sph / len(sp) < surge["bt_hit"] - 0.12)
     return {"treasure": {"all": agg(done), "signal": signal, "shadow": shadow, "by_source": by_source, "tracking": sum(1 for x in tre if x.get("status") == "追蹤"), "by_tier": by_tier, "by_month": by_month,
                          "since": tre[0]["date"] if tre else None, "roles": dict(ROLE), "expect_AAplus": list(EXPECT_AAPLUS), "note_tiers": NOTE_TIERS,
                          "def": "結案採回測定義：21 交易日、峰值取收盤、停損 −8% 取盤中低點 (先後順序)、相對大盤任一日 ≥ +4pt；與 App 本機帳本 (30 日曆天) 不同。"
@@ -1239,6 +1298,10 @@ def stats(prev: dict, tm: dict) -> dict:
 # r6 10-07 各等級時點正確回測，訓練窗與正式相同 (2020 起) (A = 不含 A+；B = 不含 B+)：A+ 命中 65%、A 42%、B+ 43%、B 37% — 訊號主要在 A+ 與「大盤月線下的日子」
 RADAR_TIER = {'A+': {'n': 128, 'hit': 0.648, 'fin': 12.37, 'win21': 0.813}, 'A': {'n': 170, 'hit': 0.424, 'fin': 3.99, 'win21': 0.594}, 'B+': {'n': 483, 'hit': 0.432, 'fin': 4.42, 'win21': 0.56}, 'B': {'n': 5475, 'hit': 0.37, 'fin': 1.64, 'win21': 0.484}}
 RADAR_BT["path"], RADAR_BT["fail"], RADAR_BT["day0"], RADAR_BT["tiers"] = RADAR_PATH, RADAR_FAIL, RADAR_DAY0, RADAR_TIER
+# N9：路徑表 / 分數組表 (final_tables_2020.py) 是 2021~ 樣本外 (連續路徑 2021~、冷啟動路徑 2022~)，和 radar_bt.period (2022-01~) 不同窗
+RADAR_BT["path_period"] = "2021-01~2026-09 (冷啟動路徑 2022-01~)"
+# BE-5：這些回測常數是 10-07 手動研究 (radar5/r6，訓練窗 2020 起) 的結果，不隨每週重訓更新；App 可據此標「回測研究日」
+RADAR_BT["basis"] = {"research_date": "2026-10-07", "train_start": "2020-01-01"}
 # r7 (2026-10-07) 除息研究 (scratchpad r7/tr + 反方重跑)：回測/帳本用未還原收盤價；含息重算現行推薦 A∪A+ 命中 .520→.532、勝率 .688→.701
 # (10% 的 A 推薦 21 日內遇除息，6 月 A 命中 .12→.16、7 月 .49→.54)；改用含息報酬重新訓練 25 種子只 +0.7~1pt (與隨機擾動同級) → 不採用；
 # 股利特徵 (近 12 月殖利率等) 點估計 +3~4pt 但集中 2025 → 需更多資料 (已開始每日存除權息預告表 data/exdiv_announce.jsonl)
@@ -1315,13 +1378,15 @@ def alerts(sc: dict, st: dict, prev: dict | None = None) -> list[dict]:
                            + (f"、同分數組歷史約 {round(r['d0'] * 100)}%" if r.get("d0") is not None else "") + "；大盤月線下的日子整體較佳。非買賣建議。"})
     for r in (sc.get("surge") or [])[:3]:
         if r.get("ps") is not None and r["ps"] >= ((((st or {}).get("surge") or {}).get("th_top10")) or 0.3977):
-            out.append({"level": "mid", "kind": "surge", "code": r["code"], "date": D, "msg": f"🚀 飆股雷達 ({D[5:]})：{r['code']} {r['name']} 20 日內先漲 20% 機率 {round(r['ps'] * 100)}% (回測前 3 名約 {round(RADAR_BT['S3']['surge'] * 100)}%；高風險)"})
+            # N4 (2026-10-13)：ps 是模型原始分數 (未校準，平均高估 6~10pt) → 寫「飆股分」，機率只引用前 3 名回測實際飆股率
+            out.append({"level": "mid", "kind": "surge", "code": r["code"], "date": D, "msg": f"🚀 飆股雷達 ({D[5:]})：{r['code']} {r['name']} 飆股分 {r['ps']:.2f} (前 3 名回測 20 日內先漲 20% 約 {round(RADAR_BT['S3']['surge'] * 100)}%；高風險)"})
     for t, g in ((st.get("treasure") or {}).get("by_tier") or {}).items():
         if g.get("role") == "signal" and g.get("drift") and g.get("published"):   # pr2：只對訊號級、以真實發布結案判定；B/B+ 不再警示
             gp = g["published"]
             out.append({"level": "mid", "kind": "drift", "code": "", "date": D, "msg": f"⚠ 挖寶 {t} 級真實發布命中 {round(gp['rate'] * 100)}% ({gp['n']} 筆結案)，低於預期 {round(EXPECT_AAPLUS[0] * 100)}~{round(EXPECT_AAPLUS[1] * 100)}% 達 15pt 以上：請檢視模型"})
     if (st.get("surge") or {}).get("drift"):
-        s = st["surge"]; out.append({"level": "mid", "kind": "drift", "code": "", "date": D, "msg": f"⚠ 飆股雷達上線飆股率 {round(s['rate'] * 100)}% (回測 {round(s['bt_hit'] * 100)}%，{s['done']} 筆)：實盤失準"})
+        s = st["surge"]; sp = s.get("published") or {"rate": s["rate"], "done": s["done"]}     # BE-7：只報真實發布結案
+        out.append({"level": "mid", "kind": "drift", "code": "", "date": D, "msg": f"⚠ 飆股雷達真實發布飆股率 {round(sp['rate'] * 100)}% (回測 {round(s['bt_hit'] * 100)}%，{sp['done']} 筆結案)：實盤失準"})
     try:
         out += close_alerts(prev) + weak_alerts(prev)
     except Exception as e:  # noqa: BLE001
@@ -1364,12 +1429,14 @@ def build(date: str | None = None, do_scan: bool = True, backfill_days: int = 0)
     mk = twii_hist()
     # BE-1：證交所交易日曆 (懶載入：帳本沒有要對帳的列就不抓)；FMTQIK 抓不到的月份以掃描日 ∪ ^TWII 的日子補洞
     cal = TradeCal(extra=lambda: set(mk) | {s_.get("date") for s_ in prev.get("scans") or [] if s_.get("date")})
+    # BE-6：先掃當天、再回填其他日子 — 第一次 full run 被 GitHub 排程拖到午夜後時，「昨天以前」的回填會先把當天
+    # (= 掃描日 D) 記成 backfill，之後的 live 掃描因同檔同日已在帳本而什麼都不記；所以 D 不進回填，留給下面依 is_late 判定。
+    sc = scan(tm, date) if (do_scan and tm.get("trees")) else {"date": None}
     if backfill_days and tm.get("trees"):
         end = dt.datetime.now(config.TZ).date() - dt.timedelta(days=1)
-        days = [d for d in sorted(mk) if (end - dt.timedelta(days=backfill_days)).isoformat() <= d <= end.isoformat()]
+        days = [d for d in sorted(mk) if (end - dt.timedelta(days=backfill_days)).isoformat() <= d <= end.isoformat() and d != sc.get("date")]
         prev = backfill(prev, tm, days, mk, cal=cal)
     pools = prev.pop("_pools", None) or []                      # r14：backfill 掃描的候選池
-    sc = scan(tm, date) if (do_scan and tm.get("trees")) else {"date": None}
     pool = sc.pop("pool", None)                                 # r14：候選池不進 treasure_live.json / LOCAL (App 不讀)
     late = False
     if sc.get("date"):
