@@ -375,8 +375,16 @@ def build(scored: pd.DataFrame | None = None, watch_res: dict | None = None, pre
     except Exception as e:  # noqa: BLE001
         log.warning("gov8 dist: %s", e)
     cols = [c for c in ("date", "gov8_net", "close", "ret1", "cum5", "cum20", "ma20", "inv", "streak", "z5") if c in h]
+    # 10-13：最新已收盤交易日 (大盤序列最後一天)；App 用它判斷「今日八大行庫資料尚未公布」(HiStock 常晚到 20 點後)
+    latest = None
+    try:
+        if scored is not None and not scored.empty and "date" in scored:
+            latest = str(pd.Series(scored["date"]).astype(str).max())[:10]
+    except Exception:  # noqa: BLE001
+        latest = None
     return {
         "generated": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M:%S"),
+        "latest_trading": latest,
         "market": view,
         "history": h[cols].tail(400).to_dict("records") if not h.empty else [],
         "ranking": rank,
