@@ -7,11 +7,18 @@
 (d) alerts 文案不含「命中機率 / 進場 / 持有」；(e) 空帳本 / 全追蹤不崩；(f) backfill 標 backfill=True 與 scan_src=backfill。
 r6 (10-07)：(g) A/A+ 記錄規則同回測 (30 日曆日內未記過就記，不受前 20 / MAX_ACTIVE；每日 6 檔共用)，B/B+ 舊規則不變；
 (h) 常數為訓練窗與正式相同 (2020 起) 的版本、警報 A+ / A 分開寫；(i) 帶到 App 的文字不含禁用詞。
+BE-2 (2026-10-13)：(j) 同一推薦日再記一次 (15:40 + 21:45 / 重掃) 仍 ≤ 6 檔、飆股 ≤ topk；(k) is_late 規則 (模型晚於推薦日 / 隔天 09:00 後)；
+(l) build() 遲到的執行：已發布的日子不再記、不蓋 scans[D]、不發新推薦提醒；未發布的記成 late + backfill；(m) tag_late 修正既有列、真實發布統計排除 late。
+BE-3：(n) 缺當天 ^TWII 不再把大盤當 0% (相對大盤只在兩個收盤都有時算)、追蹤中的列清掉上次的 hit 標記、第 21 日缺大盤收盤不結案 (之後有更晚的 K 才照常結案)；
+(o) build() 把 scan 以盤後表補上的加權收盤帶進 evaluate 的大盤序列。日曆對齊 (BE-1) 見 tests/test_treasure_calendar.py。
 """
 from __future__ import annotations
 
 import contextlib
+import datetime as dt
+import json
 import sys
+import tempfile
 from pathlib import Path
 
 import pandas as pd
@@ -605,6 +612,159 @@ def test_exdiv_archive_parse_and_snapshot():
             XD.fetch = old
         lines = [_j.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines()]
         assert [ln["ts"] for ln in lines] == ["2026-10-07", "2026-10-08"] and lines[0]["n"] == 1
+
+
+# ------------------------------------------------------------------ BE-2 (2026-10-13)：遲到的執行不把推薦記成真實發布
+def test_record_same_date_caps_across_calls():
+    """15:40 + 21:45 兩次準時發布 (或重掃) 同一推薦日：每日 6 檔上限以該日已有的真實發布列起算；飆股每日最多 topk 檔。"""
+    sc1 = dict(SC, treasure=[_cand(f"{3000 + i}", "A", 0.70 - i * 0.01) for i in range(6)], surge=[{"code": f"900{i}", "name": "飆", "close": 100.0, "pct": 3.0, "ps": 0.4} for i in range(1, 4)])
+    sc2 = dict(SC, treasure=[_cand(f"{3100 + i}", "A", 0.80 - i * 0.01) for i in range(10)], surge=[{"code": f"910{i}", "name": "飆", "close": 100.0, "pct": 3.0, "ps": 0.5} for i in range(1, 4)])
+    prev = TL.record(_fresh(), sc1, TM)
+    prev = TL.record(prev, sc2, TM)
+    tre = [x for x in prev["ledger"]["treasure"] if x["date"] == D0]
+    assert len(tre) == TL.PER_DAY == 6 and {x["code"] for x in tre} == {f"{3000 + i}" for i in range(6)}, [x["code"] for x in tre]
+    sur = [x for x in prev["ledger"]["surge"] if x["date"] == D0]
+    assert [x["code"] for x in sur] == ["9001", "9002", "9003"], [x["code"] for x in sur]
+    # 第一次只記到 4 檔 → 第二次最多補 2 檔；topk = 2 的模型 → 每日 2 檔
+    tm2 = dict(TM, surge={**TM["surge"], "def": {"topk": 2}})
+    p2 = TL.record(_fresh(), dict(sc1, treasure=sc1["treasure"][:4]), tm2)
+    p2 = TL.record(p2, sc2, tm2)
+    assert len([x for x in p2["ledger"]["treasure"] if x["date"] == D0]) == 6 and len([x for x in p2["ledger"]["surge"] if x["date"] == D0]) == 2
+    # 回填列不佔真實發布的名額 (同 refined_fix：起算只數非回填)
+    p3 = _fresh(); p3["ledger"]["treasure"] = [dict(_cand(f"{5000 + i}", "B", 0.3), date=D0, status="追蹤", backfill=True) for i in range(6)]
+    assert len([x for x in TL.record(p3, sc1, TM)["ledger"]["treasure"] if x["date"] == D0 and not x.get("backfill")]) == 6
+
+
+def test_is_late_rule():
+    D = "2026-10-08"
+    assert not TL.is_late(D, "2026-10-08 21:45:00", "2026-10-04 08:36:18")
+    assert not TL.is_late(D, "2026-10-09 08:59:59") and TL.is_late(D, "2026-10-09 09:00:00"), "隔天 09:00 (台北) 起算遲到"
+    assert TL.is_late(D, "2026-10-08 15:40:00", "2026-10-11 08:51:40"), "模型在推薦日之後才訓練 (週日重訓重掃上週五)"
+    assert not TL.is_late(D, None, "2026-10-08 06:00:00") and not TL.is_late(D) and not TL.is_late("壞日期", "2030-01-01 00:00:00", "2030-01-01")
+    assert TL.is_late(D, dt.datetime(2026, 10, 12, 15, 40, tzinfo=TL.config.TZ)) and not TL.is_late(D, dt.datetime(2026, 10, 8, 15, 40))
+
+
+def _build(prev, sc, tm, mk=None):
+    tm = {"trees": [{}], **tm}
+    net = []
+
+    def no_net(*a, **k):                    # TradeCal 會吞掉例外 → 記下呼叫、最後檢查 (日 K 為空 → 不該用到日曆 / 盤後表)
+        net.append(a)
+        raise LookupError("不應連網")
+    with tempfile.TemporaryDirectory() as td, patched(TL, "LOCAL", Path(td) / "tl.json"), patched(TL, "load_prev", lambda: prev), \
+            patched(TL, "twii_hist", lambda: dict(mk or {})), patched(TL, "scan", lambda tm_, date=None: dict(sc)), \
+            patched(TL.M, "load_json", lambda name: tm if name == "treasure_model" else None), patched(TL, "bars", lambda code, years="2y": []), \
+            patched(TL, "_fmtqik_days", no_net), patched(TL, "market_snapshot", no_net):
+        out = TL.build(date=sc["date"])
+    assert net == [], net
+    return out
+
+
+def test_build_late_runs_not_recorded_as_published():
+    today = dt.datetime.now(TL.config.TZ).date()
+    D, D3 = today.isoformat(), (today - dt.timedelta(days=3)).isoformat()
+    old_tm, new_tm = dict(TM, trained_at=(today - dt.timedelta(days=5)).isoformat() + " 08:00:00"), dict(TM, trained_at=(today + dt.timedelta(days=1)).isoformat() + " 08:00:00")
+    # 準時 → live
+    out = _build(_fresh(), dict(SC, date=D), old_tm)
+    assert "late" not in out["scan"] and {x["scan_src"] for x in out["ledger"]["treasure"]} == {"live"} and not any(x.get("backfill") for x in out["ledger"]["treasure"] + out["ledger"]["surge"])
+    assert any(a["kind"] == "treasure" for a in out["alerts"]) and any(a["kind"] == "surge" for a in out["alerts"])
+    # 已發布的日子、事後的新模型重掃 → 不記、不蓋 scans[D]、不發新推薦提醒
+    pub = TL.record(_fresh(), dict(SC, date=D, treasure=SC["treasure"][:1], surge=[]), old_tm)
+    scan_before = json.dumps(pub["scans"], sort_keys=True, ensure_ascii=False)
+    out = _build(pub, dict(SC, date=D), new_tm)
+    assert out["scan"]["late"] is True and [x["code"] for x in out["ledger"]["treasure"]] == ["1111"] and out["ledger"]["surge"] == []
+    assert json.dumps(out["scans"], sort_keys=True, ensure_ascii=False) == scan_before, "scans[D] 維持當時發布的內容"
+    assert not any(a["kind"] in ("treasure", "surge") for a in out["alerts"]), out["alerts"]
+    # 隔天 09:00 後才跑 (平日休市 / MI_INDEX 未出) 且那天已發布 → 同樣不記
+    pub3 = TL.record(_fresh(), dict(SC, date=D3, treasure=SC["treasure"][:1], surge=[]), old_tm)
+    out = _build(pub3, dict(SC, date=D3), old_tm)
+    assert out["scan"]["late"] is True and len(out["ledger"]["treasure"]) == 1 and out["ledger"]["surge"] == []
+    # 那天沒發布過 → 記成 late + backfill (App 與 stats 都當回填)，之後同日再遲到重掃也不再追加
+    out = _build(_fresh(), dict(SC, date=D3), old_tm)
+    rows = out["ledger"]["treasure"] + out["ledger"]["surge"]
+    assert len(rows) == 4 and all(x["backfill"] is True and x["scan_src"] == "late" for x in rows), rows
+    assert D3 in {s["date"] for s in out["scans"]} and not any(a["kind"] in ("treasure", "surge") for a in out["alerts"])
+    again = _build({"ledger": out["ledger"], "scans": out["scans"]}, dict(SC, date=D3, treasure=[_cand("7777", "A+", 0.9)]), new_tm)
+    assert len(again["ledger"]["treasure"]) == 3
+
+
+def test_tag_late_migration_and_published_stats():
+    def row(code, date, mv, **kw):
+        return {"code": code, "name": "x", "date": date, "tier": "A", "status": "命中", "cur": 5.0, "rel": 1.0, "trail": 5.0, "days": 21, "scan_src": "live",
+                **({"model_ver": mv} if mv else {}), **kw}
+    tre = [row("4989", "2026-10-02", "2026-10-04 08:36:18"), row("8261", "2026-10-02", None), row("2330", "2026-10-08", "2026-10-04 08:36:18"),
+           row("1101", "2026-07-01", "2026-10-04 08:36:18", backfill=True, scan_src="backfill"), row("2002", "2026-10-07", "2026-10-07 08:00:00")]
+    sur = [{"code": "2383", "date": "2026-10-08", "model_ver": "2026-10-11 08:51:40", "status": "追蹤", "scan_src": "live"},
+           {"code": "1303", "date": "2026-10-08", "model_ver": "2026-10-04 08:36:18", "status": "追蹤", "scan_src": "live"}]
+    prev = {"ledger": {"treasure": tre, "surge": sur}, "scans": []}
+    assert TL.tag_late(prev) == 3
+    late = {(x["code"], x["date"]) for x in tre + sur if x.get("scan_src") == "late"}
+    assert late == {("4989", "2026-10-02"), ("8261", "2026-10-02"), ("2383", "2026-10-08")}, late
+    assert all(x["backfill"] is True for x in tre + sur if x.get("scan_src") == "late")
+    assert tre[3]["scan_src"] == "backfill" and "backfill" not in tre[2] and "backfill" not in tre[4]
+    assert TL.tag_late(prev) == 0, "冪等"
+    st = TL.stats(prev, TM)["treasure"]
+    assert st["by_source"]["published"]["n"] == 2 and st["signal"]["published"]["n"] == 2 and st["by_tier"]["A"]["published"]["n"] == 2
+    # 只標了 scan_src='late' 沒標 backfill 的列 (保險)：真實發布統計仍排除
+    next(x for x in tre if x["code"] == "2330")["scan_src"] = "late"           # (stats 會就地排序帳本 → 依代號找)
+    assert TL.stats(prev, TM)["treasure"]["by_source"]["published"]["n"] == 1
+
+
+# ------------------------------------------------------------------ BE-3：缺當天 ^TWII 不把大盤當 0%
+MK_UP = {d: (1000.0 if d <= D0 else 1025.0) for d in DATES}     # 推薦後大盤 +2.5%
+
+
+def _row(code="7777"):
+    return {"code": code, "name": "測", "date": D0, "entry": 100.0, "mktEntry": 1000.0, "tier": "A", "status": "追蹤", "p": 0.6}
+
+
+def test_stale_hit_keys_cleared_and_no_fake_rel_hit():
+    """第 3 天收 +4.6%、大盤 +2.5% (贏 2.1pt)：缺第 3 天 ^TWII 時不算相對大盤 (原本當 0% → 假達標)；上次殘留的 hit 標記被清掉。"""
+    b = _bars([(1, 0.5), (2, 1.5), (4.6, 4)] + [(3, 2.5)] * 30)
+    x = _row()
+    mk_miss = {k: v for k, v in MK_UP.items() if k != AFTER[2]}
+    with patched(TL, "bars", lambda code, years="2y": b):
+        TL.evaluate({"ledger": {"treasure": [x], "surge": []}}, mk_miss, upto=AFTER[2])
+        assert "hitDay" not in x and x["status"] == "追蹤" and x["rel"] is None and abs(x["relMax"] - (2 - 2.5)) < 1e-6, x
+        x.update(hitDay=3, hitDate=AFTER[2], hitVal=4.6, hitBy="相對大盤")       # 舊版缺 ^TWII 那次留下的假達標
+        TL.evaluate({"ledger": {"treasure": [x], "surge": []}}, MK_UP, upto=AFTER[3])
+    assert not any(k in x for k in ("hitDay", "hitDate", "hitVal", "hitBy")) and abs(x["relMax"] - 2.1) < 1e-6 and x["peakDay"] == 3, x
+    # 完全沒有大盤 (推薦日也沒有) → relMax / rel 為 None，不是 −1e9
+    y = dict(_row("7778")); y.pop("mktEntry")
+    with patched(TL, "bars", lambda code, years="2y": b):
+        TL.evaluate({"ledger": {"treasure": [y], "surge": []}}, {}, upto=AFTER[3])
+    assert y["relMax"] is None and y["rel"] is None and "hitDay" not in y, y
+
+
+def test_no_close_when_twii_missing_day21():
+    """第 21 日收 +4.5%、大盤 +2.5% (只贏 2pt)：缺第 21 日 ^TWII → 先不結案 (原本當 0% → 假命中)；有了 → 未命中；
+    一直缺但已有更晚的 K (大盤永久缺那天) → 照常結案、不卡住。"""
+    b = _bars([(1, 0.5)] * 20 + [(4.5, 4)] * 10)
+    mk_miss = {k: v for k, v in MK_UP.items() if k != AFTER[20]}
+    x = _row()
+    with patched(TL, "bars", lambda code, years="2y": b):
+        led = {"ledger": {"treasure": [x], "surge": []}}
+        TL.evaluate(led, mk_miss, upto=AFTER[20])
+        assert x["status"] == "追蹤" and x["days"] == 21, x
+        TL.evaluate(led, MK_UP, upto=AFTER[20])
+        assert x["status"] == "未命中" and x["evalAt"] == AFTER[20] and abs(x["cur"] - 4.5) < 1e-6 and abs(x["rel"] - 2.0) < 1e-6, x
+        z = _row("7779")
+        TL.evaluate({"ledger": {"treasure": [z], "surge": []}}, mk_miss, upto=AFTER[21])
+    assert z["status"] == "未命中" and z["evalAt"] == AFTER[20] and z["days"] == 21 and "hitDay" not in z, z
+
+
+def test_build_passes_scan_mkt_close_into_evaluate():
+    today = dt.datetime.now(TL.config.TZ).date().isoformat()
+    got = {}
+
+    def fake_eval(prev, mk, max_fetch=200, upto=None, cal=None):
+        got.update(mk=dict(mk), cal=cal)
+        return 0
+    with patched(TL, "evaluate", fake_eval):
+        out = _build(_fresh(), dict(SC, date=today, mkt_close=49301.96), dict(TM, trained_at="2026-01-01 00:00:00"), mk={"2026-10-08": 48475.74})
+    assert got["mk"].get(today) == 49301.96 and got["mk"]["2026-10-08"] == 48475.74 and isinstance(got["cal"], TL.TradeCal), got
+    assert "mk" not in out["scan"] and out["scan"]["mkt_close"] == 49301.96, "大盤序列不放進發布的 scan"
+
 
 if __name__ == "__main__":
     fails = 0

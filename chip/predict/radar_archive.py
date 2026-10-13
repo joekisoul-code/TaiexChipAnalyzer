@@ -172,14 +172,15 @@ def line_from(pool: dict | None, src: str | None = None, asof: str | None = None
                   "n": len(pool["rows"]), "cols": list(pool.get("cols") or COLS), "rows": pool["rows"]})
 
 
+def _is_late(ts, asof=None, model_ver=None) -> bool:
+    """treasure_live.is_late (BE-2 共用的遲到判斷；lazy import：treasure_live 的 scan() 也會 import 本模組)。"""
+    from .treasure_live import is_late
+    return is_late(ts, asof, model_ver)
+
+
 def _on_time(x: dict) -> bool:
     """asof (台北) 早於掃描日隔天 09:00 = 準時 (r6 shadow_spec：之後才寫的是 late)。沒有 asof / 日期壞掉 → 視為準時 (不扣分)。"""
-    a = str(x.get("asof") or "")
-    try:
-        cut = (dt.date.fromisoformat(str(x.get("ts") or "")[:10]) + dt.timedelta(days=1)).isoformat() + " 09:00:00"
-    except ValueError:
-        return True
-    return not a or a < cut
+    return not _is_late(str(x.get("ts") or "")[:10], x.get("asof"))
 
 
 def _rank(x: dict) -> tuple:
@@ -187,8 +188,7 @@ def _rank(x: dict) -> tuple:
     準時 (asof < ts 隔天 09:00) > 遲到、asof 較新 (準時的裡面 latest wins，例如 15:40 與 21:45 兩次完整發布取 21:45)。
     第三項防的是：週日重訓後，週一盤後表還沒公布 → scan 退回上週五、用新模型重掃，不該蓋掉上週五當時真正的那一行。
     第四項防的是：平日休市 (颱風假 / 連假) 或模型沒變的週日 train，market_snapshot 退回最後交易日再掃 → 遲到的重掃不蓋掉準時的那一行。"""
-    mv = str(x.get("model_ver") or "")[:10]
-    return ((x.get("n") or len(x.get("rows") or [])) > 0, x.get("src") != "backfill", not mv or mv <= str(x.get("ts") or "")[:10], _on_time(x),
+    return ((x.get("n") or len(x.get("rows") or [])) > 0, x.get("src") != "backfill", not _is_late(str(x.get("ts") or "")[:10], None, x.get("model_ver")), _on_time(x),
             str(x.get("asof") or ""))
 
 

@@ -26,6 +26,13 @@ pr2 (2026-10-05，LC-04 pass / T5-01~03 / T5-missed / LC-05~06 fail)：
 - 帳本誠實化：每筆記 model_ver / th_A / th_Aplus / mkt_bias20 / scan_src (live|backfill)；停損列也追到第 21 日補 fin21 (cur 仍是結案日報酬)；
   stats 分 by_source (真實發布 vs 回填)、signal (A∪A+ 主數字)；漂移只對訊號級且真實發布 ≥15 筆判定，B/B+ 不再產生「失準」。
 - 門檻 th_A 0.5062 / th_Aplus 0.6362、飆股 th_top10 0.3977 與前 3 名維持 (LC-05/06)；模型檔不動、無重訓。
+
+2026-10-13 帳本正確性 (審查 BE-1~3)：
+- BE-1 日 K 對齊證交所交易日曆 (TradeCal = FMTQIK 逐月)：去掉 Yahoo 幽靈日、Yahoo 缺的交易日用當天 MI_INDEX 補 → 評分 (score_one) 與對帳 (evaluate) 的
+  「第幾天 / 第 21 日 / 停損日 / >11% 跳動濾網」都以真實交易日計；已結案列一次性核對 (calv)，標記不一致的存 cal_orig 後重算 (cal_fix)。
+- BE-2 遲到的執行 (is_late：模型晚於推薦日、或推薦日隔天 09:00 後才跑) 不把推薦記成真實發布：已發布的日子不再記、不蓋 scans[D]、不發新推薦提醒；
+  沒發布過的記成 scan_src='late' + backfill；同一推薦日多次記錄共用每日上限 (挖寶 6 / 飆股 topk)；既有的遲到列由 tag_late() 改標。
+- BE-3 缺當天 ^TWII 不再把大盤當 0% (相對大盤只在兩個收盤都有時算)；build() 把 scan 以盤後表補的加權收盤帶進對帳；追蹤中的列每次清掉上次的達標標記。
 """
 from __future__ import annotations
 
@@ -41,6 +48,7 @@ import pandas as pd
 
 from .. import config
 from ..http import cached, session
+from ..sources.twse import roc_to_iso
 from . import model as M
 from . import treasure as T
 
@@ -113,6 +121,7 @@ RADAR_FAIL = {
 RADAR_DAY0 = {"edges": [0.112, 0.288, 0.505, 0.937], "hit": [0.431, 0.454, 0.454, 0.613, 0.697], "n": [62, 62, 62, 62, 62], "base": 0.53, "note": "A/A+ 依推薦分數分 5 組的歷史命中 (2021~ 樣本外，訓練窗與正式相同 2020 起)；小幅優於只看等級平均，當參考"}
 
 _PATH_EDGES = (-8, -5, -2, 2, 5)
+_ISO = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 def day0_prob(p: float | None, th_a: float | None) -> float | None:
@@ -339,6 +348,195 @@ def twii_hist() -> dict:
     return {str(x["date"])[:10]: float(x["close"]) for x in rows if x.get("close")}
 
 
+# ------------------------------------------------------------------ 交易日曆 (BE-1，2026-10-13)
+# Yahoo 日 K 的日子與證交所不一致：有幽靈日 (2026-07-10 非交易日卻有一根)，也會缺真實交易日 (2026-10-12 個股收盤全是 null、2025-08-01 永久缺)。
+# 帳本 (第幾天 / 第 21 日 / 停損日) 與特徵 (近 N 日、>11% 跳動濾網) 都把 Yahoo 的列當交易日 → 整段位移一天、整批股票被誤判「疑似減資」略過。
+# 這裡以證交所 FMTQIK (每月每日市場成交資訊) 當日曆：去掉日曆外的列、日曆內缺的日子用當天 MI_INDEX 盤後表補 (必要時依比例換到 Yahoo 的基準)。
+# 只用在雷達的評分 (score_one) 與帳本對帳 (evaluate)；App 端 (learning.js) 另行處理。
+TWSE_RWD = "https://www.twse.com.tw/rwd/zh"
+CAL_FINAL_TTL = 400 * 86400    # 已結束月份的交易日不會再變 → 長期快取 (另一個鍵，見 _fmtqik_days)
+CAL_LOOKBACK_DAYS = 200        # score_one 對齊多少個日曆天 (特徵最長 120 個交易日 ≈ 175 天；>11% 濾網看 61 根)
+FILL_MAX_RUN = 3               # 連續缺幾個交易日以內才用盤後表補 (Yahoo 的洞是零星單日；更長 = 停牌或 Yahoo 該檔整段沒更新 → 不補，也不逐日抓盤後表)
+MI_FETCH_MAX = 60              # 每次執行 (每個 TradeCal) 最多查幾天的盤後表 (補洞 + 對照基準；每天約 250 KB、30 天磁碟快取)
+
+
+def _fmtqik_days(ym: str, final: bool) -> list[str]:
+    """證交所 FMTQIK 某月 (ym = 'YYYYMM') 的交易日 (ISO，排序)。
+    抓不到 / stat 不是 OK / 沒有資料列 / 日期不在該月 → 丟例外，不回 None 或 [] (cached() 會把回傳值存起來，#87：存了「沒有交易日」就會整月誤刪)。
+    final = 該月已結束：用 ':final' 鍵長期快取；本月用短 TTL 的另一個鍵 (月中抓的不完整清單不會在月底後被當成整月)。"""
+    def load():
+        r = session().get(TWSE_RWD + "/afterTrading/FMTQIK", params={"date": ym + "01", "response": "json"}, headers=UA, timeout=30)
+        r.raise_for_status()
+        j = r.json()
+        if not isinstance(j, dict) or j.get("stat") != "OK" or not j.get("data"):
+            raise LookupError(f"FMTQIK {ym}: {j.get('stat') if isinstance(j, dict) else type(j).__name__}")
+        want = f"{ym[:4]}-{ym[4:6]}"
+        days = sorted({roc_to_iso(str(row[0])) for row in j["data"] if row})
+        if not days or any(d[:7] != want for d in days):
+            raise LookupError(f"FMTQIK {ym}: 日期不在 {want} ({days[:1]})")
+        return days
+    return cached(f"twse:fmtqik_days:{ym}" + (":final" if final else ""), CAL_FINAL_TTL if final else config.TTL_INTRADAY, load)
+
+
+class TradeCal:
+    """證交所交易日曆 (逐月懶載入：用到哪個月才抓，測試替換 score_one / 空帳本時不連網) + 補洞用的單日盤後表 (每次執行記憶)。
+    每月狀態：'exact' = FMTQIK；'fallback' = FMTQIK 抓不到 → 掃描日 ∪ ^TWII 的日子 (extra)，只拿來補洞、不刪列 (^TWII 自己也會缺日)；
+    None = 未知 (未來月份、都抓不到) → 不處理。已結束的月份整月已知；本月只到已知的最後一個交易日 (之後的列不判斷)。"""
+
+    def __init__(self, extra=None, today: str | None = None, months: dict | None = None, mi: dict | None = None):
+        self._extra, self._fb = extra, None       # extra：iterable 或回傳 iterable 的函式 (懶取，FMTQIK 抓不到才用)
+        self.today = today or dt.datetime.now(config.TZ).strftime("%Y-%m-%d")
+        self._m: dict[str, tuple] = {k: (v[0], set(v[1])) for k, v in (months or {}).items()}   # 'YYYY-MM' → (kind, {days})；測試可直接給
+        self._mi: dict[str, dict] = dict(mi or {})
+        self._n_mi = 0
+
+    def _fallback(self) -> set:
+        if self._fb is None:
+            try:
+                src = self._extra() if callable(self._extra) else self._extra
+                self._fb = {str(d)[:10] for d in (src or ()) if d}
+            except Exception as e:  # noqa: BLE001
+                log.debug("trade cal extra: %s", e); self._fb = set()
+        return self._fb
+
+    def month(self, ym: str) -> tuple:
+        if ym not in self._m:
+            if ym > self.today[:7]:
+                self._m[ym] = (None, set())
+            else:
+                try:
+                    self._m[ym] = ("exact", set(_fmtqik_days(ym.replace("-", ""), final=ym < self.today[:7])))
+                except Exception as e:  # noqa: BLE001
+                    fb = {d for d in self._fallback() if d[:7] == ym}
+                    log.warning("FMTQIK %s: %s → %s", ym, e, f"後備日曆 {len(fb)} 天 (只補洞)" if fb else "日曆未知")
+                    self._m[ym] = ("fallback" if fb else None, fb)
+        return self._m[ym]
+
+    def known(self, d: str) -> str | None:
+        """d 的日曆狀態 ('exact' / 'fallback' / None)；本月 (含之後) 已知的最後交易日之後 → None。"""
+        kind, days = self.month(d[:7])
+        if not kind or (d[:7] >= self.today[:7] and (not days or d > max(days))):
+            return None
+        return kind
+
+    def is_day(self, d: str) -> bool:
+        return d in self.month(d[:7])[1]
+
+    def days(self, a: str, b: str) -> list[str]:
+        """[a, b] 內日曆上的交易日 (exact 或 fallback 月份)。"""
+        out, y, m = [], int(a[:4]), int(a[5:7])
+        while f"{y:04d}-{m:02d}" <= b[:7]:
+            out += [d for d in self.month(f"{y:04d}-{m:02d}")[1] if a <= d <= b]
+            y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+        return sorted(out)
+
+    def exact(self, a: str, b: str) -> bool:
+        """[a, b] 每個月份都是 FMTQIK 日曆、且 b 在已知範圍內 (可用來驗證帳本標記)。"""
+        y, m = int(a[:4]), int(a[5:7])
+        while f"{y:04d}-{m:02d}" <= b[:7]:
+            if self.month(f"{y:04d}-{m:02d}")[0] != "exact":
+                return False
+            y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+        return self.known(b) == "exact"
+
+    def mi(self, d: str) -> dict:
+        """d 當天的 MI_INDEX 盤後表 {code: row}；那天沒有資料 (market_snapshot 退回別天) / 抓不到 → {}。"""
+        if d not in self._mi:
+            if self._n_mi >= MI_FETCH_MAX:
+                if self._n_mi == MI_FETCH_MAX:
+                    log.warning("trade cal：盤後表已查 %d 天，其餘缺日本次不補 (下次再補)", MI_FETCH_MAX)
+                    self._n_mi += 1
+                return {}
+            self._n_mi += 1
+            try:
+                got, rows = market_snapshot(d)
+            except Exception as e:  # noqa: BLE001
+                log.debug("trade cal MI %s: %s", d, e); got, rows = None, {}
+            self._mi[d] = rows if got == d else {}
+        return self._mi[d]
+
+
+def _fin(v) -> float:
+    """有限數 → float；None / NaN / 非數字 → 0。"""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    return v if math.isfinite(v) else 0.0
+
+
+def _mi_scale(rows: list[dict], d: str, code: str, cal: TradeCal) -> float | None:
+    """補洞列的價格基準：最近的前一根 (沒有再看後一根) Yahoo 與 MI 都有的日子，k = Yahoo 收盤 ÷ MI 收盤 (差 ≤ PX_TOL 視為 1)。
+    兩邊都對不到 → None (不補，維持缺口)。同 score_one 對 D 日盤後表的縮放 (r7)。"""
+    before = [r for r in rows if str(r["date"])[:10] < d]
+    after = [r for r in rows if str(r["date"])[:10] > d]
+    for r in ([before[-1]] if before else []) + ([after[0]] if after else []):
+        m = cal.mi(str(r["date"])[:10]).get(code)
+        yc, mc = _fin(r.get("close")), _fin((m or {}).get("close"))
+        if yc > 0 and mc > 0:
+            k = yc / mc
+            return 1.0 if abs(k - 1) <= PX_TOL else k
+    return None
+
+
+def _gap_runs(cal: TradeCal, a: str, z: str, have: set) -> list[list[str]]:
+    """[a, z] 內日曆已知、Yahoo 沒有的交易日，依交易日序連續分段 (每段 = 一個洞)。"""
+    runs, cur = [], []
+    for d in cal.days(a, z):
+        if d not in have and cal.known(d):
+            cur.append(d)
+        elif cur:
+            runs.append(cur); cur = []
+    return runs + ([cur] if cur else [])
+
+
+def align_bars(b: list[dict], cal: TradeCal | None, code: str, lo: str | None = None, hi: str | None = None) -> list[dict]:
+    """BE-1：Yahoo 日 K 對齊證交所日曆 (只處理 lo 之後、日曆已知的日子；其餘原樣)。回傳新 list (不改 bars() 快取裡的原 list)。
+    1. 刪掉 FMTQIK 日曆外的列 (幽靈日)。
+    2. 第一根 (或 lo) 到最後一根 (或 hi，取較晚) 之間、日曆上有但 Yahoo 缺的交易日 (連續 ≤ FILL_MAX_RUN 天的洞) → 用當天 MI_INDEX 補 OHLCV (標 fill='mi')；
+       該股當天不在盤後表 (停牌/沒成交) → 維持缺口；Yahoo 因配股/減資回溯縮放過 → 補的這根依 _mi_scale 同比例換算。"""
+    if not b or cal is None:
+        return b
+    rows = []
+    for r in b:
+        d = str(r.get("date"))[:10]
+        if (lo is None or d >= lo) and cal.known(d) == "exact" and not cal.is_day(d):
+            log.debug("align %s: 去掉非交易日 %s", code, d)
+            continue
+        rows.append(r)
+    if not rows:
+        return rows
+    rows.sort(key=lambda r: str(r["date"])[:10])
+    have = {str(r["date"])[:10] for r in rows}
+    a = str(rows[0]["date"])[:10]; z = str(rows[-1]["date"])[:10]
+    a = max(a, lo) if lo else a
+    z = max(z, hi) if hi else z
+    add = []
+    for d in [d for run in _gap_runs(cal, a, z, have) if len(run) <= FILL_MAX_RUN for d in run]:
+        m = cal.mi(d).get(code)
+        if not m or not _fin(m.get("close")) > 0:
+            continue
+        k = _mi_scale(rows, d, code, cal)
+        if k is None:
+            continue
+        c = float(m["close"])
+
+        def px(v, c=c, k=k):          # 開高低缺 (--) → 用收盤
+            v = _fin(v)
+            return (v if v > 0 else c) * k
+        add.append({"date": d, "open": px(m.get("open")), "high": px(m.get("high")), "low": px(m.get("low")), "close": c * k,
+                    "volume": max(_fin(m.get("volume")), 0.0) / k, "fill": "mi"})
+    if add:
+        log.info("align %s: 以盤後表補 %s", code, ",".join(x["date"] for x in add))
+        rows = sorted(rows + add, key=lambda r: str(r["date"])[:10])
+    return rows
+
+
+def cal_bars(code: str, cal: TradeCal | None, lo: str | None = None, hi: str | None = None) -> list[dict]:
+    """bars() 對齊證交所日曆 (cal = None → 原樣)。"""
+    return align_bars(bars(code), cal, code, lo, hi)
+
+
 # ------------------------------------------------------------------ 評分 (與 App tmScore 相同)
 def _mk_frame(mk: dict, upto: str) -> pd.DataFrame:
     d = sorted(k for k in mk if k <= upto)
@@ -347,8 +545,11 @@ def _mk_frame(mk: dict, upto: str) -> pd.DataFrame:
                          "m_bias20": (s / s.rolling(20).mean() - 1).values * 100})
 
 
-def score_one(code: str, snap_row: dict, D: str, mkf: pd.DataFrame, tm: dict) -> dict | None:
+def score_one(code: str, snap_row: dict, D: str, mkf: pd.DataFrame, tm: dict, cal: TradeCal | None = None) -> dict | None:
+    """cal (BE-1)：日 K 先對齊證交所日曆 (D 前 CAL_LOOKBACK_DAYS 天起；補到 D 為止)，避免 Yahoo 缺日造成「兩天報酬」被當成 >11% 跳動、特徵視窗位移。"""
     b = bars(code)
+    if cal is not None:
+        b = align_bars([x for x in b if str(x["date"])[:10] <= D], cal, code, lo=(dt.date.fromisoformat(D) - dt.timedelta(days=CAL_LOOKBACK_DAYS)).isoformat(), hi=D)
     rows = [{"date": str(x["date"])[:10], "open": x.get("open"), "high": x.get("high"), "low": x.get("low"), "close": x["close"], "volume": x.get("volume") or 0, "amount": np.nan}
             for x in b if x.get("close") and str(x["date"])[:10] <= D]
     if not rows:
@@ -414,9 +615,10 @@ def scan(tm: dict, date: str | None = None) -> dict:
     mkt_pct = float(mkf["m_ret1"].iloc[-1]) if len(mkf) and pd.notna(mkf["m_ret1"].iloc[-1]) else 0.0
     pool = [r for r in screen(pool_rows(rows, tm), valuation(), mkt_pct, POOL) if not r["code"].startswith("00")][:POOL]   # 10-06：限定訓練宇宙
     res, errors = {}, 0
+    cal = TradeCal(extra=lambda: set(mk) | {D}, mi={D: rows})    # BE-1：證交所日曆 (懶載入)；D 日盤後表已在手上
     for r in pool:
         try:
-            s = score_one(r["code"], r, D, mkf, tm)
+            s = score_one(r["code"], r, D, mkf, tm, cal=cal)
             if s:
                 res[r["code"]] = s
         except Exception as e:  # noqa: BLE001
@@ -488,6 +690,43 @@ def load_prev() -> dict:
     return out
 
 
+LATE_CUTOFF = "09:00:00"       # BE-2：掃描日隔天這個時間 (台北) 之後才跑 = 遲到 (同 r6 shadow_spec / radar_archive)
+LIVE_SINCE = "2026-10-05"      # treasure_live 第一次上線 (d04369e 2026-10-05 13:34)：更早推薦日的「live」列其實都是事後補掃
+
+
+def is_late(D: str | None, asof=None, model_ver: str | None = None) -> bool:
+    """BE-2：掃描日 D 的這次執行是不是「遲到」(不是 D 當天盤後準時發布)：
+    模型在 D 之後才訓練 (model_ver 日期 > D：週日重訓後退回上週五重掃)，或 asof (台北) ≥ D 隔天 09:00
+    (平日休市的 full run、MI_INDEX 還沒公布就跑 → market_snapshot 退回前一交易日)。
+    radar_archive._on_time / _rank 共用這個判斷。D 壞掉 → False；沒給 asof / model_ver → 該項不算遲到。"""
+    d = str(D or "")[:10]
+    try:
+        cut = (dt.date.fromisoformat(d) + dt.timedelta(days=1)).isoformat() + " " + LATE_CUTOFF
+    except ValueError:
+        return False
+    mv = str(model_ver or "")[:10]
+    if mv and mv > d:
+        return True
+    a = asof.strftime("%Y-%m-%d %H:%M:%S") if isinstance(asof, (dt.datetime, dt.date)) else str(asof or "")
+    return bool(a) and a >= cut
+
+
+def tag_late(prev: dict) -> int:
+    """BE-2 帳本修正 (冪等，每次 build 都跑)：其實是遲到重掃、卻標成真實發布的列 → scan_src='late'、backfill=True
+    (App 與 stats 都當回填)。判定：model_ver 日期晚於推薦日 (例 10-02 的 4989/6155/6213、10-08 飆股 2383/3189)，
+    或推薦日早於 LIVE_SINCE (10-02 那批是 10-05 才補掃)。回傳改了幾列。"""
+    n = 0
+    for kind in ("treasure", "surge"):
+        for x in (prev.get("ledger") or {}).get(kind) or []:
+            D = str(x.get("date") or "")[:10]
+            if x.get("backfill") or not _ISO.fullmatch(D):
+                continue
+            if is_late(D, None, x.get("model_ver")) or D < LIVE_SINCE:
+                x["scan_src"], x["backfill"] = "late", True
+                n += 1
+    return n
+
+
 def _recent_codes(rows: list[dict], D: str, days: int) -> set:
     """與 D 相距不到 days 個日曆日 (同 harness.simulate 的 (td − lp).days < cool) 記過的代號 (任何等級)。
     取絕對值 (同飆股 SURGE_DEDUP_DAYS)：回填較早的日子時，也不和之後已記的列擠在一起。日期壞掉的列略過。"""
@@ -508,7 +747,8 @@ def _recent_codes(rows: list[dict], D: str, days: int) -> set:
 def record(prev: dict, sc: dict, tm: dict | None = None, scan_src: str = "live") -> dict:
     """把本日掃描結果記入帳本 (同 App recordDiscoveries / recordSurge 的規則)。
     pr2：每筆加 model_ver (掃描時模型 trained_at)、th_A / th_Aplus (當時門檻)、mkt_bias20 (閘門狀態)、scan_src ('live' 真實發布 | 'backfill' 回填)，
-    讓帳本不再路徑相依、可事後重算等級。"""
+    讓帳本不再路徑相依、可事後重算等級。
+    BE-2 (2026-10-13)：每日上限以「該推薦日已有的真實發布列」起算、飆股每個推薦日最多 topk 檔；遲到的重掃由 build() 決定記不記 (scan_src='late')。"""
     D = sc.get("date")
     if not D:
         return prev
@@ -522,7 +762,7 @@ def record(prev: dict, sc: dict, tm: dict | None = None, scan_src: str = "live")
     recent_miss = {x["code"] for x in tre if x.get("status") == "未命中" and x.get("evalAt") and (pd.Timestamp(D) - pd.Timestamp(x["evalAt"])).days < REENTRY_MISS_DAYS}
     recent_rec = _recent_codes(tre, D, A_COOL_DAYS)
     have = {(x["code"], x["date"]) for x in tre}
-    n = 0
+    n = sum(1 for x in tre if x.get("date") == D and not x.get("backfill"))   # BE-2：同一天第二次發布 (15:40 + 21:45) 也共用每日 6 檔上限
     s_codes = {r["code"] for r in sc.get("surge") or []}                          # 10-06：今日飆股前 3
     t_tier = {r["code"]: (r["tier"], r["p"]) for r in sc.get("treasure") or []}   # 今日挖寶候選 (含 B 級) 的等級與模型分
     # r6 (10-07)：A/A+ 改用回測的記錄規則 — 池內 (前 40、依 p 排序) 只要同檔 30 個日曆日內沒被記過 (任何等級) 就記，
@@ -545,7 +785,10 @@ def record(prev: dict, sc: dict, tm: dict | None = None, scan_src: str = "live")
         have.add((r["code"], D)); recent_rec.add(r["code"]); act_codes.add(r["code"])
         n += 1
     sur = led["surge"]
+    sg_k = int((((tm.get("surge") or {}).get("def") or {}).get("topk")) or 3)
     for r in sc["surge"]:
+        if sum(1 for x in sur if x.get("date") == D) >= sg_k:      # BE-2：每個推薦日最多 sg_k 檔 (重掃不再追加)
+            break
         if any(x["code"] == r["code"] and abs((pd.Timestamp(D) - pd.Timestamp(x["date"])).days) < SURGE_DEDUP_DAYS for x in sur):
             continue
         tt = t_tier.get(r["code"])
@@ -573,6 +816,7 @@ def _fin21_of(x: dict):
 PX_TOL = 0.01   # r7：推薦價 (證交所盤後原始收盤) 與 Yahoo 同日收盤差 >1% = Yahoo 事後因配股/減資把整段歷史回溯縮放 (09 筆實測 1.5~33%，其餘 <0.05%)
 PX_KEYS = ("status", "reason", "cur", "peak", "trough", "rel", "relMax", "days", "lastDate", "evalAt", "trail", "trailDate", "fin21", "fin21Date", "fin21_na",
            "hitDay", "hitDate", "hitVal", "hitBy", "stopDay", "stopDate", "stopVal", "peakDay", "peakDate", "chk")
+WALK_KEYS = ("hitDay", "hitDate", "hitVal", "hitBy", "stopDay", "stopDate", "stopVal", "peakDay", "peakDate")   # _walk_* 產生的「第幾天」標記
 
 
 def _bar_on(b: list[dict], d: str) -> dict | None:
@@ -608,21 +852,25 @@ def _px_repair(x: dict, b: list[dict]) -> bool:
 
 
 def _walk_treasure(since: list[dict], e: float, me, mk: dict) -> dict:
-    """回測定義逐日走訪 (與原 _eval_treasure 迴圈同邏輯)；10-06 另記第一次達標 / 跌破 / 峰值的交易日序與日期，讓 App 能顯示「實際有沒有命中、哪天」。"""
-    cm = -1e9; stop = False; reached = False; peak = -1e9; trough = 1e9; rel_max = -1e9; w: dict = {}
+    """回測定義逐日走訪 (與原 _eval_treasure 迴圈同邏輯)；10-06 另記第一次達標 / 跌破 / 峰值的交易日序與日期，讓 App 能顯示「實際有沒有命中、哪天」。
+    BE-3：相對大盤只在「推薦日大盤 (me) 與當天大盤收盤都有」時才算 (原本缺當天 ^TWII → 大盤當 0%，+4% 收盤就算贏大盤 4pt)；
+    整段都沒有大盤 → rel_max = None。"""
+    cm = -1e9; stop = False; reached = False; peak = -1e9; trough = 1e9; rel_max = None; w: dict = {}
     for k, r in enumerate(since, 1):
         d = str(r["date"])[:10]
         cr = (float(r["close"]) / e - 1) * 100; lr = (float(r.get("low") or r["close"]) / e - 1) * 100
         cm = max(cm, cr); trough = min(trough, lr)
         if cr > peak:
             peak = cr; w["peakDay"], w["peakDate"] = k, d
-        mr = ((mk.get(d) or float("nan")) / me - 1) * 100 if me else 0.0
-        if not np.isfinite(mr):
-            mr = 0.0
-        rel_max = max(rel_max, cr - mr)
+        m = mk.get(d)
+        rel = (cr - (float(m) / float(me) - 1) * 100) if (me and m) else None
+        if rel is not None and not np.isfinite(rel):
+            rel = None
+        if rel is not None:
+            rel_max = rel if rel_max is None else max(rel_max, rel)
         if not stop and not reached and lr <= T.STOP and cm < T.TGT:
             stop = True; w["stopDay"], w["stopDate"], w["stopVal"] = k, d, round(lr, 2)
-        if not stop and (cr >= T.TGT or (cr - mr) >= T.REL):
+        if not stop and (cr >= T.TGT or (rel is not None and rel >= T.REL)):
             if not reached:
                 w["hitDay"], w["hitDate"], w["hitVal"] = k, d, round(cr, 2); w["hitBy"] = "漲幅" if cr >= T.TGT else "相對大盤"
             reached = True
@@ -683,13 +931,17 @@ def _eval_treasure(x: dict, b: list[dict], mk: dict) -> None:
     if w["stop"] and (w.get("stopDay") or 0) < len(since):   # r7：每日對帳語意 = 停損當天結案 (晚對帳 / 重算時不用停損後的收盤；fin21 已另外用第 21 日)
         since = since[:w["stopDay"]]; w = _walk_treasure(since, e, me, mk)
     stop, reached, peak, trough, rel_max = w["stop"], w["reached"], w["peak"], w["trough"], w["rel_max"]
-    for k in ("hitDay", "hitDate", "hitVal", "hitBy", "stopDay", "stopDate", "stopVal", "peakDay", "peakDate"):
+    for k in WALK_KEYS + ("trail", "trailDate"):   # BE-3：追蹤中的列每次從頭走訪 → 先清掉上次的標記 (上次缺 ^TWII 時的假「相對大盤」達標不可殘留)
+        x.pop(k, None)
+    for k in WALK_KEYS:
         if k in w:
             x[k] = w[k]
     x["chk"] = 1
     cur = (float(since[-1]["close"]) / e - 1) * 100
-    last_m = mk.get(str(since[-1]["date"])[:10]); rel = (cur - ((last_m / me - 1) * 100)) if (me and last_m) else None
-    x.update(peak=round(peak, 2), trough=round(trough, 2), cur=round(cur, 2), rel=round(rel, 2) if rel is not None else None, relMax=round(rel_max, 2), days=len(since), lastDate=str(since[-1]["date"])[:10])
+    d_last = str(since[-1]["date"])[:10]
+    last_m = mk.get(d_last); rel = (cur - ((last_m / me - 1) * 100)) if (me and last_m) else None
+    x.update(peak=round(peak, 2), trough=round(trough, 2), cur=round(cur, 2), rel=round(rel, 2) if rel is not None else None,
+             relMax=round(rel_max, 2) if rel_max is not None else None, days=len(since), lastDate=d_last)
     # 移動停利 (A 級出場建議：漲 10% 後自最高收盤回落 8%)
     if x.get("trail") is None:
         pk = e
@@ -697,7 +949,9 @@ def _eval_treasure(x: dict, b: list[dict], mk: dict) -> None:
             pk = max(pk, float(r["close"]))
             if pk >= e * 1.1 and float(r["close"]) <= pk * 0.92:
                 x["trail"] = round((float(r["close"]) / e - 1) * 100, 2); x["trailDate"] = str(r["date"])[:10]; break
-    if x.get("status") == "追蹤" and (stop or len(since) >= T.H):
+    # BE-3：第 21 日期滿結案要有當天大盤收盤 (相對大盤那一項才算得完整)；缺 → 留到下次 (已有更晚的 K = 大盤永久缺那天 → 照常結案，不卡住)
+    mk_ok = d_last in mk or not me or str(b[-1]["date"])[:10] > d_last
+    if x.get("status") == "追蹤" and (stop or (len(since) >= T.H and mk_ok)):
         st = "未命中" if stop else ("命中" if reached and cur > 0 else ("回落" if reached else "未命中"))
         x["status"], x["reason"] = st, _treasure_reason(st, w, cur, T.H)
         x["evalAt"] = str(since[-1]["date"])[:10]
@@ -737,6 +991,9 @@ def _eval_surge(x: dict, b: list[dict]) -> None:
         return
     w = _walk_surge(since, e)
     peak, res, trail, tdate = w["peak"], w["res"], w["trail"], w["tdate"]
+    if x.get("status") == "追蹤":       # BE-3：追蹤中的列每次從頭走訪 → 先清掉上次的標記 (日 K 對齊後可能變)
+        for k in WALK_KEYS + ("trail", "trailDate"):
+            x.pop(k, None)
     for k in ("hitDay", "hitDate", "hitVal", "stopDay", "stopDate", "stopVal", "peakDay", "peakDate"):
         if k in w:
             x[k] = w[k]
@@ -753,18 +1010,75 @@ def _eval_surge(x: dict, b: list[dict]) -> None:
         x["trail"] = x["cur"]
 
 
-def evaluate(prev: dict, mk: dict, max_fetch: int = 200, upto: str | None = None) -> int:
-    """逐檔對帳 (未結案或尚未出場的紀錄)；每次最多抓 max_fetch 檔 (控制 Yahoo 呼叫)。upto：只用該日 (含) 以前的 K 棒 (回填時逐日模擬)。"""
-    n = 0
+CAL_MARKS = (("days", "lastDate"), ("hitDay", "hitDate"), ("stopDay", "stopDate"), ("peakDay", "peakDate"))   # (第幾個交易日, 日期) 成對的標記
+CAL_KEYS = PX_KEYS + ("fin20", "fin20Date", "fin20_na")      # 日曆重算時清掉的結果欄 (fin20 = 飆股第 20 日，若有)
+
+
+def _cal_check(x: dict, b: list[dict], cal: TradeCal) -> bool | None:
+    """BE-1：已結案列的「第幾天」標記 (days/lastDate、hit/stop/peak、fin21Date) 與對齊證交所日曆後的日 K 是否一致。
+    True = 一致 (標 calv=1，之後不再查)；False = 不一致 (當時算進幽靈日或漏掉真實交易日 → 要重算)；
+    None = 無法驗證 (那段不是 FMTQIK 日曆、或缺的交易日盤後表抓不到 / 該股在表內卻沒補上) → 下次再查。"""
+    D = str(x.get("date") or "")[:10]
+    if not _ISO.fullmatch(D):
+        return None
+    try:
+        marks = [(int(x[kd]), str(x[dd])[:10]) for kd, dd in CAL_MARKS if x.get(kd) and x.get(dd)]
+    except (TypeError, ValueError):
+        return None
+    if x.get("fin21Date"):
+        marks.append((T.H, str(x["fin21Date"])[:10]))
+    if x.get("fin20Date"):
+        marks.append((T.SURGE_N, str(x["fin20Date"])[:10]))
+    if not marks:
+        return True
+    end = max(d for _, d in marks)
+    if not cal.exact(D, end):
+        return None
+    since = [str(r["date"])[:10] for r in b if str(r["date"])[:10] > D and r.get("close")]
+    nxt = (dt.date.fromisoformat(D) + dt.timedelta(days=1)).isoformat()
+    for run in _gap_runs(cal, nxt, end, set(since)):
+        if len(run) > FILL_MAX_RUN:             # 長段缺口 = 停牌 (align_bars 也不補) → 當成真的沒交易
+            continue
+        for d in run:
+            m = cal.mi(d)
+            if not m or x.get("code") in m:     # 盤後表抓不到、或該股當天有成交卻沒補上 → 不能斷定
+                return None
+    return all(k <= len(since) and since[k - 1] == d for k, d in marks)
+
+
+def _closed(x: dict) -> bool:
+    return x.get("status") not in (None, "追蹤")
+
+
+def _cal_reset(x: dict) -> None:
+    """BE-1 一次性：標記與證交所日曆不一致的結案列 → 原結果存 cal_orig、重設為追蹤，交給 _eval_* 以對齊後的日 K 重算 (同 r7 _px_repair)。"""
+    x["cal_orig"] = {k: x[k] for k in CAL_KEYS if k in x}
+    for k in CAL_KEYS:
+        x.pop(k, None)
+    x["status"] = "追蹤"; x["cal_fix"] = 1
+
+
+def _todo(prev: dict, cal_on: bool = False) -> list[tuple]:
+    """evaluate 要處理的列 [(kind, x, need)]。need = 要重算 (追蹤中 / 補 fin21 / trail / chk)；其餘只做一次性檢查
+    (pxk 價格基準；cal_on 時已結案列的 calv 日曆標記)。need 的列排前面 (一次性檢查的大批舊列不擠掉每日對帳)。"""
     todo = []
     for x in prev["ledger"]["treasure"]:
         need = x.get("status") == "追蹤" or x.get("trail") is None or (x.get("fin21") is None and not x.get("fin21_na") and (x.get("days") or 0) < T.H) or x.get("chk") is None
-        if need or x.get("pxk") is None:
+        if need or x.get("pxk") is None or (cal_on and x.get("calv") is None and _closed(x)):
             todo.append(("t", x, need))     # pr2：停損提早結案的列繼續追到第 21 日補 fin21；10-06：舊結案列補一次「第幾天」(chk)
     for x in prev["ledger"]["surge"]:
         need = x.get("status") == "追蹤" or (x.get("trail") is None and (x.get("days") or 0) < T.SURGE_N) or x.get("chk") is None
-        if need or x.get("pxk") is None:
+        if need or x.get("pxk") is None or (cal_on and x.get("calv") is None and _closed(x)):
             todo.append(("s", x, need))   # r7：pxk = 價格基準一次性檢查 (配股/減資回溯縮放)；只檢查不需修的列不重算 (結果維持原樣)
+    return [t for t in todo if t[2]] + [t for t in todo if not t[2]]
+
+
+def evaluate(prev: dict, mk: dict, max_fetch: int = 200, upto: str | None = None, cal: TradeCal | None = None) -> int:
+    """逐檔對帳 (未結案或尚未出場的紀錄)；每次最多抓 max_fetch 檔 (控制 Yahoo 呼叫)。upto：只用該日 (含) 以前的 K 棒 (回填時逐日模擬)。
+    cal (BE-1)：日 K 先對齊證交所日曆 (去幽靈日、盤後表補缺日)；已結案列一次性核對「第幾天」標記 (calv)，不一致 → 重算。cal = None → 原樣 (舊行為)。"""
+    n = 0
+    todo = _todo(prev, cal is not None)
+    lo = min((str(x["date"])[:10] for _, x, _ in todo if _ISO.fullmatch(str(x.get("date") or "")[:10])), default=None) if cal is not None else None   # 對齊範圍 = 最早一筆要處理的推薦日起
     cache: dict[str, list] = {}
     for kind, x, need in todo[:max_fetch * 2]:
         if n >= max_fetch and x["code"] not in cache:
@@ -772,7 +1086,10 @@ def evaluate(prev: dict, mk: dict, max_fetch: int = 200, upto: str | None = None
         try:
             b = cache.get(x["code"])
             if b is None:
-                b = bars(x["code"]); cache[x["code"]] = b; n += 1          # 與評分同一份 2 年日 K 快取
+                b = bars(x["code"]); n += 1          # 與評分同一份 2 年日 K 快取
+                if cal is not None:
+                    b = align_bars(b, cal, x["code"], lo=lo)
+                cache[x["code"]] = b
             if upto:
                 b = [r for r in b if str(r["date"])[:10] <= upto]
             if not b:
@@ -782,9 +1099,19 @@ def evaluate(prev: dict, mk: dict, max_fetch: int = 200, upto: str | None = None
                     if (ref - pd.Timestamp(x["date"])).days > MAX_FIN21_WAIT_DAYS:
                         x["fin21_na"] = True
                 continue
-            if x.get("pxk") is None and not _px_repair(x, b) and not need:
+            fix = _px_repair(x, b) if x.get("pxk") is None else False
+            if cal is not None and x.get("calv") is None and _closed(x):
+                ok = _cal_check(x, b, cal)
+                if ok is False:
+                    log.info("evaluate %s %s: 第幾天標記與證交所日曆不一致 → 重算", x["code"], x["date"])
+                    _cal_reset(x); fix = True
+                elif ok:
+                    x["calv"] = 1
+            if not (need or fix):
                 continue
             (_eval_treasure(x, b, mk) if kind == "t" else _eval_surge(x, b))
+            if cal is not None and x.get("calv") is None and _closed(x) and _cal_check(x, b, cal):
+                x["calv"] = 1
         except Exception as e:  # noqa: BLE001
             log.debug("evaluate %s: %s", x["code"], e)
     return n
@@ -821,6 +1148,11 @@ def is_strict_a(x: dict, tm: dict | None = None, mb_by_date: dict | None = None)
     return float(mb) <= SHADOW_STRICT["gate"] and float(x["p"]) >= th
 
 
+def _published(x: dict) -> bool:
+    """真實發布列 = 不是回填、也不是遲到重掃 (BE-2：late 列本來就帶 backfill=True，這裡再擋一次)。"""
+    return not x.get("backfill") and x.get("scan_src") != "late"
+
+
 def stats(prev: dict, tm: dict) -> dict:
     for kind in ("treasure", "surge"):
         prev["ledger"][kind].sort(key=lambda x: (x.get("date") or "", x.get("code") or ""))
@@ -840,7 +1172,7 @@ def stats(prev: dict, tm: dict) -> dict:
                 "avg_fin21": round(float(np.mean(f21)), 2) if f21 else None, "n_fin21": len(f21), "win21": round(float(np.mean([v > 0 for v in f21])), 3) if f21 else None,
                 "n_published": sum(1 for x in rows if not x.get("backfill")), "n_backfill": sum(1 for x in rows if x.get("backfill"))}
     oos = ((tm.get("oos") or {}).get("tiers") or {})
-    pub = [x for x in done if not x.get("backfill")]
+    pub = [x for x in done if _published(x)]
     by_tier = {}
     for t in ("A+", "A", "B+", "B"):
         g = agg([x for x in done if x.get("tier") == t])
@@ -862,7 +1194,7 @@ def stats(prev: dict, tm: dict) -> dict:
     signal = agg(sig_rows)
     if signal:
         signal["role"] = "signal"; signal["expect"] = list(EXPECT_AAPLUS)
-        gp = agg([x for x in sig_rows if not x.get("backfill")])
+        gp = agg([x for x in sig_rows if _published(x)])
         signal["published"] = {k: gp[k] for k in ("n", "hit", "rate", "avg_fin", "avg_fin21")} if gp else None
         signal["drift"] = bool(gp and gp["n"] >= DRIFT_MIN_PUBLISHED and gp["rate"] < EXPECT_AAPLUS[0] - 0.15)
         # r6：依記錄規則分開 (A30 = 10-07 起同回測規則；legacy = 之前前 20 / 追蹤上限 40 的舊規則，只留下回測 A 集合的一小部分)
@@ -997,7 +1329,7 @@ def alerts(sc: dict, st: dict, prev: dict | None = None) -> list[dict]:
     return out
 
 
-def backfill(prev: dict, tm: dict, dates: list[str], mk: dict | None = None) -> dict:
+def backfill(prev: dict, tm: dict, dates: list[str], mk: dict | None = None, cal: TradeCal | None = None) -> dict:
     """回填：對過去的交易日逐日掃描並記入帳本 (紀錄標 backfill=True；用 D 日以前的日 K，與當日掃描口徑相同)。
     已在 scans 內的日期跳過。回填的推薦不是「當時真的發布過」，只用來快速累積上線口徑的追蹤樣本。"""
     have = {x["date"] for x in prev.get("scans") or []}
@@ -1018,7 +1350,7 @@ def backfill(prev: dict, tm: dict, dates: list[str], mk: dict | None = None) -> 
         prev = record(prev, sc, tm, scan_src="backfill")
         for x in prev["ledger"]["treasure"][n0:] + prev["ledger"]["surge"][n1:]:
             x["backfill"] = True
-        evaluate(prev, mk, max_fetch=10 ** 6, upto=D)       # 逐日結案 → 追蹤上限/60 日不重複 與即時一致 (K 棒已在快取)
+        evaluate(prev, mk, max_fetch=10 ** 6, upto=D, cal=cal)       # 逐日結案 → 追蹤上限/60 日不重複 與即時一致 (K 棒已在快取)
         log.info("backfill %s: %d treasure / %d surge", D, len(prev["ledger"]["treasure"]) - n0, len(prev["ledger"]["surge"]) - n1)
     return prev
 
@@ -1026,22 +1358,46 @@ def backfill(prev: dict, tm: dict, dates: list[str], mk: dict | None = None) -> 
 def build(date: str | None = None, do_scan: bool = True, backfill_days: int = 0) -> dict:
     tm = M.load_json("treasure_model") or {}
     prev = load_prev()
+    n_tag = tag_late(prev)                                      # BE-2：既有的遲到重掃列改標 late / 回填 (冪等)
+    if n_tag:
+        log.info("treasure_live: %d 列遲到重掃改標 late (回填)", n_tag)
     mk = twii_hist()
+    # BE-1：證交所交易日曆 (懶載入：帳本沒有要對帳的列就不抓)；FMTQIK 抓不到的月份以掃描日 ∪ ^TWII 的日子補洞
+    cal = TradeCal(extra=lambda: set(mk) | {s_.get("date") for s_ in prev.get("scans") or [] if s_.get("date")})
     if backfill_days and tm.get("trees"):
         end = dt.datetime.now(config.TZ).date() - dt.timedelta(days=1)
         days = [d for d in sorted(mk) if (end - dt.timedelta(days=backfill_days)).isoformat() <= d <= end.isoformat()]
-        prev = backfill(prev, tm, days, mk)
+        prev = backfill(prev, tm, days, mk, cal=cal)
     pools = prev.pop("_pools", None) or []                      # r14：backfill 掃描的候選池
     sc = scan(tm, date) if (do_scan and tm.get("trees")) else {"date": None}
     pool = sc.pop("pool", None)                                 # r14：候選池不進 treasure_live.json / LOCAL (App 不讀)
+    late = False
     if sc.get("date"):
-        prev = record(prev, sc, tm, scan_src="live")
+        D = sc["date"]
+        # BE-2：遲到的執行 (週日重訓後重掃上週五、平日休市 full run、MI_INDEX 未出就跑) 不把 D 日推薦記成真實發布：
+        # D 已發布過 → 不記 (scans[D] 也不蓋)；還沒發布 → 記成 scan_src='late' + backfill=True。候選池照交 radar_archive (它有自己的 _rank)。
+        late = is_late(D, dt.datetime.now(config.TZ), tm.get("trained_at"))
+        if not late:
+            prev = record(prev, sc, tm, scan_src="live")
+        elif D in {s_.get("date") for s_ in prev.get("scans") or []}:
+            log.info("treasure_live: %s 已發布過，這次是遲到的重掃 → 不記入帳本", D)
+        else:
+            prev = record(prev, sc, tm, scan_src="late")
+            for x in prev["ledger"]["treasure"] + prev["ledger"]["surge"]:
+                if x.get("date") == D and x.get("scan_src") == "late":
+                    x["backfill"] = True
+            log.info("treasure_live: %s 遲到的掃描 → 記成回填 (late)", D)
+        if late:
+            sc["late"] = True                                   # App 可據此不把重掃當成當天的推薦
         if pool:
             pools.append({**pool, "src": "live"})
-    n_fetch = evaluate(prev, mk)
+        if sc.get("mkt_close") and D not in mk:                 # BE-3：Yahoo ^TWII 還沒有 D 日 → 用 scan 以盤後表補上的加權收盤 (同推薦時的 mktEntry)
+            mk = {**mk, D: float(sc["mkt_close"])}
+    n_fetch = evaluate(prev, mk, cal=cal)
     st = stats(prev, tm)
+    sc_al = {**sc, "treasure": [], "surge": []} if late else sc   # BE-2：遲到的重掃不再發「新推薦」提醒 (結案 / 轉弱 / 失準照發)
     out = {"asof": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M:%S"), "scan": sc, "ledger": prev["ledger"], "scans": prev["scans"], "stats": st,
-           "alerts": alerts(sc, st | {"surge": {**(st.get("surge") or {}), "th_top10": ((tm.get("surge") or {}).get("th_top10"))}}, prev),
+           "alerts": alerts(sc_al, st | {"surge": {**(st.get("surge") or {}), "th_top10": ((tm.get("surge") or {}).get("th_top10"))}}, prev),
            "model": {"radar_bt": RADAR_BT, "trained_at": tm.get("trained_at"), "th_A": tm.get("th_A"), "th_Aplus": tm.get("th_Aplus"), "oos": (tm.get("oos") or {}).get("tiers"), "surge_oos": (tm.get("surge") or {}).get("oos"),
                      "exit": tm.get("exit"), "surge_exit": (tm.get("surge") or {}).get("exit"), "entry": tm.get("entry"),
                      "expect_AAplus": list(EXPECT_AAPLUS), "note_tiers": NOTE_TIERS, "roles": dict(ROLE), "spec": "pr2 2026-10-05"},

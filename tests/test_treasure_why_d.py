@@ -39,7 +39,7 @@ def sig(z):
     return 1 / (1 + math.exp(-z))
 
 
-def fake_score(code, r, d, mkf, tm):
+def fake_score(code, r, d, mkf, tm, cal=None):   # BE-1：scan 會帶 cal (懶載入的證交所日曆；這裡不用 → 不連網)
     x = X[code]
     p = sig(L.T._eval(tm, [x[f] for f in FEATS]))
     tier = "B" if p < tm["th_A"] else ("A+" if p >= tm["th_Aplus"] else "A")

@@ -144,7 +144,7 @@ def _scan_rows():
     return rows
 
 
-def _fake_score(code, r, d, mkf, tm):
+def _fake_score(code, r, d, mkf, tm, cal=None):   # BE-1：scan 會帶 cal (證交所日曆，懶載入；假評分不用 → 不連網)
     if code not in P:
         return None
     p, tier, ps = P[code]
@@ -290,6 +290,17 @@ def test_late_rescan_does_not_replace_on_time():
         assert RA.merge([_line("2026-10-14", 3, asof="2026-10-16 15:50:00")])[0]["n"] == 3
     assert RA._on_time({"ts": "2026-10-09", "asof": "2026-10-10 08:59:59"}) and not RA._on_time({"ts": "2026-10-09", "asof": "2026-10-10 09:00:00"})
     assert RA._on_time({"ts": "2026-10-09"}) and RA._on_time({"ts": "bad", "asof": "2027-01-01 00:00:00"})
+
+
+def test_on_time_and_rank_share_is_late():
+    """BE-2 (2026-10-13)：_on_time / _rank 第三項改用 treasure_live.is_late (帳本與歸檔對「遲到」的判斷一致)。"""
+    for ts, asof, mv in [("2026-10-09", "2026-10-09 15:50:00", "2026-10-04 08:00:00"), ("2026-10-09", "2026-10-10 09:00:00", None),
+                         ("2026-10-09", "2026-10-09 21:45:00", "2026-10-11 08:00:00"), ("2026-10-09", None, "2026-10-09 07:00:00")]:
+        x = {"ts": ts, "asof": asof, "model_ver": mv, "n": 1}
+        assert RA._on_time(x) == (not L.is_late(ts, asof)), x
+        assert RA._rank(x)[2] == (not L.is_late(ts, None, mv)) and RA._rank(x)[3] == RA._on_time(x), x
+    with patched(L, "is_late", lambda D, asof=None, model_ver=None: True):      # 同一個函式 (lazy import 每次取用)
+        assert not RA._on_time({"ts": "2026-10-09", "asof": "2026-10-09 15:50:00"}) and RA._rank({"ts": "2026-10-09", "n": 1})[2] is False
 
 
 def test_shrink_count_ignores_dup_and_bad_lines():
