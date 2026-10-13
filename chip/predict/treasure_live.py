@@ -43,6 +43,8 @@ pr2 (2026-10-05，LC-04 pass / T5-01~03 / T5-missed / LC-05~06 fail)：
 - N8 / BE-5 radar_bt.same 加 from / to (推薦日界線，含頭尾)；N9 radar_bt.day0.period、radar_bt.path_period (2021~ 樣本外，不是 radar_bt.period)。
 - BE-6 build() 先掃當天再回填：第一次 full run 拖到午夜後 (GitHub 排程延遲) 時，當天仍記成真實發布 (隔天 09:00 前)，不被回填搶先標成 backfill。
 - BE-9 帳本超過 LEDGER_MAX 只刪最舊的描述級 (A/A+ 永不刪) 並記 log；舊列的大盤乖離趁 scans 還在時寫進列本身 (mb_src='scan')。
+- 審查修正：回填 (evaluate upto) 不做一次性日曆核對、日 K 落後於結案標記 → 無法驗證不重設；trimmed 累計筆數寫進輸出並由 load_prev 帶回；
+  回填 / 遲到列由 record() 直接標 backfill=True，_published() 也排除 scan_src=backfill。
 """
 from __future__ import annotations
 
@@ -668,6 +670,7 @@ def load_prev() -> dict:
     """上次發布 (Pages) ∪ 本機備份，帳本以 (kind, code, date) 去重、取較完整者。"""
     out = {"ledger": {"treasure": [], "surge": []}, "scans": []}
     srcs = []
+    trimmed: dict = {}
     try:
         r = session().get(PAGES, headers=UA, timeout=30)
         if r.ok and r.text.strip().startswith("{"):
@@ -690,6 +693,9 @@ def load_prev() -> dict:
                         out["ledger"][kind][have[k]] = x
                 else:
                     have[k] = len(out["ledger"][kind]); out["ledger"][kind].append(x)
+        for k, v in (s.get("trimmed") or {}).items():           # BE-9：累計截斷筆數 → 兩份取較大者
+            if isinstance(v, (int, float)):
+                trimmed[k] = max(trimmed.get(k, 0), int(v))
         seen = {x["date"] for x in out["scans"]}
         for x in (s.get("scans") or []):
             if x.get("date") and x["date"] not in seen:
@@ -697,6 +703,8 @@ def load_prev() -> dict:
     for kind in ("treasure", "surge"):
         out["ledger"][kind].sort(key=lambda x: (x.get("date") or "", x.get("code") or ""))
     out["scans"].sort(key=lambda x: x["date"])
+    if trimmed:
+        out["trimmed"] = trimmed
     return out
 
 
@@ -763,8 +771,9 @@ def record(prev: dict, sc: dict, tm: dict | None = None, scan_src: str = "live")
     if not D:
         return prev
     tm = tm or {}
+    bf = {"backfill": True} if scan_src in ("backfill", "late") else {}   # 回填 / 遲到列直接標 (帳本滿時 trim 會重排，呼叫端不能靠 index 切片補標)
     meta = {"model_ver": tm.get("trained_at"), "th_A": tm.get("th_A"), "th_Aplus": tm.get("th_Aplus"), "mkt_bias20": sc.get("mkt_bias20"), "scan_src": scan_src,
-            **({"th_q92": tm["th_q92"]} if tm.get("th_q92") is not None else {})}   # 2026-10-12：影子觀察嚴格 A 用
+            **({"th_q92": tm["th_q92"]} if tm.get("th_q92") is not None else {}), **bf}   # 2026-10-12：影子觀察嚴格 A 用
     # BE-4 (2026-10-13)：掃描當時是否在模型宇宙內 (in_uni)。宇宙每週重訓都會換 → App 不再用「目前」的宇宙回頭標舊列；
     # 模型檔沒有 universe (全市場候選) → 不寫此欄 (App 退回目前宇宙)。舊列維持無欄位，不做歷史遷移。
     uni = {str(c) for c in (tm.get("universe") or [])}
@@ -809,7 +818,7 @@ def record(prev: dict, sc: dict, tm: dict | None = None, scan_src: str = "live")
         tt = t_tier.get(r["code"])
         sur.append({"code": r["code"], "name": r["name"], "date": D, "entry": r["close"], "ps": r["ps"], "status": "追蹤", "days": 0,
                     **({"tier": tt[0], "p": tt[1]} if tt else {}),
-                    "model_ver": meta["model_ver"], "th_top10": (tm.get("surge") or {}).get("th_top10"), "scan_src": scan_src, **_uni(r["code"])})
+                    "model_ver": meta["model_ver"], "th_top10": (tm.get("surge") or {}).get("th_top10"), "scan_src": scan_src, **bf, **_uni(r["code"])})
     scans = [x for x in prev.get("scans") or [] if x.get("date") != D]
     scans.append({"date": D, "n_treasure": len(sc["treasure"]), "n_A": sum(1 for r in sc["treasure"] if r["tier"] in ("A", "A+")), "mkt_bias20": sc.get("mkt_bias20"),
                   "top": [{"code": r["code"], "tier": r["tier"], "p": r["p"]} for r in sc["treasure"][:6]], "surge": [{"code": r["code"], "ps": r["ps"]} for r in sc["surge"]]})
@@ -1064,7 +1073,7 @@ CAL_KEYS = PX_KEYS + ("fin20", "fin20Date", "fin20_na")      # 日曆重算時�
 def _cal_check(x: dict, b: list[dict], cal: TradeCal) -> bool | None:
     """BE-1：已結案列的「第幾天」標記 (days/lastDate、hit/stop/peak、fin21Date) 與對齊證交所日曆後的日 K 是否一致。
     True = 一致 (標 calv=1，之後不再查)；False = 不一致 (當時算進幽靈日或漏掉真實交易日 → 要重算)；
-    None = 無法驗證 (那段不是 FMTQIK 日曆、或缺的交易日盤後表抓不到 / 該股在表內卻沒補上) → 下次再查。"""
+    None = 無法驗證 (那段不是 FMTQIK 日曆、日 K 最後一天早於要比對的最後日期、或缺的交易日盤後表抓不到 / 該股在表內卻沒補上) → 下次再查。"""
     D = str(x.get("date") or "")[:10]
     if not _ISO.fullmatch(D):
         return None
@@ -1082,6 +1091,8 @@ def _cal_check(x: dict, b: list[dict], cal: TradeCal) -> bool | None:
     if not cal.exact(D, end):
         return None
     since = [str(r["date"])[:10] for r in b if str(r["date"])[:10] > D and r.get("close")]
+    if not since or since[-1] < end:            # 日 K 落後 (或被截斷) 到最後一個標記之前 → 無法驗證，下次再查 (不能當成不一致)
+        return None
     nxt = (dt.date.fromisoformat(D) + dt.timedelta(days=1)).isoformat()
     for run in _gap_runs(cal, nxt, end, set(since)):
         if len(run) > FILL_MAX_RUN:             # 長段缺口 = 停牌 (align_bars 也不補) → 當成真的沒交易
@@ -1152,7 +1163,8 @@ def evaluate(prev: dict, mk: dict, max_fetch: int = 200, upto: str | None = None
                         x["fin20_na"] = True
                 continue
             fix = _px_repair(x, b) if x.get("pxk") is None else False
-            if cal is not None and x.get("calv") is None and _closed(x):
+            # BE-1 修：回填逐日模擬 (upto) 的日 K 被截到 upto，結案標記可能落在 upto 之後 → 不做一次性日曆核對 (只對齊)，留給不帶 upto 的對帳
+            if cal is not None and not upto and x.get("calv") is None and _closed(x):
                 ok = _cal_check(x, b, cal)
                 if ok is False:
                     log.info("evaluate %s %s: 第幾天標記與證交所日曆不一致 → 重算", x["code"], x["date"])
@@ -1162,7 +1174,7 @@ def evaluate(prev: dict, mk: dict, max_fetch: int = 200, upto: str | None = None
             if not (need or fix):
                 continue
             (_eval_treasure(x, b, mk) if kind == "t" else _eval_surge(x, b))
-            if cal is not None and x.get("calv") is None and _closed(x) and _cal_check(x, b, cal):
+            if cal is not None and not upto and x.get("calv") is None and _closed(x) and _cal_check(x, b, cal):
                 x["calv"] = 1
         except Exception as e:  # noqa: BLE001
             log.debug("evaluate %s: %s", x["code"], e)
@@ -1202,7 +1214,7 @@ def is_strict_a(x: dict, tm: dict | None = None, mb_by_date: dict | None = None)
 
 def _published(x: dict) -> bool:
     """真實發布列 = 不是回填、也不是遲到重掃 (BE-2：late 列本來就帶 backfill=True，這裡再擋一次)。"""
-    return not x.get("backfill") and x.get("scan_src") != "late"
+    return not x.get("backfill") and x.get("scan_src") not in ("backfill", "late")
 
 
 def stats(prev: dict, tm: dict) -> dict:
@@ -1412,9 +1424,7 @@ def backfill(prev: dict, tm: dict, dates: list[str], mk: dict | None = None, cal
         if pl:
             prev.setdefault("_pools", []).append({**pl, "src": "backfill"})
         n0 = len(prev["ledger"]["treasure"]); n1 = len(prev["ledger"]["surge"])
-        prev = record(prev, sc, tm, scan_src="backfill")
-        for x in prev["ledger"]["treasure"][n0:] + prev["ledger"]["surge"][n1:]:
-            x["backfill"] = True
+        prev = record(prev, sc, tm, scan_src="backfill")      # record() 自己標 backfill=True (帳本滿時 trim 重排，不能靠 [n0:] 切片)
         evaluate(prev, mk, max_fetch=10 ** 6, upto=D, cal=cal)       # 逐日結案 → 追蹤上限/60 日不重複 與即時一致 (K 棒已在快取)
         log.info("backfill %s: %d treasure / %d surge", D, len(prev["ledger"]["treasure"]) - n0, len(prev["ledger"]["surge"]) - n1)
     return prev
@@ -1468,7 +1478,7 @@ def build(date: str | None = None, do_scan: bool = True, backfill_days: int = 0)
            "model": {"radar_bt": RADAR_BT, "trained_at": tm.get("trained_at"), "th_A": tm.get("th_A"), "th_Aplus": tm.get("th_Aplus"), "oos": (tm.get("oos") or {}).get("tiers"), "surge_oos": (tm.get("surge") or {}).get("oos"),
                      "exit": tm.get("exit"), "surge_exit": (tm.get("surge") or {}).get("exit"), "entry": tm.get("entry"),
                      "expect_AAplus": list(EXPECT_AAPLUS), "note_tiers": NOTE_TIERS, "roles": dict(ROLE), "spec": "pr2 2026-10-05"},
-           "n_fetch": n_fetch,
+           "n_fetch": n_fetch, **({"trimmed": prev["trimmed"]} if prev.get("trimmed") else {}),   # BE-9：累計截斷筆數 (load_prev 帶回)
            "disclaimer": "雲端每日盤後掃描 (與 App 相同模型)；成績為歷史追蹤統計，不是個人化投資建議。"}
     try:
         LOCAL.parent.mkdir(parents=True, exist_ok=True)

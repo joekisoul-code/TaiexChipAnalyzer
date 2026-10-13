@@ -261,7 +261,7 @@ def test_phantom_day_dropped_fin21_is_21st_trading_day():
         new = led(); TL.evaluate(new, MK, upto="2026-08-31", cal=cal())
     o, n = old["ledger"]["treasure"][0], new["ledger"]["treasure"][0]
     assert o["fin21Date"] == o["evalAt"] == "2026-08-04", ("舊算法：幽靈日算一天 → 第 20 個交易日當第 21 日", o)
-    assert n["fin21Date"] == n["evalAt"] == d21 and n["days"] == 21 and abs(n["fin21"] - 2.1) < 1e-6 and n["calv"] == 1, n
+    assert n["fin21Date"] == n["evalAt"] == d21 and n["days"] == 21 and abs(n["fin21"] - 2.1) < 1e-6 and "calv" not in n, n   # upto (回填) 不做日曆核對
 
 
 # ------------------------------------------------------------------ (e) score_one 跨洞
@@ -297,14 +297,14 @@ def test_calv_rewalks_inconsistent_closed_rows_once():
         assert t["evalAt"] == "2026-08-04" and s["evalAt"] == "2026-08-03" and s["status"] == "未飆" and "calv" not in t, (t, s)
         g_before = {k: g[k] for k in ("status", "cur", "days", "evalAt", "fin21", "fin21Date")}
         t_status = t["status"]
-        n = TL.evaluate(prev, MK, upto="2026-09-30", cal=cal())   # 有日曆：不一致的重算一次
+        n = TL.evaluate(prev, MK, cal=cal())                      # 有日曆 (不帶 upto)：不一致的重算一次
         assert n == 2
         assert t["cal_fix"] == 1 and t["cal_orig"]["evalAt"] == "2026-08-04" and t["cal_orig"]["status"] == t_status and t["calv"] == 1, t
         assert t["evalAt"] == t["fin21Date"] == "2026-08-05" and t["days"] == 21 and t["status"] != "追蹤", t
         assert s["cal_fix"] == 1 and s["evalAt"] == _after(D, 20)[-1] == "2026-08-04" and s["days"] == 20 and s["calv"] == 1, s
         assert g["calv"] == 1 and "cal_orig" not in g and "cal_fix" not in g and {k: g[k] for k in g_before} == g_before, g
         snap = json.dumps(prev, sort_keys=True, ensure_ascii=False)
-        assert TL.evaluate(prev, MK, upto="2026-09-30", cal=cal()) == 0, "calv=1 之後不再進 todo"
+        assert TL.evaluate(prev, MK, cal=cal()) == 0, "calv=1 之後不再進 todo"
         assert json.dumps(prev, sort_keys=True, ensure_ascii=False) == snap
 
 
@@ -324,6 +324,29 @@ def test_calv_unverifiable_waits_for_mi():
         with patched(TL, "market_snapshot", fake_snapshot(MI_1012)):
             TL.evaluate(prev, MK, cal=cal())
     assert x["status"] == "命中" and x["evalAt"] == "2026-10-12" and x["cal_orig"]["status"] == "未命中" and x["calv"] == 1, x
+
+
+def test_calv_not_reset_under_upto_or_lagging_bars():
+    """審查修正：一致的已結案列 — 回填逐日模擬 evaluate(upto=較早日期) 把日 K 截在結案標記之前 → 不核對、不重設；
+    日 K 落後 (Yahoo 最後一天早於結案標記) → 無法驗證 (None)、不重設、不標 calv。"""
+    B = _phantom_bars()
+    D = "2026-08-10"             # 窗口內沒有幽靈日 / 缺日 → 一致
+    with patched(TL, "bars", lambda code, years="2y": B), patched(TL, "_fmtqik_days", fake_fmtqik()), patched(TL, "market_snapshot", fake_snapshot({})):
+        prev = {"ledger": {"treasure": [{"code": "2104", "name": "國際中橡", "date": D, "entry": B[[r["date"] for r in B].index(D)]["close"], "mktEntry": 1000.0, "tier": "B", "status": "追蹤"}],
+                           "surge": []}}
+        TL.evaluate(prev, MK, cal=cal())
+        x = prev["ledger"]["treasure"][0]
+        assert x["status"] != "追蹤" and x["fin21Date"] == _after(D, 21)[-1] and x["calv"] == 1, x
+        x.pop("calv")
+        before = json.dumps(x, sort_keys=True, ensure_ascii=False)
+        TL.evaluate(prev, MK, upto="2026-08-20", cal=cal())           # 回填：日 K 截到 08-20 (< fin21Date)
+        assert json.dumps(x, sort_keys=True, ensure_ascii=False) == before, ("upto 不該重設已結案列", x)
+        c = cal()
+        lag = [r for r in B if r["date"] <= "2026-08-25"]
+        assert TL._cal_check(x, TL.align_bars(lag, c, "2104", lo=D), c) is None, "日 K 落後 → 無法驗證"
+    with patched(TL, "bars", lambda code, years="2y": lag), patched(TL, "_fmtqik_days", fake_fmtqik()), patched(TL, "market_snapshot", fake_snapshot({})):
+        TL.evaluate(prev, MK, cal=cal())                              # 不帶 upto，但 Yahoo 日 K 只到 08-25
+    assert json.dumps(x, sort_keys=True, ensure_ascii=False) == before and "calv" not in x and "cal_fix" not in x, x
 
 
 # ------------------------------------------------------------------ (g) 懶載入 / 上限

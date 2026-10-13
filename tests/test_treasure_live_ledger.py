@@ -943,6 +943,45 @@ def test_ledger_trim_keeps_signal_rows():
     # A/A+ 本身就超過上限 → 全留 (描述級全刪)
     led = {"treasure": [dict(old_a, code=f"A{i}") for i in range(TL.LEDGER_MAX + 2)] + bs[:3], "surge": []}
     assert TL.trim_ledger(led) == {"treasure": 3} and len(led["treasure"]) == TL.LEDGER_MAX + 2
+    # 審查修正：trimmed 寫進 build() 輸出；load_prev 兩份來源取較大的累計值
+    pt = _fresh(); pt["trimmed"] = {"treasure": 4}
+    out = _build(pt, {"date": None, "treasure": [], "surge": []}, TM)
+    assert out["trimmed"] == {"treasure": 4}, out.get("trimmed")
+    assert "trimmed" not in _build(_fresh(), {"date": None, "treasure": [], "surge": []}, TM)
+
+    class _R:
+        ok, text = True, json.dumps({"ledger": {"treasure": [], "surge": []}, "scans": [], "trimmed": {"treasure": 4, "surge": 9}})
+
+        def json(self):
+            return json.loads(self.text)
+
+    class _S:
+        def get(self, *a_, **k_):
+            return _R()
+    with tempfile.TemporaryDirectory() as td:
+        Path(td, "tl.json").write_text(json.dumps({"ledger": {"treasure": [], "surge": []}, "scans": [], "trimmed": {"treasure": 7}}), encoding="utf-8")
+        with patched(TL, "LOCAL", Path(td) / "tl.json"), patched(TL, "session", lambda: _S()):
+            assert TL.load_prev()["trimmed"] == {"treasure": 7, "surge": 9}
+    with patched(TL, "session", lambda: None), patched(TL, "LOCAL", Path(tempfile.gettempdir()) / "__no_such_tl__.json"):
+        assert "trimmed" not in TL.load_prev()
+
+
+def test_backfill_marks_source_when_ledger_full():
+    """審查修正：帳本已達 LEDGER_MAX 時 record() 會截斷 / 重排 → backfill() 的 [n0:] 切片是空的；新回填列仍要 backfill=True、不算真實發布。"""
+    days = [d.strftime("%Y-%m-%d") for d in pd.bdate_range("2020-01-01", periods=TL.LEDGER_MAX)]
+    full = _fresh()
+    full["ledger"]["treasure"] = [{"code": f"B{i:04d}", "name": "b", "date": d, "tier": "B", "status": "未命中", "evalAt": d, "cur": -1.0, "days": 21,
+                                   "trail": 0.0, "chk": 1, "pxk": 1, "fin21": -1.0} for i, d in enumerate(days)]
+    full["ledger"]["surge"] = [{"code": f"S{i:04d}", "name": "s", "date": d, "status": "未飆", "cur": 0.0, "days": 20, "trail": 0.0, "chk": 1, "pxk": 1, "fin20": 0.0}
+                               for i, d in enumerate(days)]
+    p1 = TL.record(json.loads(json.dumps(full)), SC, TM, scan_src="backfill")
+    new = [x for x in p1["ledger"]["treasure"] + p1["ledger"]["surge"] if x["date"] == D0]
+    assert len(new) == 4 and all(x["backfill"] is True for x in new) and not any(TL._published(x) for x in new), new
+    with patched(TL, "scan", lambda tm, date=None: dict(SC, date=date)), patched(TL, "bars", _fake_bars):
+        p2 = TL.backfill(json.loads(json.dumps(full)), TM, [D0], MK)
+    new = [x for x in p2["ledger"]["treasure"] + p2["ledger"]["surge"] if x["date"] == D0]
+    assert len(new) == 4 and all(x["backfill"] is True and x["scan_src"] == "backfill" for x in new), new
+    assert TL._published({"scan_src": "backfill"}) is False and TL._published({"scan_src": "late"}) is False and TL._published({"scan_src": "live"}) is True
 
 
 if __name__ == "__main__":
