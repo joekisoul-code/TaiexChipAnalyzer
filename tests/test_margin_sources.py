@@ -204,6 +204,30 @@ def test_twse_margin_all_legacy_cache_compat():
     assert d["market"] is None and len(d["stocks"]) == 1
 
 
+def test_raw_cache_dropped_after_persist_keeps_small_caches():
+    """個股列入 SQLite 後 margin_dyn._drop_raw_cache 只刪整份原始快取 (twse:MI_MARGN:ALL / tpex:margin，各 ≈420 / 343 KB/日)；
+    MS 與 close_all 小快取保留 → margin_daily / closes_all 不必重抓；刪後 margin_stocks_hist 需要時才重抓一次。"""
+    from chip.analysis import margin_dyn as M
+    g = Counter(lambda url, **kw: twse_all_json("20250109") if kw["params"].get("selectType") else mi_index_json("20250109"))
+    with patched(twse, "get_json", g):
+        twse.margin_stocks_hist("20250109")
+        twse.closes_all("20250109")
+    assert g.n == 2 and http.cache_get("twse:MI_MARGN:ALL:20250109", twse.TTL_FOREVER) and http.cache_get("twse:close_all:20250109", twse.TTL_FOREVER)
+    http.cache_put("tpex:margin:20250109", {"date": "2025-01-09", "status": "ok", "market": {"margin_lots": 1.0}, "stocks": [{"code": "6488"}]})
+    M._drop_raw_cache("2025-01-09", tpex=True)
+    assert http.cache_get("twse:MI_MARGN:ALL:20250109", twse.TTL_FOREVER) is None and http.cache_get("tpex:margin:20250109", tpex.TTL_FOREVER) is None
+    assert http.cache_get("twse:MI_MARGN:MS:20250109", twse.TTL_FOREVER)["margin_repay_lots"] == 5032, "MS 小快取保留"
+    assert http.cache_get("twse:close_all:20250109", twse.TTL_FOREVER)["2330"] == [1000.0, 30000.0], "close_all 小快取保留"
+    with patched(twse, "get_json", _no_net):
+        assert twse.margin_daily("20250109")["margin_lots"] == 9427154 and twse.closes_all("20250109")["2330"] == (1000.0, 30000.0)
+    with patched(twse, "get_json", g):
+        d = twse.margin_stocks_hist("20250109")                            # 刪後再要 → 重抓一次 ALL (MS 命中)
+    assert g.n == 3 and len(d["stocks"]) == 4 and d["market"]["margin_repay_lots"] == 5032
+    M._drop_raw_cache("2025-01-09")                                        # 不存在也不炸；預設只刪 TWSE ALL
+    assert http.cache_get("twse:MI_MARGN:ALL:20250109", twse.TTL_FOREVER) is None
+    assert M.RAW_CACHE_KEYS == ("twse:MI_MARGN:ALL:{ymd}", "tpex:margin:{ymd}")
+
+
 def test_twse_throttle_only_on_network():
     import time as _t
     with patched(twse, "MIN_GAP", 0.15), patched(twse, "_last_net", 0.0):

@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 
 from .. import config, store
-from ..http import num, session
+from ..http import cache_delete, num, session
 from ..serialize import clean
 from . import gov8
 from .common import streak, zscore
@@ -52,6 +52,13 @@ THROTTLE = 2.2                     # TWSE 節流秒數 (測試設 0)
 SIZE_LIMIT = 900 * 1024
 PANEL_FROM = os.getenv("MARGIN_PANEL_FROM") or "2024-10-01"   # 個股面板 / 回補起點；Actions 以 vars.MARGIN_PANEL_FROM 往前拉 (空字串 = 預設)
 TPEX_FROM = "2007-01-01"           # TPEx 上櫃餘額可回補下限 (SPEC §2.1)
+NODATA_GRACE_DAYS = 1              # TWSE ALL NoData：資料日 ≥ today − 1 日 → 視為尚未公布 (cron 延遲跨午夜時不把前一交易日永久寫進 margin_nodata；與 tpex.NODATA_GRACE_DAYS 一致)
+MAINT_FULL_FROM = "2004-06-30"     # maint_pct2004 / 「2004 年來」文案只在自算維持率覆蓋期起點 ≤ 此日時輸出，否則 null 並改寫「{maint_from} 以來」
+MIN_QUANTILE_DAYS = 2500           # ext_inc / ext_dec / turnover_hot 的全歷史分位門檻至少要這麼多日樣本，否則事件輸出 null (insufficient)
+FFILL_MAX_AGE = 60                 # 維持率自算：缺價檔以最後已知收盤補價的最大年齡 (交易日)
+LAST_PX_DAYS = 400                 # 維持率自算：往前找最後收盤的日曆天上限 (>60 日的只用來估缺價市值、不補價)
+UNEST_LOTS_PARTIAL = 1000          # 維持率自算：完全估不出價的無價檔張數合計 ≥ 此值 → partial
+RAW_CACHE_KEYS = ("twse:MI_MARGN:ALL:{ymd}", "tpex:margin:{ymd}")   # 個股列入 SQLite 後即刪的整份原始快取 (≈420 / 343 KB/日；SPEC §3.1 不留 data/cache)
 VALIDATED_PATH = config.DATA_DIR / "models" / "margin_validated.json"
 SEED_PATH = config.DATA_DIR / "margin_market.json"
 WATCH_IDS = ["2330", "00631L", "00685L", "00981A", "00988A"]
@@ -100,6 +107,14 @@ EVENT_DEFS = {
     "maint_lt150": ("risk_descriptive", "none", {"note": "真實維持率五分位對 fwd20 非單調 (A10)"}),
     "turnover_hot": ("descriptive", "none", {"note": "—"}),
     "deleverage_fast": ("risk_descriptive", "none", {"note": "A7 的維持率代理版已廢；本定義用 TWSE 自算值"}),
+}
+# 事件定義句 (active=False 時 text 只給定義、不帶今日數值；{y} = 序列起始年)
+EVENT_DEFS_TEXT = {
+    "streak_up7": "融資連增 ≥7 日", "streak_dn7": "融資連減 ≥7 日", "wipeout": "融資 20 日 <−4% 且指數 20 日 <−3%",
+    "chase": "融資 20 日增幅高於指數 >5 個百分點", "knife": "融資 20 日 >+2% 且指數 20 日 <−2%",
+    "ext_inc": "單日融資變化 ≥ {y} 年來第 95 百分位", "ext_dec": "單日融資變化 ≤ {y} 年來第 5 百分位",
+    "hi250": "融資餘額創 250 日新高", "lo250": "融資餘額創 250 日新低", "maint_lt150": "維持率低於 150",
+    "turnover_hot": "日周轉 ≥ {y} 年來第 95 百分位", "deleverage_fast": "5 日融資 <−3% 且維持率 5 日降 ≥8 個百分點",
 }
 
 
@@ -585,29 +600,73 @@ def cross_section(day_panel: pd.DataFrame, closes: dict | None = None) -> dict:
     return out
 
 
-def maint_direct(day_panel: pd.DataFrame, closes: dict | None, margin_amt: float | None, last_px: dict | None = None) -> tuple[float | None, float | None, str | None]:
+def _px_of(v):
+    """closes / last_px / next_px 的值 → (close, extra...)；接受 float、(close,)、(close, age)、(close, age, lots)、(close, lots)。"""
+    if isinstance(v, (tuple, list)):
+        return tuple(v)
+    return (v,)
+
+
+def _est_px(lots_now: float, ref_close, ref_lots) -> float | None:
+    """以鄰近日的收盤估無價檔的價格：股本事件 (分割 / 反分割 / 面額變更) 時張數與價格反向變動，用張數比還原到當日股數基準
+    (6949 面額變更：停牌 5,315 張、復牌 105,083 張 × 67.1 → 估 ≈1,327)；比值不在 [1/50, 50] 或任一端張數 ≤0 → 不調整。"""
+    if ref_close is None or ref_close != ref_close or ref_close <= 0:
+        return None
+    ratio = 1.0
+    try:
+        if ref_lots is not None and ref_lots == ref_lots and ref_lots > 0 and lots_now > 0:
+            r = float(ref_lots) / float(lots_now)
+            if 1 / 50 <= r <= 50:
+                ratio = r
+    except (TypeError, ValueError):
+        pass
+    return float(ref_close) * ratio
+
+
+def maint_direct(day_panel: pd.DataFrame, closes: dict | None, margin_amt: float | None, last_px: dict | None = None,
+                 next_px: dict | None = None) -> tuple[float | None, float | None, str | None]:
     """自算維持率 = Σ(m_today × close × 1000) / (融資金額 億 × 1e8) × 100。
-    缺收盤檔用 last_px {code: (close, age)} (age ≤60 日)；單一補價檔貢獻 >0.5 pt 或無價檔張數占比 >1% → 'partial'。回 (value, coverage%, src)。"""
+    缺收盤檔用 last_px {code: (close, age[, lots_then])} 補價 (age ≤ FFILL_MAX_AGE 交易日)；補不到價的檔不進分子，但以最近之後收盤 next_px
+    {code: (close, lots_next)} 或較舊的 last_px (× 張數比，§3.6 股本事件還原) 估其市值：任一補價 / 無價檔估計貢獻 >0.5 pt、估計缺價市值占比 >1%、
+    無價張數占比 >1%、或完全估不出價的無價檔張數合計 ≥ UNEST_LOTS_PARTIAL → 'partial'。
+    回 (value, coverage%, src)；coverage = 100 − max(無價張數占比, 估計缺價市值占比)。"""
     if day_panel is None or len(day_panel) == 0 or margin_amt is None or not margin_amt or margin_amt != margin_amt:
         return None, None, None
     closes = closes or {}
     last_px = last_px or {}
+    next_px = next_px or {}
     lots = pd.to_numeric(day_panel["m_today"], errors="coerce").fillna(0).to_numpy(float)
     codes = day_panel["code"].astype(str).to_numpy()
     px = np.full(len(lots), np.nan)
+    est = np.full(len(lots), np.nan)                 # 無價檔的估計價 (只用來判 partial / coverage)
     filled = np.zeros(len(lots), dtype=bool)
     for i, c in enumerate(codes):
-        v = closes.get(c)
-        cl = v[0] if isinstance(v, (tuple, list)) else v
+        if lots[i] <= 0:
+            continue
+        cl = _px_of(closes.get(c))[0] if closes.get(c) is not None else None
         if cl is not None and cl == cl and cl > 0:
             px[i] = float(cl)
             continue
         lp = last_px.get(c)
         if lp is not None:
-            lcl, age = (lp if isinstance(lp, (tuple, list)) else (lp, 0))
-            if lcl is not None and lcl == lcl and lcl > 0 and (age is None or age <= 60):
+            t = _px_of(lp)
+            lcl, age = t[0], (t[1] if len(t) > 1 else 0)
+            if lcl is not None and lcl == lcl and lcl > 0 and (age is None or age <= FFILL_MAX_AGE):
                 px[i] = float(lcl)
                 filled[i] = True
+                continue
+        npx = next_px.get(c)
+        if npx is not None:
+            t = _px_of(npx)
+            e = _est_px(lots[i], t[0], t[1] if len(t) > 1 else None)
+            if e is not None:
+                est[i] = e
+                continue
+        if lp is not None:
+            t = _px_of(lp)
+            e = _est_px(lots[i], t[0], t[2] if len(t) > 2 else None)
+            if e is not None:
+                est[i] = e
     has = np.isfinite(px) & (lots > 0)
     tot_lots = float(lots.sum())
     if tot_lots <= 0 or not has.any():
@@ -615,41 +674,61 @@ def maint_direct(day_panel: pd.DataFrame, closes: dict | None, margin_amt: float
     denom = float(margin_amt) * 1e8
     contrib = np.where(has, lots * np.nan_to_num(px) * 1000.0, 0.0) / denom * 100
     value = float(contrib.sum())
-    missing_share = float(lots[(lots > 0) & ~has].sum() / tot_lots * 100)
-    coverage = round(100 - missing_share, 2)
+    missing = (lots > 0) & ~has
+    missing_share = float(lots[missing].sum() / tot_lots * 100)
+    est_ok = missing & np.isfinite(est)
+    est_contrib = np.where(est_ok, lots * np.nan_to_num(est) * 1000.0, 0.0) / denom * 100
+    est_share = float(est_contrib.sum() / (value + est_contrib.sum()) * 100) if (value + est_contrib.sum()) > 0 else 0.0
+    unest_lots = float(lots[missing & ~np.isfinite(est)].sum())
+    coverage = round(100 - max(missing_share, est_share), 2)
     src = "twse"
-    if missing_share > 1.0 or (filled.any() and float(contrib[filled].max()) > 0.5):
+    if (missing_share > 1.0 or est_share > 1.0 or (filled.any() and float(contrib[filled].max()) > 0.5)
+            or (est_ok.any() and float(est_contrib.max()) > 0.5) or unest_lots >= UNEST_LOTS_PARTIAL):
         src = "partial"
     return round(value, 2), coverage, src
 
 
-def _last_closes(before: str, limit_days: int = 90) -> dict[str, tuple[float, int]]:
-    """各檔在 before 之前最後一筆收盤 (日曆天 ≤ limit_days) → {code: (close, age_trading_days 約)}。"""
+def _last_closes(before: str, limit_days: int = LAST_PX_DAYS) -> dict[str, tuple[float, int, float | None]]:
+    """各檔在 before 之前最後一筆收盤 (日曆天 ≤ limit_days) → {code: (close, age_trading_days 約, 當時張數)}；age > FFILL_MAX_AGE 的只供估市值。"""
     since = (dt.date.fromisoformat(before) - dt.timedelta(days=limit_days)).isoformat()
     with store.conn() as c:
         _ensure(c)
-        rows = c.execute("SELECT code, close, MAX(date) FROM margin_stock_daily WHERE date<? AND date>=? AND close IS NOT NULL GROUP BY code",
+        rows = c.execute("SELECT code, close, m_today, MAX(date) FROM margin_stock_daily WHERE date<? AND date>=? AND close IS NOT NULL GROUP BY code",
                          (before, since)).fetchall()
     out = {}
     b = dt.date.fromisoformat(before)
-    for code, cl, d in rows:
+    for code, cl, lt, d in rows:
         age = (b - dt.date.fromisoformat(d)).days * 5 // 7
-        out[code] = (cl, age)
+        out[code] = (cl, age, lt)
     return out
 
 
-def _day_metrics(date: str, rows: list[dict], closes: dict | None, mkt: dict | None, margin_amt: float | None = None) -> dict:
-    """當日面板 → 擴散 / 互抵 / ETF 占比 (+ 有收盤且知金額時的自算維持率) + 全市場流量 → daily_metrics。"""
+def _next_closes(after: str, limit_days: int = LAST_PX_DAYS) -> dict[str, tuple[float, float | None]]:
+    """各檔在 after 之後第一筆收盤 (日曆天 ≤ limit_days) → {code: (close, 當時張數)}；只供無價檔估市值 (停牌 → 復牌 / 冷啟動由新往舊補時用)。"""
+    until = (dt.date.fromisoformat(after) + dt.timedelta(days=limit_days)).isoformat()
+    with store.conn() as c:
+        _ensure(c)
+        rows = c.execute("SELECT code, close, m_today, MIN(date) FROM margin_stock_daily WHERE date>? AND date<=? AND close IS NOT NULL GROUP BY code",
+                         (after, until)).fetchall()
+    return {code: (cl, lt) for code, cl, lt, _d in rows}
+
+
+def _maint_metrics(v, cov, src) -> dict:
+    return {"maint_twse": v, "maint_cov": cov if src == "twse" else -abs(cov or 0)}      # 負值 = partial (daily_metrics 只存數值)
+
+
+def _day_metrics(date: str, rows: list[dict], closes: dict | None, mkt: dict | None, margin_amt: float | None = None, *, maint: bool = True) -> dict:
+    """當日面板 → 擴散 / 互抵 / ETF 占比 (+ maint=True 且有收盤、知金額時的自算維持率) + 全市場流量 → daily_metrics。
+    回補由新往舊補收盤時 (run_closes) 傳 maint=False：更早日子尚無收盤、ffill 無效，維持率交給 build 的 _recompute_maint 升冪統一算。"""
     df = pd.DataFrame(rows)
     cs = cross_section(df, closes)
     metrics = {METRIC_KEYS[k]: float(v) for k, v in cs.items() if v is not None and k in METRIC_KEYS}
     amt = margin_amt if margin_amt is not None else (mkt or {}).get("margin_amt")
-    if closes and amt:
+    if maint and closes and amt:
         try:
-            v, cov, src = maint_direct(df, closes, amt, _last_closes(date))
+            v, cov, src = maint_direct(df, closes, amt, _last_closes(date), _next_closes(date))
             if v is not None:
-                metrics["maint_twse"] = v
-                metrics["maint_cov"] = cov if src == "twse" else -abs(cov or 0)   # 負值 = partial (daily_metrics 只存數值)
+                metrics.update(_maint_metrics(v, cov, src))
         except Exception as e:  # noqa: BLE001
             log.debug("maint %s: %s", date, e)
     metrics.update(_flow_metrics(mkt))
@@ -676,8 +755,19 @@ def _norm_tpex(res) -> tuple[dict | None, str]:
     return {"margin_lots": lots, "margin_amt": amt, "short_lots": sh}, "ok"
 
 
+def _tpex_have(date: str) -> bool:
+    """daily_metrics 已有該日上櫃合計 (原始快取入庫後即刪，不能再靠快取判斷「已抓過」)。"""
+    try:
+        with store.conn() as c:
+            return c.execute("SELECT 1 FROM daily_metrics WHERE date=? AND key=? LIMIT 1", (date, METRIC_KEYS["tpex_margin_lots"])).fetchone() is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _tpex_day(date: str) -> str:
-    """回 status：ok / notyet / closed / fail。"""
+    """回 status：ok / notyet / closed / fail。已在 daily_metrics 的日子直接回 ok (不重抓)。"""
+    if _tpex_have(date):
+        return "ok"
     try:
         res = _fetch_tpex(_ymd(date))
     except Exception as e:  # noqa: BLE001
@@ -694,11 +784,29 @@ def _tpex_day(date: str) -> str:
             _mark_nodata(date, "tpex")
         return status if status in ("notyet", "closed") else "closed"
     store.upsert_metrics(date, {METRIC_KEYS["tpex_" + k]: float(v) for k, v in m.items() if v is not None})
+    _drop_raw_cache(date, tpex=True, twse=False)
     return "ok"
 
 
+def _drop_raw_cache(date: str, *, twse: bool = True, tpex: bool = False) -> None:
+    """個股列已入 SQLite → 刪整份原始快取 (TWSE ALL ≈420 KB/日、TPEx ≈343 KB/日)；MS / close_all 很小保留。
+    否則 Actions cache (key 含 run_id、每次 fast 都整包上傳) 回補 450 日 ≈ +360 MB、補到 2004 ≈ +3.7 GB。"""
+    ymd = _ymd(date)
+    try:
+        if twse:
+            cache_delete(RAW_CACHE_KEYS[0].format(ymd=ymd))
+        if tpex:
+            cache_delete(RAW_CACHE_KEYS[1].format(ymd=ymd))
+    except Exception as e:  # noqa: BLE001
+        log.debug("drop raw cache %s: %s", date, e)
+
+
 # ------------------------------------------------------------------ 回補 (每日 ≤3 請求；先補最近缺日再往回；NoData 寫 margin_nodata；可重入)
-def backfill(max_days: int = 40, direction: str = "forward_then_back", *, today: str | None = None, panel_from: str | None = None) -> dict:
+def backfill(max_days: int = 40, direction: str = "forward_then_back", *, today: str | None = None, panel_from: str | None = None,
+             max_seconds: float | None = None) -> dict:
+    """缺日回補。預算：max_days (請求日數) 與 max_seconds (秒；到時停止、剩下的回 pending 由下次續補，rep.timeout=True)。
+    順序：最近缺日 (由新往舊) → 種子日補收盤 → 更早缺日 (由新往舊) → 上櫃合計補齊；面板為空 (冷啟動) 時全部缺日視為 back，第一個抓的是最新日。
+    TWSE ALL NoData 於資料日 ≥ today − NODATA_GRACE_DAYS → 尚未公布 (不寫 margin_nodata)；更早 → 寫 margin_nodata。"""
     t0 = time.time()
     rep = {"done": 0, "pending": 0, "pending_closes": 0, "from": None, "to": None, "seconds": 0.0, "nodata": 0, "closes": 0, "tpex": 0, "failed": 0}
     today = today or dt.datetime.now(config.TZ).date().isoformat()
@@ -712,25 +820,32 @@ def backfill(max_days: int = 40, direction: str = "forward_then_back", *, today:
     nod = _nodata("twse_all")
     missing = [d for d in cal if d not in have and d not in nod]
     last_have = max(have) if have else None
-    fwd = sorted(d for d in missing if last_have is None or d > last_have)
-    back = sorted((d for d in missing if last_have is not None and d < last_have), reverse=True)
+    fwd = sorted(d for d in missing if last_have is not None and d > last_have)
+    back = sorted((d for d in missing if last_have is None or d < last_have), reverse=True)     # 冷啟動：全部缺日由新往舊
+    grace = (dt.date.fromisoformat(today) - dt.timedelta(days=NODATA_GRACE_DAYS)).isoformat()
     nod_close = _nodata("twse_close")
     need_close = [d for d in _panel_dates_without_close() if d >= MAINT_FROM and d not in nod_close]
     budget = int(max_days or 0)
     done = set()
 
+    def out_of_time() -> bool:
+        if max_seconds is not None and time.time() - t0 >= float(max_seconds):
+            rep["timeout"] = True
+            return True
+        return False
+
     def run_days(days: list[str]) -> bool:
         """缺日：ALL + MI_INDEX + TPEx (每日 ≤3 請求)。回 False = 暫時失敗中斷 (下次重入)。"""
         nonlocal budget
         for d in days:
-            if budget <= 0:
+            if budget <= 0 or out_of_time():
                 return True
             try:
                 res = _fetch_margin_all(_ymd(d))
             except Exception as e:  # noqa: BLE001
                 budget -= 1
                 if _is(e, "NoData"):
-                    if d >= today:                 # 當日 (TWSE 約 21:00 才公布) 的 NoData = 尚未公布，不寫 margin_nodata，下次再試 (仍計 pending)
+                    if d >= grace:                 # 當日 / 前一日 (TWSE 約 21:00 才公布、cron 可能延遲跨午夜) 的 NoData = 尚未公布，不寫 margin_nodata，下次再試 (仍計 pending)
                         rep["notyet"] = rep.get("notyet", 0) + 1; _sleep()
                         continue
                     _mark_nodata(d, "twse_all"); rep["nodata"] += 1; done.add(d); _sleep()
@@ -752,6 +867,7 @@ def backfill(max_days: int = 40, direction: str = "forward_then_back", *, today:
                     else:
                         log.warning("closes_all %s: %s", date, e)
             _panel_upsert(date, rows, closes)
+            _drop_raw_cache(date)
             try:
                 _day_metrics(date, rows, closes, mkt)
             except Exception as e:  # noqa: BLE001
@@ -764,10 +880,11 @@ def backfill(max_days: int = 40, direction: str = "forward_then_back", *, today:
         return True
 
     def run_closes() -> bool:
-        """種子匯入的日子沒有收盤 → 補 MI_INDEX (最近的先)，順手自算該日維持率 / 互抵占比。"""
+        """種子匯入的日子沒有收盤 → 補 MI_INDEX (最近的先) 與互抵占比；維持率不在此算 (由新往舊補時更早日子尚無收盤、ffill 無效)，
+        交給 build 的 _recompute_maint 升冪統一算 (coverage<100 的日子也會重算)。"""
         nonlocal budget
         for d in need_close:
-            if budget <= 0:
+            if budget <= 0 or out_of_time():
                 return True
             budget -= 1
             try:
@@ -783,7 +900,7 @@ def backfill(max_days: int = 40, direction: str = "forward_then_back", *, today:
             try:
                 pan = load_panel(since=d, cols=["date", "code", "m_today", "m_prev", "m_limit", "note", "offset", "vol_lots"])
                 pan = pan[pan["date"] == d]
-                _day_metrics(d, pan.to_dict("records"), closes, None, _hist_amt(d))
+                _day_metrics(d, pan.to_dict("records"), closes, None, _hist_amt(d), maint=False)
             except Exception as e:  # noqa: BLE001
                 log.debug("closes metrics %s: %s", d, e)
             _sleep()
@@ -802,7 +919,7 @@ def backfill(max_days: int = 40, direction: str = "forward_then_back", *, today:
         todo = [d for d in sorted(set(_panel_dates()), reverse=True) if d >= TPEX_FROM and d < today and d not in have_t and d not in nod_t]
         rep["pending_tpex"] = len(todo)
         for d in todo:
-            if budget <= 0:
+            if budget <= 0 or out_of_time():
                 return
             budget -= 1
             st = _tpex_day(d)
@@ -814,7 +931,7 @@ def backfill(max_days: int = 40, direction: str = "forward_then_back", *, today:
                 rep["failed"] += 1; rep.setdefault("error", f"tpex {d}")
                 return
 
-    # 順序：最近缺日 (forward) → 種子日補收盤 (近 2 年，維持率 / 股價欄要用) → 更早的缺日 (back；MARGIN_PANEL_FROM 往前拉時才有) → 上櫃合計補齊
+    # 順序：最近缺日 (forward) → 種子日補收盤 (近 2 年，維持率 / 股價欄要用) → 更早的缺日 (back；冷啟動或 MARGIN_PANEL_FROM 往前拉時) → 上櫃合計補齊
     first, second = (fwd, back) if direction == "forward_then_back" else (back, fwd)
     ok = run_days(first)
     if ok:
@@ -841,35 +958,68 @@ def _hist_amt(date: str) -> float | None:
 
 
 def _recompute_maint(hist: pd.DataFrame, max_days: int = 600) -> int:
-    """面板有收盤但 daily_metrics 尚無 maint_twse 的日子 → 自算 (用 hist 的 margin_amt)。回補寫入日數。"""
+    """面板有收盤的日子中，daily_metrics 尚無 maint_twse 或 maint_cov ≠ 100 (partial / 有無價檔) 的 → 升冪重算 (用 hist 的 margin_amt)。
+    升冪且面板整段載入一次：缺價檔的最後收盤 (≤ FFILL_MAX_AGE 補價、更舊只估市值) 與之後第一筆收盤皆由同一份面板 ffill / bfill 取得，
+    冷啟動 (由新往舊回補) 補到更早收盤後自動修正；回寫入日數。只看最近 max_days 日。"""
     if hist is None or hist.empty or "margin_amt" not in hist:
         return 0
     amt = dict(zip(hist["date"].astype(str).str[:10], hist["margin_amt"]))
+    full: set[str] = set()
     try:
-        got = store.load_metrics(["maint_twse"])
-        have = set(got["date"].astype(str).str[:10]) if not got.empty and "maint_twse" in got else set()
+        got = store.load_metrics(["maint_twse", "maint_cov"])
+        if not got.empty and "maint_twse" in got:
+            cov = pd.to_numeric(got["maint_cov"], errors="coerce") if "maint_cov" in got else pd.Series(np.nan, index=got.index)
+            ok = got["maint_twse"].notna() & (cov == 100)
+            full = set(got.loc[ok, "date"].astype(str).str[:10])
     except Exception:  # noqa: BLE001
-        have = set()
+        full = set()
     with store.conn() as c:
         _ensure(c)
         dates = [r[0] for r in c.execute("SELECT date FROM margin_stock_daily GROUP BY date HAVING SUM(close IS NOT NULL)>0 ORDER BY date DESC").fetchall()]
-    todo = sorted(d for d in dates if d not in have and amt.get(d) is not None and amt.get(d) == amt.get(d))[-max_days:]
+    todo = sorted(d for d in dates if d not in full and amt.get(d) is not None and amt.get(d) == amt.get(d))[-max_days:]
     if not todo:
         return 0
-    pan = load_panel(since=min(todo), cols=["date", "code", "m_today", "close"])
+    since = (dt.date.fromisoformat(min(todo)) - dt.timedelta(days=LAST_PX_DAYS)).isoformat()
+    pan = load_panel(since=since, cols=["date", "code", "m_today", "close"])
+    if pan.empty:
+        return 0
+    pan["code"] = pan["code"].astype(str)
+    pan["close"] = pd.to_numeric(pan["close"], errors="coerce")
+    pan["m_today"] = pd.to_numeric(pan["m_today"], errors="coerce")
+    pan = pan.drop_duplicates(["date", "code"], keep="last")
+    close = pan.pivot(index="date", columns="code", values="close").sort_index()          # pivot (非 pivot_table)：全期無收盤的檔也要保留為欄 (其張數算缺價)
+    lots = pan.pivot(index="date", columns="code", values="m_today").reindex_like(close)
+    dates_all = list(close.index)
+    pos = pd.Series(np.arange(len(dates_all)), index=close.index)
+    has = close.notna()
+    idx_mat = pd.DataFrame(np.where(has.to_numpy(), pos.to_numpy()[:, None], np.nan), index=close.index, columns=close.columns)
+    last_idx = idx_mat.ffill().shift(1)                      # 之前最後一筆有收盤的列位置
+    next_idx = idx_mat.bfill().shift(-1)                     # 之後第一筆
+    close_np, lots_np = close.to_numpy(float), lots.to_numpy(float)
+    codes = np.array(close.columns, dtype=str)
     n = 0
     for d in todo:
-        day = pan[pan["date"] == d]
-        if day.empty:
+        if d not in pos.index:
             continue
-        closes = {str(r.code): (r.close, None) for r in day.itertuples() if r.close is not None and r.close == r.close}
+        i = int(pos[d])
+        li, ni = last_idx.iloc[i].to_numpy(float), next_idx.iloc[i].to_numpy(float)
+        day_lots = lots_np[i]
+        row = np.isfinite(day_lots) & (day_lots > 0)
+        closes = {c: (close_np[i, j], None) for j, c in enumerate(codes) if row[j] and np.isfinite(close_np[i, j])}
+        last_px, next_px = {}, {}
+        for j in np.flatnonzero(row & ~np.isfinite(close_np[i])):
+            if np.isfinite(li[j]):
+                k = int(li[j]); last_px[codes[j]] = (close_np[k, j], i - k, lots_np[k, j])
+            if np.isfinite(ni[j]):
+                k = int(ni[j]); next_px[codes[j]] = (close_np[k, j], lots_np[k, j])
+        day = pd.DataFrame({"code": codes[row], "m_today": day_lots[row]})
         try:
-            v, cov, src = maint_direct(day, closes, amt[d], _last_closes(d))
+            v, cov, src = maint_direct(day, closes, amt[d], last_px, next_px)
         except Exception as e:  # noqa: BLE001
             log.debug("recompute maint %s: %s", d, e)
             continue
         if v is not None:
-            store.upsert_metrics(d, {"maint_twse": v, "maint_cov": cov if src == "twse" else -abs(cov or 0)})
+            store.upsert_metrics(d, _maint_metrics(v, cov, src))
             n += 1
     return n
 
@@ -1061,8 +1211,9 @@ def market_history(prev: dict | None = None) -> pd.DataFrame:
     df["amt_fixed"] = False
     _fix_amt_anomaly(df, alt)
     df = df.dropna(subset=["margin_amt"]).reset_index(drop=True)
-    try:   # Tier-1 持久化到 daily_metrics (餘額 / 大盤收盤)，離線時可重建
-        cols = [c for c in ("margin_amt", "margin_lots", "short_lots", "close", "amount") if c in df]
+    try:   # Tier-1 持久化到 daily_metrics (餘額 / 大盤收盤 / 流量 2001~)，離線時可重建 (FinMind 失敗時 turnover_hot 的 p95 門檻與統計才不會隨來源可用性漂移)
+        cols = [c for c in ("margin_amt", "margin_lots", "short_lots", "close", "amount", "buy_lots", "sell_lots", "repay_lots", "buy_amt", "sell_amt",
+                            "repay_amt", "short_buy", "short_sell", "short_repay") if c in df]
         if cols and not fm.empty:
             sub = df[["date"] + cols].rename(columns={c: METRIC_KEYS[c] for c in cols})
             store.upsert_frame(sub, [METRIC_KEYS[c] for c in cols])
@@ -1169,7 +1320,11 @@ def _derive(hist: pd.DataFrame, scored: pd.DataFrame | None) -> pd.DataFrame:
     m = h["maint_twse"].astype(float)
     h["maint"] = m
     h["maint_chg5"] = m.diff(5)
-    h["maint_pct2004"] = m.expanding(min_periods=120).rank(pct=True) * 100
+    # 「2004 年來」百分位只在覆蓋期起點 ≤ MAINT_FULL_FROM 時輸出 (否則 120 日就會輸出名為 2004 的百分位)；pct_hist 為可用期間的 expanding 百分位 (附 maint_from)
+    h["maint_pct_hist"] = m.expanding(min_periods=120).rank(pct=True) * 100
+    maint_from = str(h.loc[m.notna(), "date"].iloc[0]) if m.notna().any() else None
+    h["maint_pct2004"] = h["maint_pct_hist"] if (maint_from is not None and maint_from <= MAINT_FULL_FROM) else np.nan
+    h.attrs["maint_from"] = maint_from
     h["lt150_days250"] = (m < 150).astype(float).where(m.notna()).rolling(250, min_periods=1).sum()
     return h
 
@@ -1255,7 +1410,9 @@ def market_view(hist: pd.DataFrame, scored: pd.DataFrame | None = None) -> tuple
                                                                  ("offset_vol_share", "offset_vol_share"), ("etf_lots_share", "etf_lots_share"))},
         "maint": {"value": maint_v, "src": maint_src, "date": maint_date, "real": real_v, "real_date": real_date, "coverage": abs(cov) if cov is not None else None,
                   "check": check, "d130": _r(mv - 130, 1) if mv is not None else None, "d150": _r(mv - 150, 1) if mv is not None else None,
-                  "chg5": _r(L["maint_chg5"], 1), "pct2004": _r(L["maint_pct2004"], 0), "lt150_days250": _r(L["lt150_days250"], 0), "label": "risk_descriptive"},
+                  "chg5": _r(L["maint_chg5"], 1), "pct2004": _r(L["maint_pct2004"], 0), "pct_hist": _r(L["maint_pct_hist"], 0),
+                  "since": str(mt_rows["date"].iloc[0]) if len(mt_rows) else None, "days": int(len(mt_rows)),
+                  "lt150_days250": _r(L["lt150_days250"], 0), "label": "risk_descriptive"},
         "short": {"lots": _r(L["short_lots"], 0), "pct5": _r(L["s_pct5"]), "pct20": _r(L["s_pct20"]), "streak": int(L["s_streak"]), "ratio": _r(L["short_ratio"]),
                   "ratio_pct250": _r(L["sr_pct250"], 0), "ratio_chg5": _r(L["sr_chg5"])},
         "tpex": {"date": str(tpL["date"]) if tpL is not None else None, "amt": _r(tpL["tpex_margin_amt"], 1) if tpL is not None else None,
@@ -1277,22 +1434,34 @@ def market_view(hist: pd.DataFrame, scored: pd.DataFrame | None = None) -> tuple
 
 
 # ------------------------------------------------------------------ 事件 (§2.4：D+1 起算、k=10 配對 + ret20 卡尺、episode / 年 cluster bootstrap)
+def _quantile_insufficient(h: pd.DataFrame) -> set[str]:
+    """全歷史分位門檻的事件 (ext_inc / ext_dec 用 chg1、turnover_hot 用 turnover_ratio) 樣本 < MIN_QUANTILE_DAYS → 不輸出 (門檻會隨來源可用性漂移)。"""
+    out = set()
+    if int(h["chg1"].notna().sum()) < MIN_QUANTILE_DAYS:
+        out |= {"ext_inc", "ext_dec"}
+    if int(h["turnover_ratio"].notna().sum()) < MIN_QUANTILE_DAYS:
+        out.add("turnover_hot")
+    return out
+
+
 def _event_masks(h: pd.DataFrame) -> dict[str, pd.Series]:
     chg1 = h["chg1"]
     hi, lo = chg1.quantile(0.95), chg1.quantile(0.05)
     tr = h["turnover_ratio"]
-    tr95 = tr.quantile(0.95) if tr.notna().sum() >= 100 else np.nan
+    tr95 = tr.quantile(0.95) if tr.notna().any() else np.nan
     m = h["maint"]
+    no = pd.Series(False, index=h.index)
+    bad = _quantile_insufficient(h)
     return {
         "streak_up7": h["streak"] >= 7,
         "streak_dn7": h["streak"] <= -7,
         "wipeout": (h["pct20"] < -4) & (h["ret20"] < -3),
         "chase": h["div20"] > 5,
         "knife": (h["pct20"] > 2) & (h["ret20"] < -2),
-        "ext_inc": chg1 >= hi, "ext_dec": chg1 <= lo,
+        "ext_inc": (chg1 >= hi) if "ext_inc" not in bad else no, "ext_dec": (chg1 <= lo) if "ext_dec" not in bad else no,
         "hi250": h["hi250"].astype(bool), "lo250": h["lo250"].astype(bool),
         "maint_lt150": m < 150,
-        "turnover_hot": tr >= tr95 if tr95 == tr95 else pd.Series(False, index=h.index),
+        "turnover_hot": (tr >= tr95) if (tr95 == tr95 and "turnover_hot" not in bad) else no,
         "deleverage_fast": (h["pct5"] < -3) & (m.diff(5) <= -8),
     }
 
@@ -1361,7 +1530,7 @@ def _match_study(h: pd.DataFrame, mask: pd.Series, eid: str) -> dict:
            "since_days": int(n_all - 1 - ev_all[-1]) if len(ev_all) else None}
     for k in (5, 10, 20):
         out[f"fwd{k}"] = out[f"win{k}"] = out[f"excess{k}"] = None
-    out.update(ci_ep=None, ci_year=None, years_pos=0, years_n=0, smd_ret20=None, n_matched=0, d0_excess10=None)
+    out.update(ci_ep=None, ci_year=None, years_pos=0, years_n=0, smd_ret20=None, n_matched=0, d0_excess10=None, sub2010=None)
     ev_idx, ep, ctrl, keep = _controls(h, mask)
     if len(ev_idx) == 0:
         return out
@@ -1369,6 +1538,11 @@ def _match_study(h: pd.DataFrame, mask: pd.Series, eid: str) -> dict:
     for k in (5, 10, 20):
         fe = fwd[k][ev_idx]
         out[f"fwd{k}"], out[f"win{k}"] = round(float(np.nanmean(fe)), 3), round(float((fe > 0).mean() * 100), 1)
+    sub = ev_idx[years[ev_idx] >= 2010]                       # 2010~ 子樣本 (無條件平均；文案引用同物件數字、不硬編碼研究值)
+    if len(sub):
+        f10 = fwd[10][sub]
+        out["sub2010"] = {"from": "2010-01-01", "n": int(len(sub)), "fwd10": round(float(np.nanmean(f10)), 3), "win10": round(float((f10 > 0).mean() * 100), 1),
+                          "fwd5": round(float(np.nanmean(fwd[5][sub])), 3), "fwd20": round(float(np.nanmean(fwd[20][sub])), 3)}
     if not len(keep):
         return out
     ev_m, ep_m, yr_m = ev_idx[keep], ep[keep], years[ev_idx[keep]]
@@ -1395,31 +1569,47 @@ def _match_study(h: pd.DataFrame, mask: pd.Series, eid: str) -> dict:
     return out
 
 
+def _ci_txt(ci) -> str:
+    return f"[{ci[0]:+.2f}, {ci[1]:+.2f}]" if isinstance(ci, (list, tuple)) and len(ci) == 2 and all(x is not None for x in ci) else "CI n/a"
+
+
 def _event_text(eid: str, L: pd.Series, ev: dict) -> str:
-    g = lambda c, fmt="{:+.1f}": _f(L.get(c), fmt)  # noqa: E731
-    if eid == "streak_up7":
-        s = f"融資連增 {int(L.get('streak') or 0)} 日 (≥7)：歷史 (2003~) 事件後 5 日較對照 +0.4~0.5 個百分點，但純價格連漲安慰劑更大 → 描述"
-    elif eid == "streak_dn7":
-        s = f"融資連減 {abs(int(L.get('streak') or 0))} 日 (≥7)"
-    elif eid == "wipeout":
-        s = (f"融資 20 日 {g('pct20')}%、指數 {g('ret20')}% 第 {int(L.get('quad_days') or 0)} 日：歷史事件後 10 日平均 +1.4%；"
-             "以跌幅較小的下跌日為對照後差異不穩定且可能更小；2015 年後第一日為負 → 描述")
-    elif eid == "chase":
-        s = f"融資 20 日增幅高於指數 {g('div20')} 個百分點 (>5)"
-    elif eid == "knife":
-        s = f"指數跌融資增 (資增價跌) 第 {int(L.get('quad_days') or 0)} 日"
-    elif eid in ("ext_inc", "ext_dec"):
-        s = f"單日融資 {g('chg1', '{:+.0f}')} 億，為 2001 年來第 {_f(ev.get('chg1_pct'), '{:.0f}')} 百分位"
-    elif eid == "hi250":
-        s = "融資餘額創 250 日新高"
-    elif eid == "lo250":
-        s = "融資餘額創 250 日新低"
-    elif eid == "maint_lt150":
-        s = f"維持率 {g('maint', '{:.1f}')}% 低於 150 (2004 年來 {ev.get('n_total') or 0} 日、占 {_f(ev.get('share'), '{:.1f}')}%)"
-    elif eid == "turnover_hot":
-        s = f"日周轉 {g('turnover_ratio', '{:.1f}')}% 為 2001 年來第 {_f(ev.get('turnover_pct'), '{:.0f}')} 百分位"
+    """事件文案。active=False → 只給定義句 (不帶今日數值，由 App 依 active / since_days 呈現)；insufficient → 定義句 + 樣本不足。
+    active=True → 今日數值 + 同物件計算值 (樣本內 fwd / 配對超額 / 2010~ 子樣本)，不硬編碼研究數字 (研究證據只在 evidence.note / placebo)。"""
+    y = ev.get("since_year") or str(HISTORY_FROM)[:4]
+    base = EVENT_DEFS_TEXT.get(eid, eid).format(y=y)
+    if ev.get("insufficient"):
+        return f"{base} (樣本不足，分位門檻需 ≥{MIN_QUANTILE_DAYS} 日)"
+    if not ev.get("active"):
+        s = f"{base} (目前未成立)"
     else:
-        s = f"5 日融資 {g('pct5')}%、維持率 5 日 {g('maint_chg5')} 個百分點"
+        g = lambda c, fmt="{:+.1f}": _f(L.get(c), fmt)  # noqa: E731
+        if eid == "streak_up7":
+            s = (f"融資連增 {int(L.get('streak') or 0)} 日 (≥7)：樣本內事件後 5 日較對照 {_f(ev.get('excess5'), '{:+.2f}')} 個百分點 "
+                 f"(n={ev.get('n') or 0}，10 日 {_f(ev.get('excess10'), '{:+.2f}')} {_ci_txt(ev.get('ci_ep'))}) → 描述")
+        elif eid == "streak_dn7":
+            s = f"融資連減 {abs(int(L.get('streak') or 0))} 日 (≥7)"
+        elif eid == "wipeout":
+            sub = ev.get("sub2010") or {}
+            s = (f"融資 20 日 {g('pct20')}%、指數 {g('ret20')}% 第 {int(L.get('quad_days') or 0)} 日：樣本內事件後 10 日平均 {_f(ev.get('fwd10'), '{:+.2f}')}% "
+                 f"(n={ev.get('n') or 0})" + (f"、2010~ 子樣本 {_f(sub.get('fwd10'), '{:+.2f}')}% / 勝率 {_f(sub.get('win10'), '{:.0f}')}% (n={sub.get('n')})" if sub else "")
+                 + f"；配對超額 {_f(ev.get('excess10'), '{:+.2f}')} {_ci_txt(ev.get('ci_ep'))} → 描述")
+        elif eid == "chase":
+            s = f"融資 20 日增幅高於指數 {g('div20')} 個百分點 (>5)"
+        elif eid == "knife":
+            s = f"指數跌融資增 (資增價跌) 第 {int(L.get('quad_days') or 0)} 日"
+        elif eid in ("ext_inc", "ext_dec"):
+            s = f"單日融資 {g('chg1', '{:+.0f}')} 億，為 {y} 年來第 {_f(ev.get('chg1_pct'), '{:.0f}')} 百分位"
+        elif eid == "hi250":
+            s = "融資餘額創 250 日新高"
+        elif eid == "lo250":
+            s = "融資餘額創 250 日新低"
+        elif eid == "maint_lt150":
+            s = f"維持率 {g('maint', '{:.1f}')}% 低於 150 ({ev.get('share_since') or '覆蓋期'} {ev.get('n_total') or 0} 日、占 {_f(ev.get('share'), '{:.1f}')}%)"
+        elif eid == "turnover_hot":
+            s = f"日周轉 {g('turnover_ratio', '{:.1f}')}% 為 {y} 年來第 {_f(ev.get('turnover_pct'), '{:.0f}')} 百分位"
+        else:
+            s = f"5 日融資 {g('pct5')}%、維持率 5 日 {g('maint_chg5')} 個百分點"
     if ev.get("smd_ret20") is not None and abs(ev["smd_ret20"]) > 0.3:
         s += "；對照組跌幅仍小於事件日，超額為上界"
     return s
@@ -1432,16 +1622,23 @@ def events(h: pd.DataFrame, validated: list[str] | None = None) -> dict:
     if h is None or h.empty:
         return out
     masks = _event_masks(h)
+    insufficient = _quantile_insufficient(h)
     L = h.iloc[-1]
+    m_ok = h["maint"].notna()
+    maint_from = str(h.loc[m_ok, "date"].iloc[0])[:10] if m_ok.any() else None
+    share_since = ("2004 年來" if maint_from is not None and maint_from <= MAINT_FULL_FROM else (f"{maint_from} 以來" if maint_from else None))
     extras = {"chg1_pct": float((h["chg1"] <= L["chg1"]).mean() * 100) if pd.notna(L["chg1"]) else None,
               "turnover_pct": float((h["turnover_ratio"].dropna() <= L["turnover_ratio"]).mean() * 100) if pd.notna(L["turnover_ratio"]) else None,
-              "share": float(masks["maint_lt150"].sum() / max(int(h["maint"].notna().sum()), 1) * 100)}
+              "share": float(masks["maint_lt150"].sum() / max(int(m_ok.sum()), 1) * 100), "since_year": str(h["date"].iloc[0])[:4]}
     for eid, (lab, grade, evid) in EVENT_DEFS.items():
         st = _match_study(h, masks[eid], eid)
         st["active"] = bool(masks[eid].fillna(False).iloc[-1])
+        st["insufficient"] = eid in insufficient
         st["label"] = "predictive" if eid in validated else lab
         st["evidence"] = {"grade": grade, "d0_excess10": st.pop("d0_excess10", None), "placebo": evid.get("placebo"), "note": evid.get("note"),
                           "tests_total": TESTS_TOTAL["module_events"], "matching": f"k={MATCH_K}, ret20 卡尺 ±{CALIPER_RET20:g} pt, 年差 ≤{YEAR_DIFF}, D+1 起算"}
+        if eid == "maint_lt150":
+            st["share"], st["share_since"], st["hist_from"] = _r(extras["share"], 2), share_since, maint_from
         ev = {**st, **extras}
         st["text"] = _event_text(eid, L, ev)
         out["events"][eid] = st
@@ -1540,7 +1737,7 @@ def stock_features(df_code: pd.DataFrame, closes=None, exdiv_events=None) -> pd.
     n = len(d)
     cols = ["date", "code", "lots", "lots_adj", "chg1", "chg5", "chg20", "pct5", "pct20", "util", "buy", "sell", "repay", "turnover5", "buy_vol_share",
             "repay_share", "offset_share5", "close", "ret5", "ret20", "quad20", "quad20_days", "div20", "short_lots", "short_ratio", "short_chg5",
-            "short_util", "bal_pos250", "bal_vs_ma60", "cost_fifo", "pnl_fifo", "maint_est", "pressure_score", "streak", "identity_err", "halted",
+            "short_util", "bal_pos250", "bal_vs_ma60", "cost_fifo", "pnl_fifo", "maint_est", "pressure_score", "pressure_partial", "streak", "identity_err", "halted",
             "short_halted", "alloc", "recovering", "burn_in", "kind", "f", "limit"]
     if n == 0:
         return pd.DataFrame(columns=cols)
@@ -1589,7 +1786,7 @@ def stock_features(df_code: pd.DataFrame, closes=None, exdiv_events=None) -> pd.
     out["util"] = util
     out["buy"], out["sell"], out["repay"] = buy, sell, repay
     vol = d["vol_lots"].to_numpy(float)
-    out["turnover5"] = _safe_div(pd.Series(buy + exits).rolling(5, min_periods=1).sum().to_numpy(), lots_adj) * 100
+    out["turnover5"] = _safe_div(pd.Series(buy + sell).rolling(5, min_periods=1).sum().to_numpy(), lots_adj) * 100      # §2.2 (buy+sell)/lots，不含現償 (同市場級 turnover_ratio)
     out["buy_vol_share"] = _safe_div(buy, vol) * 100
     out["repay_share"] = _safe_div(repay, exits) * 100
     v5 = pd.Series(vol).rolling(5, min_periods=1).sum().to_numpy()
@@ -1644,11 +1841,18 @@ def stock_features(df_code: pd.DataFrame, closes=None, exdiv_events=None) -> pd.
     out["cost_fifo"] = cost
     out["pnl_fifo"] = (close / cost - 1) * 100
     out["maint_est"] = close / (cost * MARGIN_RATIO) * 100
+    # 融資壓力分數：35% 使用率 + 35% 估計浮虧 + 15% 5 日融資減幅 + 15% 5 日跌幅。兩個 35% 分項 (util / pnl_fifo) 缺 (停資、burn-in、無收盤) → null，
+    # 不以 0 代入充當完整分數；15% 分項 (pct5 / ret5) 缺 → 以 0 代入並標 pressure_partial
+    pnl = out["pnl_fifo"].to_numpy(float)
+    p5, r5 = out["pct5"].to_numpy(float), out["ret5"].to_numpy(float)
     u = np.clip(np.nan_to_num(util, nan=0.0), 0, 100) / 100
-    loss = np.clip(-np.nan_to_num(out["pnl_fifo"].to_numpy(float), nan=0.0), 0, 30) / 30
-    dec = np.clip(-np.nan_to_num(out["pct5"].to_numpy(float), nan=0.0), 0, 15) / 15
-    drop = np.clip(-np.nan_to_num(out["ret5"].to_numpy(float), nan=0.0), 0, 15) / 15
-    out["pressure_score"] = 35 * u + 35 * loss + 15 * dec + 15 * drop
+    loss = np.clip(-np.nan_to_num(pnl, nan=0.0), 0, 30) / 30
+    dec = np.clip(-np.nan_to_num(p5, nan=0.0), 0, 15) / 15
+    drop = np.clip(-np.nan_to_num(r5, nan=0.0), 0, 15) / 15
+    score = 35 * u + 35 * loss + 15 * dec + 15 * drop
+    score[~(np.isfinite(util) & np.isfinite(pnl))] = np.nan
+    out["pressure_score"] = score
+    out["pressure_partial"] = np.isfinite(score) & ~(np.isfinite(p5) & np.isfinite(r5))
     out["streak"] = streak(out["chg1"]).to_numpy()
     return out[cols]
 
@@ -1740,7 +1944,7 @@ def stocks(panel: pd.DataFrame, ids: list[str], closes_hist: dict | None = None,
                     "bal_pos250": _r(L["bal_pos250"], 0), "streak": int(L["streak"]),
                     "quad": {"id": QUADS.index(quad) if quad in QUADS else 4, "text": quad, "days": int(L["quad20_days"])},
                     "cost_fifo": _r(L["cost_fifo"], 2), "pnl_fifo": _r(L["pnl_fifo"], 1), "maint_est": _r(L["maint_est"], 0),
-                    "pressure_score": _r(L["pressure_score"], 0), "flags": _flags_at(F, len(F) - 1), "restated": _restated_obj(F),
+                    "pressure_score": _r(L["pressure_score"], 0), "pressure_partial": bool(L["pressure_partial"]), "flags": _flags_at(F, len(F) - 1), "restated": _restated_obj(F),
                     "mode": {"id": quad, "text": mode_txt, "label": "descriptive"}, "cols": DAILY_COLS, "daily": daily, "n_days": int(len(F))}
     return out
 
@@ -1756,7 +1960,7 @@ def _rank_text(board: str, r: dict) -> str:
         s = f"{nm} 融資使用率 {_fp(r.get('util'), '{:.0f}')} (餘額 {_f(r.get('lots'), '{:,.0f}')} / 限額 {_f(r.get('limit'), '{:,.0f}')} 張)"
     elif board == "pressure":
         s = (f"{nm} 融資壓力分數 {_f(r.get('v'), '{:.0f}')}：使用率 {_fp(r.get('util'), '{:.0f}')}、估計維持率約 {_fp(r.get('maint_est'), '{:.0f}')}、"
-             f"5 日融資 {_fp(r.get('pct5'))}")
+             f"5 日融資 {_fp(r.get('pct5'))}" + (" (5 日分項缺，以 0 計)" if r.get("pressure_partial") else ""))
     elif board == "div20":
         s = f"{nm} 20 日融資 {_fp(r.get('pct20'))} 而股價 {_fp(r.get('ret20'))} (背離 {_f(r.get('v'))} 個百分點)"
     elif board == "offset":
@@ -1768,10 +1972,15 @@ def _rank_text(board: str, r: dict) -> str:
     return s
 
 
+RANK_THRESHOLDS = {"lots_min": 500, "chg5_abs_min": 100, "util_min": 60, "short_ratio_min": 20,
+                   "pressure_lots_min": 500}      # 偏離 SPEC §2.3 (「pressure_score 前 15」未設張數門檻)：壓力榜同樣要求 lots ≥500，避免數十張的檔混入；輸出於 ranking.thresholds
+
+
 def ranking(panel_last60: pd.DataFrame, closes: dict | None = None, snapshots: list | None = None, save: bool = True) -> dict:
-    """七榜 ×15 + ETF 小榜；days_on / cum_on 由 snapshots (None → store.load_snapshots('margin_rank'))；stats 以同日等權宇宙為基準。"""
+    """七榜 ×15 + ETF 小榜；days_on / cum_on 由 snapshots (None → store.load_snapshots('margin_rank'))；stats 以同日等權宇宙為基準。
+    門檻見 RANK_THRESHOLDS (輸出 ranking.thresholds)；壓力榜只列 pressure_score 非 null (util 與 pnl_fifo 皆有) 的檔。"""
     boards = ["inc5", "dec5", "etf_inc5", "etf_dec5", "util", "pressure", "div20", "offset", "short"]
-    out: dict = {"date": "", "n_days": 0, "stats": {}, "label": {"util": "risk_descriptive", "pressure": "risk_descriptive"}}
+    out: dict = {"date": "", "n_days": 0, "stats": {}, "label": {"util": "risk_descriptive", "pressure": "risk_descriptive"}, "thresholds": dict(RANK_THRESHOLDS)}
     for b in boards:
         out[b] = []
     if panel_last60 is None or panel_last60.empty:
@@ -1799,17 +2008,19 @@ def ranking(panel_last60: pd.DataFrame, closes: dict | None = None, snapshots: l
     F = F[F["date"] == date].reset_index(drop=True)
     out["date"] = date
     etf = F["code"].map(_is_etf)
-    big = F["lots"] >= 500
+    T = RANK_THRESHOLDS
+    big = F["lots"] >= T["lots_min"]
+    mv5 = (F["chg5"].abs() >= T["chg5_abs_min"]) & F["pct5"].notna()
     sel = {
-        "inc5": F[~etf & big & (F["chg5"].abs() >= 100) & F["pct5"].notna()].sort_values("pct5", ascending=False),
-        "dec5": F[~etf & big & (F["chg5"].abs() >= 100) & F["pct5"].notna()].sort_values("pct5", ascending=True),
-        "etf_inc5": F[etf & big & (F["chg5"].abs() >= 100) & F["pct5"].notna()].sort_values("pct5", ascending=False),
-        "etf_dec5": F[etf & big & (F["chg5"].abs() >= 100) & F["pct5"].notna()].sort_values("pct5", ascending=True),
-        "util": F[F["util"] >= 60].sort_values("util", ascending=False),
-        "pressure": F[F["pressure_score"].notna() & big].sort_values("pressure_score", ascending=False),
+        "inc5": F[~etf & big & mv5].sort_values("pct5", ascending=False),
+        "dec5": F[~etf & big & mv5].sort_values("pct5", ascending=True),
+        "etf_inc5": F[etf & big & mv5].sort_values("pct5", ascending=False),
+        "etf_dec5": F[etf & big & mv5].sort_values("pct5", ascending=True),
+        "util": F[F["util"] >= T["util_min"]].sort_values("util", ascending=False),
+        "pressure": F[F["pressure_score"].notna() & (F["lots"] >= T["pressure_lots_min"])].sort_values("pressure_score", ascending=False),
         "div20": F[big & F["div20"].notna()].assign(_a=lambda x: x["div20"].abs()).sort_values("_a", ascending=False),
         "offset": F[F["offset_share5"] > 0].sort_values("offset_share5", ascending=False),
-        "short": F[(F["short_ratio"] >= 20) & big].sort_values("short_ratio", ascending=False),
+        "short": F[(F["short_ratio"] >= T["short_ratio_min"]) & big].sort_values("short_ratio", ascending=False),
     }
     vcol = {"inc5": "pct5", "dec5": "pct5", "etf_inc5": "pct5", "etf_dec5": "pct5", "util": "util", "pressure": "pressure_score", "div20": "div20",
             "offset": "offset_share5", "short": "short_ratio"}
@@ -1820,7 +2031,7 @@ def ranking(panel_last60: pd.DataFrame, closes: dict | None = None, snapshots: l
             if b == "util":
                 row["limit"] = _r(r["limit"], 0)
             if b == "pressure":
-                row["maint_est"] = _r(r["maint_est"], 0)
+                row["maint_est"], row["pressure_partial"] = _r(r["maint_est"], 0), bool(r.get("pressure_partial", False))
             if b == "div20":
                 row["pct20"], row["ret20"] = _r(r["pct20"], 1), _r(r["ret20"], 1)
             if b == "short":
@@ -2015,6 +2226,7 @@ def build(scored: pd.DataFrame | None = None, watch_res: dict | None = None, poo
                 except Exception as e:  # noqa: BLE001
                     log.debug("closes_all %s: %s", date, e)
                 _panel_upsert(date, rows, closes)
+                _drop_raw_cache(date)
                 _day_metrics(date, rows, closes, mkt)
                 src["twse_all"] = {"date": date, "ok": True}
             except Exception as e:  # noqa: BLE001

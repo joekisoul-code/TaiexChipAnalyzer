@@ -7,6 +7,7 @@ publish.yml 含 MARGIN_BACKFILL_DAYS 與 margin_backfill 且排程 cron 未動�
 from __future__ import annotations
 
 import contextlib
+import inspect
 import json
 import os
 import re
@@ -61,9 +62,21 @@ def test_export_static_mount_in_try_after_pools_before_pit_ledger():
     assert '"exdiv": ev' in blk and "_mg_exd" in blk and "_mg_exd = None" in EXPORT and "_mg_exd = _exd" in EXPORT
     assert 'os.getenv("MARGIN_BACKFILL_DAYS", "40")' in blk and "if not args.fast:" in blk, "完整模式才 backfill，天數由 MARGIN_BACKFILL_DAYS 控制"
     assert "import os" in EXPORT.splitlines()[:30] or "\nimport os\n" in EXPORT
+    # backfill 用獨立 try/except：回補失敗 (sqlite 鎖 / 非預期格式) 不影響 build 與帶回
+    i_bf = blk.index("margin_dyn.backfill(")
+    pre = blk[:i_bf].rstrip().splitlines()
+    assert pre[-1].strip().startswith("print(") and pre[-2].strip().startswith("try:"), pre[-3:]
+    assert 'print("  margin backfill failed:", e)' in blk and blk.index("margin backfill failed") < blk.index("margin_dyn.build(")
     # 建置失敗 → 帶回上次發布 (比照 desk _guard_degraded)，且 train 模式寫種子
     assert "carrying over last published" in blk and '"carried": True' in blk
     assert "margin_dyn.write_seed(_mg)" in blk and "if args.train:" in blk
+    # fast 且 published() 兩來源皆失敗：先讀帶回名單剛復原的本機 DATA/margin.json 當 prev；仍為空 → 不 dump (不把帶回檔蓋成空骨架)
+    i_loc = blk.index('if not _mg_prev and (DATA / "margin.json").exists():')
+    assert blk.index('_mg_prev = json.loads((DATA / "margin.json").read_text', i_loc) < i_bf, "本機 prev 讀取在 backfill / build 之前"
+    assert "if args.fast and not _mg_prev:" in blk and blk.index("if args.fast and not _mg_prev:") < blk.index('dump("margin"')
+    i_guard = blk.index("if args.fast and not _mg_prev:")
+    i_else = blk.index("else:", i_guard)
+    assert 'dump("margin"' not in blk[i_guard:i_else] and 'dump("margin"' in blk[i_else:], "dump 只在 else 分支 (有 prev 或非 fast)"
 
 
 def test_export_static_fast_carry_list_has_margin():
@@ -83,7 +96,10 @@ def test_publish_yml_env_mode_and_cron_unchanged():
     # workflow_dispatch 說明與 export case 都有 margin_backfill，case 先回補 450 日再照常 full export
     case = re.search(r'^\s+margin_backfill\)\s+(.*?);;\s*$', YML, re.M)
     assert case, "export step 缺 margin_backfill case"
-    assert "margin_dyn.backfill(450)" in case.group(1) and "tools/export_static.py" in case.group(1) and "--fast" not in case.group(1)
+    # 回補以時間預算 (max_seconds) 守門：到時回 pending 由下次 dispatch 續補，避免 job 90 分超時被取消時 Actions cache 不存檔、整批回補丟失
+    m_bf = re.search(r"margin_dyn\.backfill\(450,\s*max_seconds=([0-9*]+)\)", case.group(1))
+    assert m_bf and eval(m_bf.group(1)) <= 45 * 60 and "tools/export_static.py" in case.group(1) and "--fast" not in case.group(1), case.group(1)  # noqa: S307
+    assert "max_seconds" in inspect.signature(M.backfill).parameters
     desc = re.search(r'description:\s*"(fast \| full \| train[^"]*)"', YML)
     assert desc and "margin_backfill" in desc.group(1)
     # train 模式 git add 種子 (檔案不存在時不炸)
@@ -120,7 +136,7 @@ def test_write_seed_roundtrip_and_guards():
 
 
 def test_backfill_today_nodata_is_not_marked():
-    """當日 (尚未公布) 的 NoData 不寫 margin_nodata；歷史日的 NoData 才寫。"""
+    """當日與前一日 (NODATA_GRACE_DAYS=1，同 tpex；21:45 cron 延遲跨午夜時 TWSE 可能尚未公布) 的 NoData 不寫 margin_nodata；更早的 NoData 才寫。"""
     from chip import store
     with store.conn() as c:
         for t in ("margin_stock_daily", "margin_nodata", "daily_metrics"):
@@ -131,12 +147,21 @@ def test_backfill_today_nodata_is_not_marked():
     def fake_all(ymd):
         calls.append(ymd)
         raise M.NoData("沒有符合")
+    assert M.NODATA_GRACE_DAYS == 1
     with patched(M, "_fetch_margin_all", fake_all), patched(M, "_fetch_closes", lambda y: {}), patched(M, "_fetch_tpex", lambda y: None), \
             patched(M, "_fetch_holidays", lambda y: set()):
         rep = M.backfill(5, today="2026-10-14", panel_from="2026-10-12")
     nod = M._nodata("twse_all")
-    assert "2026-10-14" not in nod and "2026-10-13" in nod and "2026-10-12" in nod, nod
-    assert rep["notyet"] == 1 and rep["nodata"] == 2 and rep["pending"] == 1, rep
+    assert "2026-10-14" not in nod and "2026-10-13" not in nod and "2026-10-12" in nod, nod
+    assert rep["notyet"] == 2 and rep["nodata"] == 1 and rep["pending"] == 2, rep
+    assert [M._iso(x) for x in calls] == ["2026-10-14", "2026-10-13", "2026-10-12"], "冷啟動由新往舊"
+    # 週六 00:xx 跑 (cron 延遲跨午夜)：週五 (today−1) 的 NoData 不寫
+    calls.clear()
+    with patched(M, "_fetch_margin_all", fake_all), patched(M, "_fetch_closes", lambda y: {}), patched(M, "_fetch_tpex", lambda y: None), \
+            patched(M, "_fetch_holidays", lambda y: set()):
+        rep = M.backfill(5, today="2026-10-03", panel_from="2026-10-01")
+    nod = M._nodata("twse_all")
+    assert "2026-10-02" not in nod and "2026-10-01" in nod and rep["notyet"] == 1 and rep["nodata"] == 1, (nod, rep)
 
 
 def test_backfill_order_closes_before_back_and_tpex_catchup():

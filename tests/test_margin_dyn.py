@@ -8,6 +8,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -154,6 +155,13 @@ def test_market_history_merge_keep_first_shrink_and_anomaly():
     assert df["margin_amt"].notna().all(), "必要欄無洞"
     assert float(df.loc[df["date"] == bad_date, "maint_twse"].iloc[0]) == 170.0, "SQLite 的維持率併入"
     assert float(df.loc[df["date"] == "2026-10-13", "repay_lots"].iloc[0]) == 9453096.0 + 436812.0 - 452990.0 - 9430485.0, "TWSE MS 以恆等式推現償"
+    # Tier-1 流量 (buy/sell/repay 2001~) 也持久化到 daily_metrics (FinMind 失敗時 turnover_hot 門檻與統計才不會漂移)
+    got = store.load_metrics(["mg_buy_lots", "mg_sell_lots", "mg_repay_lots", "mg_amt"])
+    n_flow = int(got["mg_buy_lots"].notna().sum())
+    assert n_flow == int(fm["buy_lots"].notna().sum()) + 1 and n_flow > 400 and int(got["mg_amt"].notna().sum()) >= len(fm), (n_flow, len(fm))   # +1 = TWSE MS 當日
+    with offline():
+        df_off = M.market_history({})
+    assert int(df_off["buy_lots"].notna().sum()) == n_flow, "離線時流量可由 SQLite 重建"
     # prev 壞 JSON 容錯：整個 prev 不是 dict 也不會炸
     with offline():
         df2 = M.market_history({"history": [{"x": 1}], "flows": None})
@@ -180,6 +188,27 @@ def test_maint_direct():
     v4, cov4, src4 = M.maint_direct(big, cl, amt2, {"199": (100.0, 5)})
     assert src4 == "twse" and abs(v4 - 160.0) < 0.01
     assert M.maint_direct(day, closes, None, {}) == (None, None, None)
+    # 無價且估不出價 (無 last_px / next_px) 的高價檔：張數占比 0.5% 但市值占 13% → 不能再以 src='twse' 發布 (審查 P1：6949 停牌 1.4 pt 偏差)
+    hi = pd.DataFrame({"code": [str(i) for i in range(200)], "m_today": [1000.0] * 200})
+    cl = {str(i): (100.0, 1) for i in range(199)}
+    amt3 = (199 * 1000 * 100 * 1000 + 1000 * 3000 * 1000) / 1e8 / 1.6
+    v5, cov5, src5 = M.maint_direct(hi, cl, amt3, {})
+    assert src5 == "partial" and v5 < 160 and cov5 <= 99.5, (v5, cov5, src5)
+    # 同一檔有「之後」的收盤 (停牌 → 復牌，面額變更張數 ×20、價格 ÷20)：以張數比還原估市值 → 貢獻 >0.5 pt → partial；估價 ≈ 3000
+    assert abs(M._est_px(1000.0, 150.0, 20000.0) - 3000.0) < 1e-9 and M._est_px(1000.0, 150.0, None) == 150.0 and M._est_px(1000.0, None, 1.0) is None
+    v6, cov6, src6 = M.maint_direct(hi, cl, amt3, {}, {"199": (150.0, 20000.0)})
+    assert src6 == "partial" and abs(v6 - v5) < 1e-9 and cov6 < cov5, (v6, cov6, src6)        # 估計值只用來判 partial / coverage，不進分子
+    # 較舊的 last_px (age >60) 同樣只用來估市值
+    v7, _, src7 = M.maint_direct(hi, cl, amt3, {"199": (3000.0, 200, 1000.0)})
+    assert src7 == "partial" and abs(v7 - v5) < 1e-9
+    # 無價、估不出價、張數合計 < UNEST_LOTS_PARTIAL (1,000 張) 且占比 <1% → 仍 twse
+    small = pd.DataFrame({"code": [str(i) for i in range(200)], "m_today": [1000.0] * 199 + [500.0]})
+    amt4 = 199 * 1000 * 100 * 1000 / 1e8 / 1.6
+    v8, cov8, src8 = M.maint_direct(small, cl, amt4, {})
+    assert src8 == "twse" and abs(v8 - 160.0) < 1e-6 and cov8 < 100.0, (v8, cov8, src8)
+    # 補價檔 (age ≤60) 帶 lots_then 三元組也可
+    v9, _, src9 = M.maint_direct(day, {"2330": (1000.0, 1), "0050": (200.0, 1)}, amt, {"2317": (100.0, 30, 2000.0)})
+    assert abs(v9 - 160.0) < 1e-6 and src9 == "partial"
     # check：自算與 real 同日差 >1.5 pt
     h = _hist(end="2026-10-13")
     h["maint_real"] = h["maint_twse"] + 2.0
@@ -236,6 +265,35 @@ def test_derived_by_hand():
     js = json.dumps(clean(view), ensure_ascii=False)
     assert "use_pct" not in js and "usage_total" not in js
     assert len(view["weekly"]) == 12 and all(set(w) == {"week", "chg", "days", "ret"} for w in view["weekly"])
+
+
+def test_maint_pct2004_gated_by_coverage():
+    """「2004 年來」百分位 / 文案只在自算維持率覆蓋期起點 ≤ 2004-06-30 時輸出；只有 2026 年資料 → pct2004 null、pct_hist 仍有、文案改「{maint_from} 以來」。"""
+    h = _hist(end="2026-10-13")                                  # maint 只有最後 480 列 (2024-11~)
+    view, d = M.market_view(h, None)
+    mf = str(h.loc[h["maint_twse"].notna(), "date"].iloc[0])
+    assert view["maint"]["pct2004"] is None and view["maint"]["pct_hist"] is not None and view["maint"]["since"] == mf
+    assert view["maint"]["days"] == int(h["maint_twse"].notna().sum())
+    assert d["maint_pct2004"].isna().all() and d["maint_pct_hist"].notna().sum() > 300
+    ev = M.events(d, [])
+    t = ev["events"]["maint_lt150"]
+    assert "2004 年來" not in t["text"] and t["share_since"] == f"{mf} 以來" and t["hist_from"] == mf and t["share"] is not None
+    # 使維持率 <150 成立 → active 文案用「{maint_from} 以來」
+    h2 = h.copy()
+    h2.loc[h2.index[-1], "maint_twse"] = 140.0
+    _, d2 = M.market_view(h2, None)
+    t2 = M.events(d2, [])["events"]["maint_lt150"]
+    assert t2["active"] and f"{mf} 以來" in t2["text"] and "140.0% 低於 150" in t2["text"] and "2004 年來" not in t2["text"]
+    # 覆蓋到 2004-02 → pct2004 輸出且文案「2004 年來」
+    h3 = h.copy()
+    rng = np.random.default_rng(1)
+    full = h3["date"] >= "2004-02-11"
+    h3.loc[full, "maint_twse"] = 165 + rng.normal(0, 8, int(full.sum()))
+    h3.loc[h3.index[-1], "maint_twse"] = 140.0
+    view3, d3 = M.market_view(h3, None)
+    assert view3["maint"]["pct2004"] is not None and view3["maint"]["since"] == "2004-02-11" and view3["maint"]["pct2004"] == view3["maint"]["pct_hist"]
+    t3 = M.events(d3, [])["events"]["maint_lt150"]
+    assert "2004 年來" in t3["text"] and t3["share_since"] == "2004 年來"
 
 
 # ------------------------------------------------------------------ (f) 事件
@@ -306,6 +364,53 @@ def test_events_matching_bootstrap_labels():
     p = Path(_TMP) / "v.json"
     p.write_text(json.dumps({"validated": [{"id": "wipeout", "evidence": "x"}, "streak_up7"]}), encoding="utf-8")
     assert M.validated_ids(p) == ["wipeout", "streak_up7"]
+
+
+def test_events_text_inactive_insufficient_no_hardcoded():
+    """未成立事件 text 只給定義句 (不帶今日數值、不與 L 矛盾)；成立事件引用同物件計算值，不硬編碼研究數字；分位門檻樣本不足 → insufficient / null。"""
+    h = _hist(end="2026-10-13")                                  # flows 只有最後 ~500 日 → turnover_hot 樣本不足；chg1 6,000+ 日 → ext_* 足夠
+    view, d = M.market_view(h, None)
+    ev = M.events(d, [])["events"]
+    for eid, v in ev.items():
+        assert "+1.4%" not in v["text"] and "+0.4~0.5" not in v["text"] and "2003~" not in v["text"], (eid, v["text"])
+        if not v["active"]:
+            assert "未成立" in v["text"] or v["insufficient"], (eid, v["text"])
+            assert not re.search(r"連[增減] -?\d+ 日", v["text"]) and "億，為" not in v["text"] and "% 低於 150" not in v["text"] \
+                and not re.search(r"第 \d+ 日", v["text"]), (eid, v["text"])
+    th = ev["turnover_hot"]
+    assert th["insufficient"] is True and th["n"] == 0 and th["fwd10"] is None and th["active"] is False and "樣本不足" in th["text"] and "2500" in th["text"]
+    assert ev["ext_inc"]["insufficient"] is False and ev["ext_inc"]["n"] > 0
+    assert M._quantile_insufficient(d) == {"turnover_hot"}
+    # 流量全歷史都有 → turnover_hot 不再 insufficient
+    h2 = h.copy()
+    rng = np.random.default_rng(4)
+    h2["buy_lots"], h2["sell_lots"], h2["repay_lots"] = 340000 + rng.normal(0, 30000, len(h2)), 330000 + rng.normal(0, 30000, len(h2)), 8000.0
+    _, d2 = M.market_view(h2, None)
+    assert M._quantile_insufficient(d2) == set()
+    th2 = M.events(d2, [])["events"]["turnover_hot"]
+    assert th2["insufficient"] is False and th2["n"] > 0 and "樣本不足" not in th2["text"]
+    # 成立事件：streak_up7 / wipeout 文案引用同物件 excess / fwd10 / sub2010
+    h3 = h.copy()
+    a = h3["margin_amt"].to_numpy().copy()
+    a[-8:] = a[-9] * (1 + 0.002 * np.arange(1, 9))             # 連增 8 日
+    h3["margin_amt"] = a
+    _, d3 = M.market_view(h3, None)
+    e3 = M.events(d3, [])["events"]
+    s7 = e3["streak_up7"]
+    st3 = int(d3.iloc[-1]["streak"])
+    assert st3 >= 8 and s7["active"] and f"融資連增 {st3} 日 (≥7)" in s7["text"] and f"{s7['excess5']:+.2f}" in s7["text"] and f"n={s7['n']}" in s7["text"]
+    h4 = h.copy()
+    c = h4["close"].to_numpy().copy(); a4 = h4["margin_amt"].to_numpy().copy()
+    c[-1] = c[-21] * 0.9; a4[-1] = a4[-21] * 0.9
+    h4["close"], h4["margin_amt"] = c, a4
+    _, d4 = M.market_view(h4, None)
+    e4 = M.events(d4, [])["events"]
+    w = e4["wipeout"]
+    assert w["active"] and f"{w['fwd10']:+.2f}%" in w["text"] and w["sub2010"] is not None and f"{w['sub2010']['fwd10']:+.2f}%" in w["text"] \
+        and f"n={w['sub2010']['n']}" in w["text"] and w["sub2010"]["from"] == "2010-01-01" and 0 < w["sub2010"]["n"] <= w["n"]
+    assert e4["knife"]["active"] is False and "第 " not in e4["knife"]["text"]
+    for v in list(e3.values()) + list(e4.values()):
+        assert not M.FORBIDDEN_RE.search(v["text"]), v["text"]
 
 
 # ------------------------------------------------------------------ (g) 個股
@@ -421,10 +526,20 @@ def test_stock_halted_recovering_base_fifo_pressure():
     loss = min(max(-L["pnl_fifo"], 0), 30) / 30
     dec = min(max(-L["pct5"], 0), 15) / 15
     drop = min(max(-L["ret5"], 0), 15) / 15
-    assert abs(L["pressure_score"] - (35 * u + 35 * loss + 15 * dec + 15 * drop)) < 1e-9
+    assert abs(L["pressure_score"] - (35 * u + 35 * loss + 15 * dec + 15 * drop)) < 1e-9 and not L["pressure_partial"]
     assert abs(L["maint_est"] - L["close"] / (L["cost_fifo"] * 0.6) * 100) < 1e-9
     assert abs(L["util"] - L["lots"] / 100000 * 100) < 1e-9
     assert abs(L["bal_pos250"] - (F0["lots_adj"].iloc[-251:-1] <= L["lots_adj"]).mean() * 100) < 1e-6
+    # pressure_score：35% 分項 (pnl_fifo burn-in / util 停資) 缺 → null，不以 0 代入充當完整分數；15% 分項 (pct5 / ret5) 缺 → 以 0 計並標 pressure_partial
+    assert F0["pressure_score"].iloc[:120].isna().all() and F0["pressure_score"].iloc[120:].notna().all()
+    assert np.isnan(F["pressure_score"].iloc[210]), "停資 (util null) → null"
+    assert F0["pressure_partial"].iloc[120:].sum() == 0
+    gp = g.copy()
+    gp.loc[gp.index[-1], "close"] = np.nan                      # 最後一列無收盤 → pnl NaN → null
+    assert np.isnan(M.stock_features(gp)["pressure_score"].iloc[-1])
+    Lq = F.iloc[240]                                              # 1101 停資恢復期 (230~269)：pct5 null → partial 且以 0 計；util / pnl 皆有 → 分數仍輸出
+    assert np.isnan(Lq["pct5"]) and bool(Lq["pressure_partial"]) and np.isfinite(Lq["pressure_score"]) and np.isfinite(Lq["pnl_fifo"])
+    assert abs(Lq["pressure_score"] - (35 * min(max(Lq["util"], 0), 100) / 100 + 35 * min(max(-Lq["pnl_fifo"], 0), 30) / 30 + 15 * min(max(-Lq["ret5"], 0), 15) / 15)) < 1e-9
     # stocks()：60 列切片、欄位、無收盤列不崩潰
     g2 = g.copy()
     g2.loc[g2.index[-3:], "close"] = np.nan
@@ -433,8 +548,26 @@ def test_stock_halted_recovering_base_fifo_pressure():
     r = out["2412"]
     assert r["cols"] == M.DAILY_COLS and len(r["daily"]) == 60 and all(len(x) == 9 for x in r["daily"])
     assert "no_close" in r["flags"] and r["ret20"] is None and r["mode"]["label"] == "descriptive" and r["quad"]["text"] in M.QUADS
-    assert r["cost_fifo"] is not None and r["pressure_score"] is not None and r["restated"] is None
+    assert r["cost_fifo"] is not None and r["pressure_score"] is None and r["pressure_partial"] is False and r["restated"] is None, "無收盤 → pnl 缺 → 壓力分數 null"
+    assert "融資壓力分數" not in r["mode"]["text"]
+    r1 = out["1101"]
+    assert r1["pressure_score"] is not None and "融資壓力分數" in r1["mode"]["text"]
     json.dumps(clean(out))
+
+
+def test_turnover5_excludes_repay():
+    """§2.2 個股 5 日周轉 = (buy+sell)/lots，不含現金償還 (與市場級 turnover_ratio 一致)。"""
+    dates = _dates("2025-01-01", "2025-01-14")
+    rows, lots = [], 10000.0
+    for d in dates:
+        buy, sell, rep = 100.0, 100.0, 50.0
+        rows.append({"date": d, "code": "1", "name": "x", "note": "", "m_buy": buy, "m_sell": sell, "m_repay": rep, "m_prev": lots, "m_today": lots + buy - sell - rep,
+                     "m_limit": 100000.0, "s_buy": 0, "s_sell": 0, "s_repay": 0, "s_prev": 0, "s_today": 0, "s_limit": 0, "offset": 0, "close": 100.0, "vol_lots": 1000.0})
+        lots = lots + buy - sell - rep
+    F = M.stock_features(pd.DataFrame(rows))
+    L = F.iloc[-1]
+    assert abs(L["turnover5"] - 5 * 200 / L["lots"] * 100) < 1e-9, L["turnover5"]
+    assert abs(L["repay_share"] - 50 / 150 * 100) < 1e-9
 
 
 # ------------------------------------------------------------------ (h) 排行
@@ -470,6 +603,10 @@ def test_ranking_thresholds_etf_snapshots_stats():
     assert rk["stats"]["universe"]["basis"].startswith("同日等權宇宙") and rk["stats"]["inc5"]["universe_ret5_eqw"] == rk["stats"]["universe"]["ret5_eqw"]
     assert all(len(rk[b]) <= 15 for b in ("inc5", "dec5", "etf_inc5", "etf_dec5", "util", "pressure", "div20", "offset", "short"))
     assert rk["label"]["util"] == "risk_descriptive" and rk["label"]["pressure"] == "risk_descriptive"
+    # 門檻輸出 (壓力榜 lots ≥500 為 SPEC §2.3 之外的門檻，於 thresholds 註明)；壓力榜只列 pressure_score 非 null 的檔 (3443 無收盤 → pnl 缺 → 不列)
+    assert rk["thresholds"] == M.RANK_THRESHOLDS and rk["thresholds"]["pressure_lots_min"] == 500 and rk["thresholds"]["lots_min"] == 500
+    assert "3443" not in codes("pressure") and "1111" not in codes("pressure") and all(r["v"] is not None and r["lots"] >= 500 for r in rk["pressure"])
+    assert all("pressure_partial" in r and "maint_est" in r for r in rk["pressure"]) and len(rk["pressure"]) >= 1
     # 沒有快照 → days_on = 1 (今日)
     rk2 = M.ranking(panel, None, snapshots=[], save=False)
     assert all(r["days_on"] == 1 and r["cum_on"] == 1 for r in rk2["inc5"])
@@ -615,10 +752,12 @@ def test_backfill_budget_skip_nodata_resume_order():
     def fake_tpex(ymd):
         calls["tpex"].append(ymd)
         raise M.NotYet("0 列")
+    dropped = []
     for d in cal[:10]:                      # 已有 10 日 (無收盤)
         if d not in hol:
             M._panel_upsert(d, rows_for(d), None)
-    with patched(M, "_fetch_margin_all", fake_all), patched(M, "_fetch_closes", fake_close), patched(M, "_fetch_tpex", fake_tpex), patched(M, "_fetch_holidays", lambda y: hol):
+    with patched(M, "_fetch_margin_all", fake_all), patched(M, "_fetch_closes", fake_close), patched(M, "_fetch_tpex", fake_tpex), patched(M, "_fetch_holidays", lambda y: hol), \
+            patched(M, "cache_delete", dropped.append):
         rep = M.backfill(5, today="2026-10-13", panel_from="2026-08-20")
         assert rep["done"] + rep["nodata"] == 5 and len(calls["all"]) == 5 and len(calls["all"]) + len(calls["close"]) + len(calls["tpex"]) <= 15
         assert all(M._iso(x) not in hol for x in calls["all"]) and not any(M._iso(x) < "2026-08-20" for x in calls["all"])
@@ -626,6 +765,9 @@ def test_backfill_budget_skip_nodata_resume_order():
         assert not any(M._iso(x) in set(cal[:10]) for x in calls["all"]), "已有日期跳過"
         first = sorted(M._iso(x) for x in calls["all"])
         assert first[0] > cal[9], "forward (最近缺日) 先於 back"
+        # 個股列入 SQLite 後即刪整份原始快取 (TWSE ALL；TPEx 這裡 NotYet 未入庫不刪)
+        assert sorted(dropped) == sorted(f"twse:MI_MARGN:ALL:{M._ymd(d)}" for d in M._panel_dates() if d > cal[9]), dropped
+        assert "timeout" not in rep
         rep2 = M.backfill(40, today="2026-10-13", panel_from="2026-08-20")
         assert rep2["pending"] == 0 and "2026-10-02" in M._nodata("twse_all") and "2026-10-02" not in have
         n_all = len(calls["all"])
@@ -647,10 +789,75 @@ def test_backfill_budget_skip_nodata_resume_order():
             assert r["failed"] == 1 and r["done"] == 2 and r["pending"] > 0
             r = M.backfill(40, today="2026-10-13", panel_from="2026-09-20")
             assert r["failed"] == 0 and r["pending"] == 0
+        # 冷啟動 (面板空)：全部缺日由新往舊，第一個抓的是最新日 (SPEC §3.2/§3.4 先補最近缺日再往回；雲端沒有本機 491 日快取)
+        _wipe_db()
+        calls["all"].clear()
+        r = M.backfill(3, today="2026-10-13", panel_from="2026-08-20")
+        got = [M._iso(x) for x in calls["all"]]
+        assert got == ["2026-10-13", "2026-10-12", "2026-10-08"] and r["done"] == 3 and r["pending"] > 0, got     # 10-09 休市
+        assert M._panel_dates() == ["2026-10-08", "2026-10-12", "2026-10-13"]
+        r = M.backfill(2, today="2026-10-13", panel_from="2026-08-20")
+        assert [M._iso(x) for x in calls["all"]][3:] == ["2026-10-07", "2026-10-06"], "續補仍由新往舊"
+        # 時間預算：max_seconds 到 → 停止、剩下回 pending、rep.timeout=True (下次續補)
+        calls["all"].clear()
+        r = M.backfill(40, today="2026-10-13", panel_from="2026-08-20", max_seconds=0)
+        assert r.get("timeout") is True and r["done"] == 0 and calls["all"] == [] and r["pending"] > 0, r
+        r = M.backfill(40, today="2026-10-13", panel_from="2026-08-20", max_seconds=600)
+        assert "timeout" not in r and r["pending"] == 0
     # 日曆：trading_days 用 TWSE 休市表 + 週末
     with patched(M, "_fetch_holidays", lambda y: hol):
         td = M.trading_days("2026-09-25", "2026-10-12")
     assert "2026-09-28" not in td and "2026-10-09" not in td and "2026-09-26" not in td and "2026-10-12" in td
+    _wipe_db()
+
+
+def test_backfill_closes_no_maint_then_recompute_ffill_and_partial_redo():
+    """(l) run_closes 由新往舊補收盤時不算維持率 (ffill 無效)；build 的 _recompute_maint 升冪重算：兩檔其一在 D 無收盤但 D−1 有 → D 的 maint 等於以 D−1 價補算的值；
+    coverage<100 / partial 的日子會重算 (補到更早收盤後自動修正)；完全無價檔以之後的收盤估市值判 partial。"""
+    _wipe_db()
+    cal = _dates("2026-09-01", "2026-09-30")
+    hol = set()
+    px = {"2330": 1000.0, "2317": 100.0}
+    lots = {"2330": 1000.0, "2317": 2000.0}
+    D = cal[10]
+    for d in cal:
+        rows = [{"code": c, "name": c, "m_buy": 0, "m_sell": 0, "m_repay": 0, "m_prev": lots[c], "m_today": lots[c], "m_limit": 100000, "s_buy": 0, "s_sell": 0,
+                 "s_repay": 0, "s_prev": 0, "s_today": 0, "s_limit": 10, "offset": 0, "note": ""} for c in px]
+        M._panel_upsert(d, rows, None)                                   # 種子：無收盤
+    amt_yi = (1000 * 1000 * 1000 + 2000 * 100 * 1000) / 1e8 / 1.6          # 維持率 160%
+    for d in cal:
+        store.upsert_metrics(d, {"mg_amt": amt_yi})
+    closes_calls = []
+
+    def fake_close(ymd):
+        d = M._iso(ymd); closes_calls.append(d)
+        out = {c: (px[c], 10.0) for c in px}
+        if d == D:
+            out.pop("2317")                                              # D 日 2317 無成交 → 無收盤
+        return out
+    with patched(M, "_fetch_closes", fake_close), patched(M, "_fetch_margin_all", lambda y: (_ for _ in ()).throw(RuntimeError("no"))), \
+            patched(M, "_fetch_tpex", lambda y: None), patched(M, "_fetch_holidays", lambda y: hol):
+        rep = M.backfill(100, today=cal[-1], panel_from=cal[0])
+    assert rep["pending_closes"] == 0 and closes_calls[0] == cal[-1] and closes_calls[-1] == cal[0], "由新往舊補收盤"
+    got = store.load_metrics(["maint_twse", "maint_cov"])
+    assert got.empty or got["maint_twse"].notna().sum() == 0, "run_closes 不算維持率 (交給 _recompute_maint)"
+    hist = pd.DataFrame({"date": cal, "margin_amt": amt_yi})
+    n = M._recompute_maint(hist)
+    assert n == len(cal)
+    got = store.load_metrics(["maint_twse", "maint_cov"]).set_index("date")
+    assert abs(got.loc[D, "maint_twse"] - 160.0) < 1e-6, "D 日 2317 以 D−1 收盤補價"
+    assert got.loc[D, "maint_cov"] == -100.0, "補價檔貢獻 >0.5 pt → partial (負值)"
+    assert (got.drop(index=D)["maint_cov"] == 100.0).all() and (abs(got["maint_twse"] - 160.0) < 1e-6).all()
+    # 第二次：cov=100 的日子不重算、partial 的 D 會重算 (仍 partial → 值不變)
+    n2 = M._recompute_maint(hist)
+    assert n2 == 1
+    # 無價且無之前收盤 (面板第一天 2317 無收盤) → 用之後收盤估市值 → 貢獻大 → partial；值 = 只含 2330 的部分
+    with store.conn() as c:
+        c.execute("UPDATE margin_stock_daily SET close=NULL WHERE date=? AND code='2317'", (cal[0],))
+        c.execute("DELETE FROM daily_metrics WHERE date=? AND key IN ('maint_twse','maint_cov')", (cal[0],))
+    assert M._recompute_maint(hist) == 2                               # cal[0] (無 maint) + D (partial)
+    got = store.load_metrics(["maint_twse", "maint_cov"]).set_index("date")
+    assert got.loc[cal[0], "maint_cov"] < 0 and abs(got.loc[cal[0], "maint_twse"] - 160.0 * 1000 * 1000 / (1000 * 1000 + 2000 * 100)) < 0.01, got.loc[cal[0]]
     _wipe_db()
 
 

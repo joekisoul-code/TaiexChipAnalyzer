@@ -473,25 +473,39 @@ def main() -> None:
     try:
         from chip.analysis import margin_dyn
         _mg_prev = margin_dyn.published()
+        if not _mg_prev and (DATA / "margin.json").exists():      # Pages / raw 都暫時失敗 → 用帶回名單剛復原的本機檔當 prev (fast 才不會把它蓋成空殼)
+            try:
+                _mg_prev = json.loads((DATA / "margin.json").read_text(encoding="utf-8"))
+                if not isinstance(_mg_prev, dict):
+                    _mg_prev = {}
+            except Exception as e:  # noqa: BLE001
+                print("  margin local prev unreadable:", e); _mg_prev = {}
         if not args.fast:
-            print("  margin backfill:", margin_dyn.backfill(int(os.getenv("MARGIN_BACKFILL_DAYS", "40") or 0)))
+            try:      # 回補失敗 (sqlite 鎖 / 非預期格式) 不影響 build 與帶回
+                print("  margin backfill:", margin_dyn.backfill(int(os.getenv("MARGIN_BACKFILL_DAYS", "40") or 0)))
+            except Exception as e:  # noqa: BLE001
+                print("  margin backfill failed:", e)
         # watch_res：追蹤清單評估 ∪ 除息事件 ({sid: {"exdiv": exdiv.load_all 的 events}}，FIFO 成本在除息日扣現金股利)
         _mg_res = {sid: {**((res or {}).get(sid) or {}), "exdiv": ev} for sid, ev in (_mg_exd or {}).items() if isinstance(ev, dict)} or res
-        try:
-            _mg = margin_dyn.build(scored, _mg_res, pools=_pools, prev=_mg_prev, fast=args.fast)
-        except Exception as e:  # noqa: BLE001
-            if not _mg_prev:
-                raise
-            print("  margin build failed, carrying over last published:", e)
-            _mg = dict(_mg_prev)
-            _mg["meta"] = {**(_mg_prev.get("meta") or {}), "carried": True, "carried_parts": list(margin_dyn.PARTS), "mode": "fast" if args.fast else "full",
-                           "carry_reason": str(e)[:120]}
-        dump("margin", _mg)
-        _mgm, _mgk = _mg.get("meta") or {}, _mg.get("market") or {}
-        print(f"  margin: date {_mgk.get('date')} amt {_mgk.get('amt')} maint {((_mgk.get('maint') or {}).get('value'))} ({(_mgk.get('maint') or {}).get('src')})"
-              f" stocks {len(_mg.get('stocks') or {})} alerts {len(_mg.get('alerts') or [])} carried {_mgm.get('carried_parts') or _mgm.get('carried')}")
-        if args.train:
-            print("  margin seed:", margin_dyn.write_seed(_mg))
+        if args.fast and not _mg_prev:
+            # fast 不重算；沒有任何上次發布可沿用時不 dump 空骨架 (否則空殼會發布到 Pages，之後每次 fast 的 published() 再讀回它沿用到下一次 full)
+            print("  margin: fast 且無上次發布 (Pages / raw gh-pages / 本機皆無)，不寫 margin.json，等下一次 full")
+        else:
+            try:
+                _mg = margin_dyn.build(scored, _mg_res, pools=_pools, prev=_mg_prev, fast=args.fast)
+            except Exception as e:  # noqa: BLE001
+                if not _mg_prev:
+                    raise
+                print("  margin build failed, carrying over last published:", e)
+                _mg = dict(_mg_prev)
+                _mg["meta"] = {**(_mg_prev.get("meta") or {}), "carried": True, "carried_parts": list(margin_dyn.PARTS), "mode": "fast" if args.fast else "full",
+                               "carry_reason": str(e)[:120]}
+            dump("margin", _mg)
+            _mgm, _mgk = _mg.get("meta") or {}, _mg.get("market") or {}
+            print(f"  margin: date {_mgk.get('date')} amt {_mgk.get('amt')} maint {((_mgk.get('maint') or {}).get('value'))} ({(_mgk.get('maint') or {}).get('src')})"
+                  f" stocks {len(_mg.get('stocks') or {})} alerts {len(_mg.get('alerts') or [])} carried {_mgm.get('carried_parts') or _mgm.get('carried')}")
+            if args.train:
+                print("  margin seed:", margin_dyn.write_seed(_mg))
     except Exception as e:  # noqa: BLE001
         print("  margin failed:", e)
     # 時點帳本 (pr2 P5，2026-10-05)：force_orphan 讓 forecast.json 沒有歷史 → 每次完整發布追加一行「真的顯示過什麼」(叫牌/水準/verdict 桶/挖寶 A/A+)；

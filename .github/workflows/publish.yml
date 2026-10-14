@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "fast | full | train | margin_backfill (融資個股面板 / 維持率自算回補 450 日 ≈50 分，之後照常 full 發布；分批往回補到 2004-02) | research (挖寶研究，不發布) | research_intraday (小時模型資料來源研究 + 前一日隔夜跳空 prev_og 特徵驗證，不發布)"
+        description: "fast | full | train | margin_backfill (融資個股面板 / 維持率自算回補 ≤450 日、時間預算 40 分到時回 pending 由下次續補，之後照常 full 發布；分批往回補到 2004-02) | research (挖寶研究，不發布) | research_intraday (小時模型資料來源研究 + 前一日隔夜跳空 prev_og 特徵驗證，不發布)"
         default: "full"
 
 permissions:
@@ -95,7 +95,8 @@ jobs:
           case "${{ steps.mode.outputs.mode }}" in
             fast)  python tools/export_static.py --fast --no-wantgoo ;;
             train) python cli.py optimize && python cli.py global && python cli.py cross && python tools/export_static.py --train ;;
-            margin_backfill) python -c "from chip.analysis import margin_dyn; print(margin_dyn.backfill(450))" && python tools/export_static.py ;;
+            # margin_backfill：40 分時間預算 (到時回 pending 由下次 dispatch 續補) + full export (≈25 分) < job timeout 90 分；job 超時被取消時 Actions cache 不會存檔、整批回補丟失
+            margin_backfill) python -c "from chip.analysis import margin_dyn; print(margin_dyn.backfill(450, max_seconds=40*60))" && python tools/export_static.py ;;
             *)     python tools/export_static.py ;;
           esac
       - name: commit retrained models (train 模式：把 data/models 與小時模型盤中歷史 data/intraday_marks.json 推回 main，之後每次排程都用新模型)
