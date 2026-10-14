@@ -897,6 +897,43 @@ def test_radar_bt_periods_and_same_window():
     json.dumps(TL.RADAR_BT, ensure_ascii=False)
 
 
+def test_radar_bt_horizon_descriptive():
+    """L3-R1 (2026-10-14)：model.radar_bt.horizon 視野曲線 (5/10/15/21/30/42 日) 為描述性鍵、不進規則；數字與既有 21 日常數一致、3 位小數、CI 含點估計；
+    RADAR_BT 字面量鍵不重複 (dict 重複鍵不報錯、後者靜默覆蓋)、"horizon" 整個模組只指定一次。"""
+    import ast
+    hz = TL.RADAR_BT["horizon"]
+    assert hz["label"] == "descriptive" and hz["n_sets"] == 10 and hz["period"] == TL.RADAR_BT["period"] == "2022-01~2026-09" and hz["research_date"] == "2026-10-14"
+    assert hz["hs"] == [5, 10, 15, 21, 30, 42] and set(hz["tiers"]) == set(hz["reach"]) == set(hz["nested"]) == {"A+", "A-", "B+"}
+    a21 = hz["tiers"]["A+"]["21"]
+    assert a21["win"] == 0.813 and abs(a21["win"] - TL.RADAR_BT["A+"]["win21"]) < 0.002 and abs(a21["hit"] - TL.RADAR_TIER["A+"]["hit"]) < 0.002 and abs(a21["avg"] - TL.RADAR_TIER["A+"]["fin"]) < 0.05, a21
+    assert abs(hz["tiers"]["A-"]["21"]["win"] - TL.RADAR_TIER["A"]["win21"]) < 0.002 and abs(hz["tiers"]["B+"]["21"]["win"] - TL.RADAR_TIER["B+"]["win21"]) < 0.005, "A- = A 不含 A+ (同 RADAR_TIER 的 A)"
+    for g, cur in hz["tiers"].items():
+        assert [int(h) for h in cur] == hz["hs"], (g, list(cur))
+        for h, m in cur.items():
+            assert m["ci"][0] <= m["excess_pool"] <= m["ci"][1] and m["ci_taiex"][0] <= m["excess_taiex"] <= m["ci_taiex"][1], (g, h, m)
+            assert abs(m["avg"] - m["pool_avg"] - m["excess_pool"]) < 0.002 and abs(m["avg"] - m["taiex_avg"] - m["excess_taiex"]) < 0.002, (g, h, m)
+            assert all(round(v, 3) == v for v in (m["win"], m["hit"], m["avg"], m["excess_pool"], m["excess_taiex"], *m["ci"], *m["ci_taiex"])), (g, h, m)
+    assert hz["tiers"]["A-"]["21"]["ci"][1] < 0 < hz["gap"]["15"]["ci"][0] and hz["gap"]["21"]["ci"][0] > 0, "A− 21 日落後同日池；A+ − A− 15/21 日 CI 不含 0"
+    r = hz["reach"]["A+"]
+    assert (r["day_q"]["q25"], r["day_q"]["q50"], r["day_q"]["q75"]) == (2, 5, 11) and r["cum_by_h"]["21"] == 0.823 and r["cum_by_h"]["42"] == r["within42"] == 0.876, r
+    assert r["stop_cum_by_h"]["5"] == 0.17 and r["stop_cum_by_h"]["42"] == 0.257 and r["reached_by21_but_fin21_le0"] == 0.062 and hz["reach"]["A-"]["reached_by21_but_fin21_le0"] == 0.107
+    assert hz["nested"]["A+"]["h_star"] == 15 and hz["nested"]["A+"]["ex"]["ci"][0] < 0 < hz["nested"]["A+"]["ex"]["ci"][1] and hz["verdict"].startswith("固定 21 日維持不變")
+    # 原始碼：RADAR_BT 字面量鍵唯一；"horizon" 只在模組層指定一次、不在字面量裡 (path/fail/day0 在字面量先放 None 再填，是既有設計)
+    tree = ast.parse(Path(TL.__file__).read_text(encoding="utf-8"))
+    lits = [n.value for n in ast.walk(tree) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "RADAR_BT" for t in n.targets)]
+    assert len(lits) == 1 and isinstance(lits[0], ast.Dict)
+    keys = [k.value for k in lits[0].keys if isinstance(k, ast.Constant)]
+    assert len(keys) == len(lits[0].keys) == len(set(keys)), sorted(k for k in set(keys) if keys.count(k) > 1)
+    sub = []
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                for e in (t.elts if isinstance(t, ast.Tuple) else [t]):
+                    if isinstance(e, ast.Subscript) and isinstance(e.value, ast.Name) and e.value.id == "RADAR_BT" and isinstance(e.slice, ast.Constant):
+                        sub.append(e.slice.value)
+    assert sub.count("horizon") == 1 and "horizon" not in keys and len(sub) == len(set(sub)), sub
+
+
 def test_build_scans_today_before_backfill():
     """BE-6：GitHub 排程把第一次 full run 拖到午夜後 (D+1 00:59) 時，D 仍記成真實發布 (先掃 D 再回填、D 不進回填)；更早的缺日照常回填。"""
     D = D0                                       # 2026-09-01 (二)；現在 = 09-02 00:59
