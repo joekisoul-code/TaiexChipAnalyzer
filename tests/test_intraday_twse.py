@@ -131,6 +131,36 @@ I.backtest.load_long = lambda *a, **k: None
 I.finmind.tx_night_history = lambda *a, **k: pd.DataFrame()
 I.twse.intraday_marks = lambda *a, **k: TW
 I.yahoo.daily_marks = lambda *a, **k: YH
+
+# ---------------------------------------------------------------- 分開訓練研究：train_marks / score_feature (正式路徑預設不變)
+import inspect  # noqa: E402
+
+HT = I.build_history("twse", marks=TW, _ctx={"daily": daily, "night_map": {}})
+_seen, _orig_fit = [], M.fit_ensemble
+M.fit_ensemble = lambda X, y, p=None: (_seen.append(set(X["mark_idx"].astype(int))), _orig_fit(X, y, p))[1]
+o_mix = I._walk_forward_months(HT, "to_13:30", from_ym=I.WF_FROM, quarterly=True)
+seen_mix, _seen = list(_seen), []
+M.fit_ensemble = lambda X, y, p=None: (_seen.append(set(X["mark_idx"].astype(int))), _orig_fit(X, y, p))[1]
+o_sep = I._walk_forward_months(HT, "to_13:30", from_ym=I.WF_FROM, quarterly=True, train_marks=I.INTRA_MARKS)
+keyset = lambda o: set(zip(o["date"], o["mark"]))  # noqa: E731
+j_ms = o_mix.merge(o_sep, on=["date", "mark"], suffixes=("_mix", "_sep"))
+check("train_marks=INTRA_MARKS：每季只用 10:00~13:00 列訓練 (預設每季都含 pre 列)，輸出無 pre、盤中列與混訓版同日同時點可配對、預測不同",
+      len(seen_mix) == len(_seen) > 0 and all(0 in s for s in seen_mix)
+      and all(s == {I.MARK_IDX[m] for m in I.INTRA_MARKS} for s in _seen)
+      and "pre" not in set(o_sep["mark"]) and keyset(o_mix[o_mix["mark"] != "pre"]) == keyset(o_sep)
+      and len(j_ms) == len(o_sep) and not np.allclose(j_ms["pred_mix"], j_ms["pred_sep"]))
+_seen.clear()
+o_ro = I._walk_forward_months(HT, "to_13:30", from_ym=I.WF_FROM, quarterly=True, train_marks=I.INTRA_MARKS, score_feature="ret_open")
+j_ro = o_ro.merge(HT[["date", "mark", "ret_open"]], on=["date", "mark"])
+check("score_feature=ret_open 零參數基準：不呼叫學習器、列與分開訓練版完全相同、pred = 該列 ret_open、actual 相同",
+      not _seen and keyset(o_ro) == keyset(o_sep) and len(j_ro) == len(o_ro) and np.allclose(j_ro["pred"], j_ro["ret_open"])
+      and np.allclose(o_ro.merge(o_sep, on=["date", "mark"])["actual_x"], o_ro.merge(o_sep, on=["date", "mark"])["actual_y"]))
+M.fit_ensemble = _orig_fit
+sig = inspect.signature(I._walk_forward_months)
+check("正式路徑不變：INTRA_MARKS = MARKS 去 pre；新參數預設 None；預設輸出含全部 5 個 mark、pre 列數 = 測試日數、測試月份 ≥ 2018-01",
+      I.INTRA_MARKS == I.MARKS[1:] == ["10:00", "11:00", "12:00", "13:00"]
+      and all(sig.parameters[k].default is None for k in ("train_marks", "score_feature"))
+      and set(o_mix["mark"]) == set(I.MARKS) and int((o_mix["mark"] == "pre").sum()) == o_mix["date"].nunique() and o_mix["year"].min() >= "2018-01")
 saved = {}
 I.M.save = lambda name, b: saved.__setitem__(name, b)
 I.M.save_json = lambda name, o: saved.__setitem__(name + ".json", o)

@@ -10,6 +10,16 @@ GitHub Actions workflow_dispatch mode=research_intraday 執行，結果上傳 ar
 prev_og 實驗 (2026-10-14，結果鍵 "prev_og")：twse / early 基準 vs 加入前一交易日隔夜跳空 prev_og (+ 前一日開盤→13:30 prev_oc)
 (I.OG_FEATS / I.FEATURES_OG，正式 FEATURES 不變)，同一套 2018~ 逐季 walk-forward，對每個目標做配對 bootstrap ΔIC (日為單位)、
 逐年 IC 與正年數、命中/基準。採用門檻：ΔIC 95% CI 不含 0 且逐年 ≥ 2/3 為正，才把 prev_og 加進正式 FEATURES。
+
+separate_training 實驗 (2026-10-14，結果鍵 "separate_training")：盤中時間點與 pre 列分開訓練。本機研究 (numpy GBDT 代理、無 night_chg_pct)：
+正式混訓形式的 to_13:30 盤中 rank-IC .068，只用 10:00~13:00 盤中列訓練 .140 (+.072)，但零參數基準 ret_open (開盤→現價%，不訓練) .136，
+分開訓練對它只 +.004 (CI 含 0)。此處以正式 LightGBM、正式 FEATURES (含 night_chg_pct，FinMind 2023~) 在 twse 來源 2018~ 逐季下比較三組：
+  (a) mixed      — 正式混訓形式 (pre + 盤中列同一模型；= 上面 twse 基準列，共用資料)
+  (b) intra_only — 同 PARAMS / FEATURES，只用 INTRA_MARKS (10:00~13:00) 列訓練 (_walk_forward_months train_marks)
+  (c) ret_open   — 零參數：ret_open 值直接當預測分數 (_walk_forward_months score_feature)
+對每個有盤中列的目標 (11:00~13:30) 分 10:00/11:00/12:00/13:00 時點列 IC、(b)−(a) 與 (b)−(c) 的日配對 bootstrap ΔIC 95% CI、逐年正年數、命中/基準。
+採用門檻 (每格 目標@時點)：(b)−(a) CI 下界 > 0 且逐年 ≥ 2/3 為正，且 (b)−(c) CI 下界 > 0 → adopt_separate (值得改成分開訓練)；
+只過前者 → ret_open_only (用 ret_open 單變量即可，不值得改模型)；其他 → no_gain。
 """
 from __future__ import annotations
 
@@ -51,8 +61,23 @@ def yearly(oos: pd.DataFrame) -> dict:
     return {y: {m: round(ic(gg), 3) for m, gg in g.groupby("mark") if len(gg) >= 30} for y, g in o.groupby("y")}
 
 
+def _avg_rank(x: np.ndarray) -> np.ndarray:
+    """平均名次 (同 pandas rank(method='average'))。"""
+    u, inv, cnt = np.unique(x, return_inverse=True, return_counts=True)
+    start = np.cumsum(cnt) - cnt + 1
+    return (start + (cnt - 1) / 2.0)[inv]
+
+
+def _spearman(x: np.ndarray, y: np.ndarray) -> float:
+    rx, ry = _avg_rank(x), _avg_rank(y)
+    rx, ry = rx - rx.mean(), ry - ry.mean()
+    den = np.sqrt((rx * rx).sum() * (ry * ry).sum())
+    return float((rx * ry).sum() / den) if den > 0 else np.nan
+
+
 def paired(a: pd.DataFrame, b: pd.DataFrame, n_boot: int = 1000) -> dict:
-    """b − a 的 rank IC 差 (同日配對，日為單位 bootstrap)。"""
+    """b − a 的 rank IC 差 (同日配對，日為單位 bootstrap)。
+    2026-10-14：內層改 numpy (平均名次 + Pearson = pandas rank().corr())，抽樣序列與舊版相同 → 數字不變 (含同值名次)、約 2.5 倍快。"""
     out = {}
     for m in sorted(set(a["mark"]) & set(b["mark"])):
         if m == "pre":
@@ -61,10 +86,11 @@ def paired(a: pd.DataFrame, b: pd.DataFrame, n_boot: int = 1000) -> dict:
         if len(j) < 60:
             continue
         idx = np.arange(len(j))
+        A = j[["pred_a", "actual_a", "pred_b", "actual_b"]].to_numpy(dtype=float)
         d = []
         for _ in range(n_boot):
-            s = j.iloc[rng.choice(idx, len(idx))]
-            d.append(s.pred_b.rank().corr(s.actual_b.rank()) - s.pred_a.rank().corr(s.actual_a.rank()))
+            s = A[rng.choice(idx, len(idx))]
+            d.append(_spearman(s[:, 2], s[:, 3]) - _spearman(s[:, 0], s[:, 1]))
         d = np.array(d)
         out[m] = {"n": int(len(j)), "d_ic": round(float(d.mean()), 3), "ci95": [round(float(x), 3) for x in np.percentile(d, [2.5, 97.5])],
                   "p_gt0": round(float((d > 0).mean()), 3)}
@@ -90,6 +116,50 @@ def og_block(base: pd.DataFrame, variants: dict[str, pd.DataFrame]) -> dict:
     return out
 
 
+SEP_FEATURE = "ret_open"
+
+
+def sep_cell_verdict(d_mixed: dict, y_mixed: dict, d_ref: dict | None) -> dict:
+    """單格 (目標@時點) 判定：(b)−(a) CI 下界 > 0 且逐年 ≥ 2/3 為正 = 分開訓練贏混訓；(b)−(c) CI 下界 > 0 = 贏 ret_open 零參數。"""
+    beats_mixed = bool(d_mixed["ci95"][0] > 0 and y_mixed.get("years") and y_mixed["pos"] >= 2 / 3 * y_mixed["years"])
+    beats_ref = bool(d_ref and d_ref["ci95"][0] > 0)
+    return {"sep_beats_mixed": beats_mixed, "sep_beats_ret_open": beats_ref,
+            "verdict": "adopt_separate" if (beats_mixed and beats_ref) else "ret_open_only" if beats_mixed else "no_gain"}
+
+
+def sep_block(mixed: pd.DataFrame, sep: pd.DataFrame, ref: pd.DataFrame) -> dict:
+    """分開訓練實驗單一目標：(a) mixed 正式混訓、(b) sep 只用盤中列訓練、(c) ref 零參數 ret_open。
+    摘要 / 盤中 IC 平均、(b)−(a)、(b)−(c)、(c)−(a) 的配對 ΔIC 與逐年 ΔIC、每個時點的判定。"""
+    r3 = lambda v: round(v, 3) if v is not None else None  # noqa: E731
+    out = {"summary": {"mixed": summarize(mixed), "intra_only": summarize(sep), SEP_FEATURE: summarize(ref)},
+           "intra_ic": {"mixed": r3(I._intra_ic(mixed)), "intra_only": r3(I._intra_ic(sep)), SEP_FEATURE: r3(I._intra_ic(ref))},
+           "delta_vs_mixed": paired(mixed, sep), "yearly_vs_mixed": yearly_delta(mixed, sep),
+           "delta_vs_ret_open": paired(ref, sep), "yearly_vs_ret_open": yearly_delta(ref, sep),
+           "delta_ret_open_vs_mixed": paired(mixed, ref), "yearly_ret_open_vs_mixed": yearly_delta(mixed, ref)}
+    out["cells"] = {m: sep_cell_verdict(dv, out["yearly_vs_mixed"].get(m, {}), out["delta_vs_ret_open"].get(m))
+                    for m, dv in out["delta_vs_mixed"].items()}
+    return out
+
+
+SEP_TEXT = {"adopt_separate": "分開訓練同時顯著贏混訓與 ret_open 零參數 → 值得把盤中模型改成只用盤中列訓練 (pre 另訓)，並重做校準表",
+            "ret_open_only": "分開訓練贏混訓，但贏不了 ret_open 單變量 → 盤中段用 ret_open 單變量即可，不值得改模型",
+            "no_gain": "分開訓練對混訓沒有穩定 (CI 下界 > 0 且逐年 ≥ 2/3) 的 ΔIC → 維持現狀"}
+
+
+def sep_verdict(targets: dict) -> dict:
+    """所有格的總結：各判定格數、整體 verdict (≥ 2/3 格 adopt → adopt_separate；≥ 2/3 格 adopt 或 ret_open_only → ret_open_only；否則 no_gain)。"""
+    cells = [(tm, m, c) for tm, g in targets.items() for m, c in g["cells"].items()]
+    n = len(cells)
+    by = {k: [f"{tm}@{m}" for tm, m, c in cells if c["verdict"] == k] for k in ("adopt_separate", "ret_open_only", "no_gain")}
+    overall = ("adopt_separate" if n and len(by["adopt_separate"]) >= 2 / 3 * n else
+               "ret_open_only" if n and len(by["adopt_separate"]) + len(by["ret_open_only"]) >= 2 / 3 * n else "no_gain")
+    dm = [g["delta_vs_mixed"][m]["d_ic"] for tm, g in targets.items() for m in g["delta_vs_mixed"]]
+    dr = [g["delta_vs_ret_open"][m]["d_ic"] for tm, g in targets.items() for m in g["delta_vs_ret_open"]]
+    return {"cells": n, **by, "overall": overall, "text": SEP_TEXT[overall],
+            "mean_d_ic_vs_mixed": round(float(np.mean(dm)), 4) if dm else None,
+            "mean_d_ic_vs_ret_open": round(float(np.mean(dr)), 4) if dr else None}
+
+
 def main() -> None:
     t0 = time.time()
     mat = market_matrix(backtest.load_long("2010-01-01"))
@@ -106,8 +176,13 @@ def main() -> None:
     heo = heo[heo["mark"] != "pre"].reset_index(drop=True)
     F_OG = I.FEATURES + ["prev_og"]
     res = {"days": {"yahoo": int(hy["date"].nunique()), "twse": int(ht["date"].nunique()),
-                    "twse_prev_og_nonnull": int(hto.dropna(subset=["prev_og"])["date"].nunique())},
-           "targets": {}, "prev_og": {"features": {"og": F_OG, "og_oc": I.FEATURES_OG}, "wf_from": I.WF_FROM, "targets": {}}}
+                    "twse_prev_og_nonnull": int(hto.dropna(subset=["prev_og"])["date"].nunique()),
+                    "twse_night_chg_nonnull": int(ht.dropna(subset=["night_chg_pct"])["date"].nunique())},
+           "targets": {}, "prev_og": {"features": {"og": F_OG, "og_oc": I.FEATURES_OG}, "wf_from": I.WF_FROM, "targets": {}},
+           # 分開訓練實驗：正式 FEATURES (含 night_chg_pct)、PARAMS，twse 來源 2018~ 逐季；(a) 共用上面的 twse 基準 ot
+           "separate_training": {"features": I.FEATURES, "params": I.PARAMS, "wf_from": I.WF_FROM, "train_marks": I.INTRA_MARKS,
+                                 "score_feature": SEP_FEATURE, "groups": {"mixed": "正式混訓 (pre + 盤中列)", "intra_only": "只用 10:00~13:00 盤中列訓練",
+                                                                           SEP_FEATURE: "零參數：ret_open 值當分數"}, "targets": {}}}
     for tm in I.TARGET_MARKS:
         tgt = f"to_{tm}"
         oy = I._walk_forward_months(hy, tgt, quarterly=True)
@@ -134,6 +209,17 @@ def main() -> None:
             for m, dv in g[grp][var]["delta"].items():
                 yd = g[grp][var]["yearly_delta"].get(m, {})
                 print(f"    {grp}+{var} {m}: ΔIC {dv['d_ic']} {dv['ci95']} P>0 {dv['p_gt0']} 年正 {yd.get('pos')}/{yd.get('years')}", flush=True)
+        # separate_training：(a) = ot (正式混訓，共用)；(b) 只用盤中列訓練 (多一次 LightGBM walk-forward)；(c) ret_open 零參數 (不訓練)
+        if any(m < tm for m in I.INTRA_MARKS):   # 到 10:00 沒有盤中預測列 → 略過
+            osep = I._walk_forward_months(ht, tgt, from_ym=I.WF_FROM, quarterly=True, train_marks=I.INTRA_MARKS)
+            oref = I._walk_forward_months(ht, tgt, from_ym=I.WF_FROM, quarterly=True, train_marks=I.INTRA_MARKS, score_feature=SEP_FEATURE)
+            s = sep_block(ot, osep, oref)
+            res["separate_training"]["targets"][tm] = s
+            print(f"  separate {tm}: intra IC mixed {s['intra_ic']['mixed']} / intra_only {s['intra_ic']['intra_only']} / ret_open {s['intra_ic'][SEP_FEATURE]}", flush=True)
+            for m, c in s["cells"].items():
+                d1, d2, y1 = s["delta_vs_mixed"][m], s["delta_vs_ret_open"].get(m, {}), s["yearly_vs_mixed"].get(m, {})
+                print(f"    {m}: (b)−(a) {d1['d_ic']} {d1['ci95']} 年正 {y1.get('pos')}/{y1.get('years')}; (b)−(c) {d2.get('d_ic')} {d2.get('ci95')} → {c['verdict']}", flush=True)
+    res["separate_training"]["verdict"] = sep_verdict(res["separate_training"]["targets"])
     # prev_og 總結：各目標盤中 ΔIC 平均、CI 不含 0 且逐年 ≥ 2/3 為正的 mark 數 (採用門檻)
     verdict = {}
     for grp, var in (("twse", "og"), ("twse", "og_oc"), ("early", "og")):
@@ -172,8 +258,32 @@ def main() -> None:
                 b0, b1, yd = g[grp]["base"].get(m, {}), blk["summary"].get(m, {}), blk["yearly_delta"].get(m, {})
                 L.append(f"| {grp}+{var} | {m} | {b0.get('ic', '—')} | {b1.get('ic', '—')} | {dv['d_ic']} {dv['ci95']} | {dv['p_gt0']} "
                          f"| {yd.get('pos', '—')}/{yd.get('years', '—')} | {b0.get('hit', '—')}→{b1.get('hit', '—')} / {b1.get('base', '—')} |")
+    # separate_training 段落
+    S, sv = res["separate_training"], res["separate_training"]["verdict"]
+    L.append(f"\n# 盤中時間點與 pre 列分開訓練 separate_training (TWSE {I.WF_FROM}~ 逐季 walk-forward；正式 FEATURES 含 night_chg_pct，非空日 {res['days']['twse_night_chg_nonnull']})\n")
+    L.append("(a) mixed = 正式混訓 (pre + 盤中列同一模型)；(b) intra_only = 只用 10:00~13:00 盤中列訓練；(c) ret_open = 零參數 (開盤至今% 直接當分數)。\n")
+    L.append("採用門檻 (每格 目標@時點)：(b)−(a) ΔIC 95% CI 下界 > 0 且逐年 ≥ 2/3 為正，**且** (b)−(c) CI 下界 > 0 → adopt_separate；只過前者 → ret_open_only；其他 → no_gain。\n")
+    L.append(f"**整體判定：{sv['overall']}** — {sv['text']}  (格數 {sv['cells']}：adopt {len(sv['adopt_separate'])} / ret_open_only {len(sv['ret_open_only'])} / no_gain {len(sv['no_gain'])}；"
+             f"平均 ΔIC (b)−(a) {sv['mean_d_ic_vs_mixed']}、(b)−(c) {sv['mean_d_ic_vs_ret_open']})\n")
+    L.append("| 目標 | 盤中 IC mixed | intra_only | ret_open | adopt | ret_open_only | no_gain |\n|---|---|---|---|---|---|---|")
+    for tm, s in S["targets"].items():
+        vs = [c["verdict"] for c in s["cells"].values()]
+        L.append(f"| {tm} | {s['intra_ic']['mixed']} | {s['intra_ic']['intra_only']} | {s['intra_ic'][SEP_FEATURE]} | "
+                 f"{vs.count('adopt_separate')} | {vs.count('ret_open_only')} | {vs.count('no_gain')} |")
+    for tm, s in S["targets"].items():
+        L.append(f"\n## 到 {tm}\n")
+        L.append("| 時點 | IC mixed | IC intra_only | IC ret_open | (b)−(a) ΔIC [95%] | 逐年正/年數 | (b)−(c) ΔIC [95%] | 逐年正/年數 | (c)−(a) ΔIC [95%] | 命中 mixed→intra_only / ret_open / 多頭基準 | 判定 |\n|---|---|---|---|---|---|---|---|---|---|---|")
+        for m, c in s["cells"].items():
+            a0, b0, r0 = s["summary"]["mixed"].get(m, {}), s["summary"]["intra_only"].get(m, {}), s["summary"][SEP_FEATURE].get(m, {})
+            d1, y1 = s["delta_vs_mixed"][m], s["yearly_vs_mixed"].get(m, {})
+            d2, y2 = s["delta_vs_ret_open"].get(m, {}), s["yearly_vs_ret_open"].get(m, {})
+            d3 = s["delta_ret_open_vs_mixed"].get(m, {})
+            L.append(f"| {m} | {a0.get('ic', '—')} | {b0.get('ic', '—')} | {r0.get('ic', '—')} | {d1['d_ic']} {d1['ci95']} | {y1.get('pos', '—')}/{y1.get('years', '—')} "
+                     f"| {d2.get('d_ic', '—')} {d2.get('ci95', '')} | {y2.get('pos', '—')}/{y2.get('years', '—')} | {d3.get('d_ic', '—')} {d3.get('ci95', '')} "
+                     f"| {a0.get('hit', '—')}→{b0.get('hit', '—')} / {r0.get('hit', '—')} / {b0.get('base', '—')} | {c['verdict']} |")
     (OUT / "intraday_research.md").write_text("\n".join(L), encoding="utf-8")
     print("prev_og verdict", json.dumps(verdict, ensure_ascii=False), flush=True)
+    print("separate_training verdict", json.dumps({k: v for k, v in sv.items() if k != "text"}, ensure_ascii=False), flush=True)
     print("done", res["sec"], "s")
 
 

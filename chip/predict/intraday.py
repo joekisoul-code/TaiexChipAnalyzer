@@ -26,6 +26,7 @@ MARKS = ["pre", "10:00", "11:00", "12:00", "13:00"]
 # 早盤模型 (2026-10-12)：09:15 / 09:30 另外訓練 (和 10:00 後混訓會稀釋後段；研究：2018~ 逐年 walk-forward IC 0.06~0.08、9 年 7~8 年為正，訊號弱)
 EARLY_MARKS = ["pre", "09:15", "09:30"]
 TARGET_MARKS = ["10:00", "11:00", "12:00", "13:00", "13:30"]
+INTRA_MARKS = MARKS[1:]   # 盤中時間點 (去 pre)：研究用「只用盤中列訓練」(_walk_forward_months train_marks)；正式 train() 仍 pre + 盤中混訓
 MARK_IDX = {m: i for i, m in enumerate(MARKS)}
 WF_FROM = "2018-01"   # TWSE 來源的 walk-forward 起始月 (2016~2017 只當訓練；控制每週重訓時間)
 FEATURES = ["mark_idx", "gap_pct", "ret_open", "ret_prev", "hi_pos", "range_pct", "ret_1h", "night_chg_pct",
@@ -174,11 +175,18 @@ def build_history(source: str = "twse", marks_list: list[str] | None = None, mar
 
 # ------------------------------------------------------------------ 訓練 / 驗證
 def _walk_forward_months(df: pd.DataFrame, target: str, min_train_days: int = 120, from_ym: str | None = None,
-                         quarterly: bool = False, features: list[str] | None = None) -> pd.DataFrame:
+                         quarterly: bool = False, features: list[str] | None = None,
+                         train_marks: list[str] | None = None, score_feature: str | None = None) -> pd.DataFrame:
     """逐月 (或逐季：quarterly=True，每季重訓一次，測整季) walk-forward。year 欄 = 測試月份 (metrics 依此分組)。
-    features: 研究用特徵清單 (例如 FEATURES_OG)；預設正式 FEATURES。"""
+    features: 研究用特徵清單 (例如 FEATURES_OG)；預設正式 FEATURES。
+    train_marks (研究用，2026-10-14)：只保留這些 mark 的列 (訓練與測試列同一組；例如 INTRA_MARKS = 盤中列不含 pre，模型只服務這些時間點)。
+      預設 None = 全部列 (正式 pre + 盤中混訓形式)。
+    score_feature (研究用零參數基準)：給定時不訓練，直接以該欄位值當預測分數 (例如 ret_open = 開盤至今%，正號 = 延續)；
+      切分、列與訓練版完全相同 (可同日配對)，該欄缺值的列剔除 (pre 列的 ret_open 為 NaN)。"""
     feats = features or FEATURES
-    d = df.dropna(subset=[target]).copy()
+    d = df.dropna(subset=[target] + ([score_feature] if score_feature else [])).copy()
+    if train_marks is not None:
+        d = d[d["mark"].isin(train_marks)]
     d["ym"] = d["date"].str[:7]
     d["blk"] = d["ym"].map(lambda ym: f"{ym[:4]}Q{(int(ym[5:7]) - 1) // 3 + 1}") if quarterly else d["ym"]
     rows = []
@@ -187,9 +195,13 @@ def _walk_forward_months(df: pd.DataFrame, target: str, min_train_days: int = 12
         train = d[d["date"] < test["date"].min()]
         if train["date"].nunique() < min_train_days or test.empty:
             continue
-        models = M.fit_ensemble(train[feats], train[target], PARAMS)
+        if score_feature:
+            pred = test[score_feature].to_numpy(dtype=float)
+        else:
+            models = M.fit_ensemble(train[feats], train[target], PARAMS)
+            pred = M.predict_ensemble(models, test[feats])
         rows.append(pd.DataFrame({"date": test["date"].values, "year": test["ym"].values, "mark": test["mark"].values,
-                                  "pred": M.predict_ensemble(models, test[feats]), "actual": test[target].values}))
+                                  "pred": pred, "actual": test[target].values}))
     return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
 
 
