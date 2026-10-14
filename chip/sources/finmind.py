@@ -94,6 +94,39 @@ def total_margin(start: str | None = None) -> pd.DataFrame:
     return p[["date", "margin_lots", "short_lots", "margin_amt"]]
 
 
+TOTAL_MARGIN_FLOW_COLS = ["date", "buy", "sell", "repay", "margin_lots", "margin_lots_prev",
+                          "buy_amt", "sell_amt", "repay_amt", "margin_amt", "margin_amt_prev",
+                          "short_sell", "short_buy", "short_repay", "short_lots", "short_lots_prev"]
+
+
+def total_margin_flows(start: str = "2001-01-01") -> pd.DataFrame:
+    """全市場融資融券原始流量列 (TaiwanStockTotalMarginPurchaseShortSale，2001-01-02~，約 6,343 日；margin_dyn 資料層)：
+    date, buy / sell / repay (融資新增 / 了結 / 現金償還 張；FinMind 欄 buy / sell / Return), margin_lots, margin_lots_prev,
+    buy_amt / sell_amt / repay_amt / margin_amt / margin_amt_prev (億；FinMind 為元),
+    short_sell (融券新增) / short_buy (回補) / short_repay (現券償還), short_lots, short_lots_prev。
+    與 TWSE MI_MARGN MS 三列同口徑 (C3：492/492 日相等；只含上市)。沿用 fetch() 快取 (12h、key 含當天日期)。"""
+    df = fetch("TaiwanStockTotalMarginPurchaseShortSale", None, start)
+    if df.empty or "name" not in df:
+        return pd.DataFrame(columns=TOTAL_MARGIN_FLOW_COLS)
+    spec = {
+        "MarginPurchase": {"buy": "buy", "sell": "sell", "Return": "repay", "TodayBalance": "margin_lots", "YesBalance": "margin_lots_prev"},
+        "MarginPurchaseMoney": {"buy": "buy_amt", "sell": "sell_amt", "Return": "repay_amt", "TodayBalance": "margin_amt", "YesBalance": "margin_amt_prev"},
+        "ShortSale": {"sell": "short_sell", "buy": "short_buy", "Return": "short_repay", "TodayBalance": "short_lots", "YesBalance": "short_lots_prev"},
+    }
+    out = None
+    for name, m in spec.items():
+        g = df[df["name"] == name].drop_duplicates("date", keep="last").set_index("date")
+        part = pd.DataFrame({v: pd.to_numeric(g[k], errors="coerce") if k in g else float("nan") for k, v in m.items()}, index=g.index)
+        if name == "MarginPurchaseMoney":
+            part = part / YI
+        out = part if out is None else out.join(part, how="outer")
+    out = out.sort_index().reset_index().rename(columns={"index": "date"})
+    for c in TOTAL_MARGIN_FLOW_COLS:
+        if c not in out:
+            out[c] = float("nan")
+    return out[TOTAL_MARGIN_FLOW_COLS]
+
+
 def tx_futures_institutional(start: str | None = None) -> pd.DataFrame:
     """臺股期貨三大法人：fut_{foreign,trust,dealer}_{net_oi,long_oi,short_oi,net_trade}"""
     df = fetch("TaiwanFuturesInstitutionalInvestors", "TX", start)

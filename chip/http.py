@@ -47,6 +47,33 @@ def is_cached(key: str, ttl: int) -> bool:
         return False
 
 
+def cache_get(key: str, ttl: int, default: Any = None) -> Any:
+    """只讀快取 (不呼叫 loader)：不存在 / 過期 / 壞檔 → default。"""
+    p = _cache_path(key)
+    if not p.exists():
+        return default
+    try:
+        blob = json.loads(p.read_text(encoding="utf-8"))
+        return blob["data"] if time.time() - blob["ts"] < ttl else default
+    except Exception:  # noqa: BLE001
+        return default
+
+
+def cache_put(key: str, data: Any) -> None:
+    """直接寫入快取 (同一請求順手補另一個 key 用，例如 MI_MARGN ALL 回應裡的全市場三列 → MS key)。"""
+    try:
+        _cache_path(key).write_text(json.dumps({"ts": time.time(), "key": key, "data": data}, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        log.debug("cache write failed: %s", e)
+
+
+def cache_delete(key: str) -> None:
+    try:
+        _cache_path(key).unlink()
+    except OSError:
+        pass
+
+
 def cached(key: str, ttl: int, loader, *, allow_stale: bool = True) -> Any:
     """以 key 快取 loader() 的結果 (需可 JSON 序列化)。
 

@@ -155,6 +155,93 @@ def fetch_market() -> dict | None:
     }
 
 
+# ---------------------------------------------------------------- 大盤融資維持率 真實值 長期序列 (margin_dyn 資料層, 2026-10-14)
+# /stock/0000A/margin-trading/historical-lending-balance-long-term：1,250 筆 (2021-08-18~)，lendingBalance=融資金額 (仟元)、
+# marginRatio=維持率 (倍)。A15 實測純 requests GET (UA / Referer / X-Requested-With) 本機 200 / 162 KB；雲端 IP 未驗證 → Playwright 備援
+# (domcontentloaded；networkidle 會逾時) → 再失敗回空 DataFrame 不 raise。時間戳 = 台北 00:00，要用 +8h 轉日期 (UTC 會差一天)。
+WG = "https://www.wantgoo.com"
+MAINT_LONG_PATH = "/stock/0000A/margin-trading/historical-lending-balance-long-term"
+MAINT_COLS = ["date", "maint_ratio", "margin_amt"]
+
+
+def _ms_tpe(v) -> str:
+    return dt.datetime.fromtimestamp(int(v) / 1000, tz=config.TZ).strftime("%Y-%m-%d")
+
+
+def parse_maint_long(rows) -> list[dict]:
+    """端點列 → [{date (台北), maint_ratio (%), margin_amt (億)}] 依日期遞增、同日 keep last；marginRatio ≤ 0 的早期列不留。"""
+    by: dict[str, dict] = {}
+    for r in rows or []:
+        if not isinstance(r, dict) or r.get("date") is None:
+            continue
+        ratio = num(r.get("marginRatio"))
+        if ratio is None or ratio <= 0:
+            continue
+        amt = num(r.get("lendingBalance"))
+        d = _ms_tpe(r["date"])
+        by[d] = {"date": d, "maint_ratio": round(ratio * 100, 3), "margin_amt": (None if amt is None else round(amt / 1e5, 5))}
+    return [by[k] for k in sorted(by)]
+
+
+def _get_long_term(path: str) -> list:
+    from ..http import session
+    r = session().get(WG + path, timeout=30, headers={
+        "Accept": "application/json, text/plain, */*", "X-Requested-With": "XMLHttpRequest", "Referer": TAIEX_PAGE})
+    r.raise_for_status()
+    j = r.json()
+    if not isinstance(j, list) or not j:
+        raise RuntimeError(f"wantgoo {path}: 非列表回應 ({str(j)[:80]})")
+    return j
+
+
+def _playwright_long_term(path: str) -> list:
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+        ctx = browser.new_context(user_agent=UA, locale="zh-TW", viewport={"width": 1366, "height": 900})
+        ctx.add_init_script(STEALTH_JS)
+        page = ctx.new_page()
+        page.goto(TAIEX_PAGE, wait_until="domcontentloaded", timeout=90_000)
+        time.sleep(6)
+        raw = page.evaluate(
+            """async (u) => { const r = await fetch(u, {headers: {'X-Requested-With': 'XMLHttpRequest'}});
+                            return r.ok ? await r.json() : {"_error": r.status}; }""", path)
+        browser.close()
+    if not isinstance(raw, list) or not raw:
+        raise RuntimeError(f"wantgoo playwright {path}: {str(raw)[:80]}")
+    return raw
+
+
+def maint_real(days: int = 1300) -> pd.DataFrame:
+    """玩股網 0000A 大盤融資維持率真實值 (落後 1 日)：DataFrame[date, maint_ratio (%), margin_amt (億)] 最近 days 筆、日期遞增。
+    requests GET 優先 → Playwright 備援 → 都失敗回空 DataFrame (不 raise、不快取失敗)。快取 key wantgoo:0000A:{今日} 12h。
+    CHIP_WANTGOO=0 → 直接回空。"""
+    if not config.WANTGOO_ENABLED:
+        return pd.DataFrame(columns=MAINT_COLS)
+    today = dt.datetime.now(config.TZ).strftime("%Y%m%d")
+
+    def load():
+        try:
+            rows = _get_long_term(MAINT_LONG_PATH)
+        except Exception as e:  # noqa: BLE001
+            log.info("wantgoo 0000A GET 失敗 (%s)，改用 Playwright", e)
+            if not available():
+                raise
+            rows = _playwright_long_term(MAINT_LONG_PATH)
+        parsed = parse_maint_long(rows)
+        if not parsed:
+            raise RuntimeError("wantgoo 0000A: 無有效維持率列")
+        return parsed
+
+    try:
+        data = cached(f"wantgoo:0000A:{today}", config.TTL_HISTORY, load, allow_stale=False)
+    except Exception as e:  # noqa: BLE001
+        log.warning("wantgoo maint_real 失敗 (不阻塞): %s", e)
+        return pd.DataFrame(columns=MAINT_COLS)
+    df = pd.DataFrame(data, columns=MAINT_COLS)
+    return (df.tail(days) if days else df).reset_index(drop=True)
+
+
 STOCK_ENDPOINTS = {
     "main_trend": "/stock/{id}/major-investors/main-trend-data",
     "broker": "/stock/{id}/major-investors/broker-buysell-data",

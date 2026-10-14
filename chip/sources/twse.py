@@ -11,11 +11,15 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
+import time
 
+import numpy as np
 import pandas as pd
 
 from .. import config
-from ..http import cached, get_json, num
+from ..http import cache_delete, cache_get, cache_put, cached, get_json, num
+from . import NoData
 
 log = logging.getLogger(__name__)
 BASE = "https://www.twse.com.tw/rwd/zh"
@@ -113,6 +117,210 @@ def margin_stocks(date: str | None = None) -> pd.DataFrame:
             })
         return rows
     return pd.DataFrame(cached(f"twse:MI_MARGN:ALL:{date}", _ttl(date), load))
+
+
+# ---------------------------------------------------------------- 融資融券 歷史回補 (margin_dyn 資料層, 2026-10-14)
+# 與上面 margin_stocks()/margin_daily() 的差別：10 年 TTL、stat≠OK 丟例外不寫快取 (#87 地雷)、含 note 欄與 tables[0] 的現償欄、
+# 同主機節流 ≥2.2 s。快取格式刻意與本機 491 日快取 / margin_stocks() 相容：ALL key 存「列 dict 的 list」，全市場三列另存 MS key
+# (margin_daily 同格式 + 三個 *_repay_* 欄)，讀取時再組成 {"date", "market", "stocks"}。
+TTL_FOREVER = 10 * 365 * 86400
+MIN_GAP = 2.2                 # 同主機兩次網路請求的最小間隔 (秒)；測試可設 0
+CLOSES_FROM = "20040211"      # MI_INDEX 可查的最早日期 (查更早回「查詢日期小於93年2月11日」)
+MARGIN_ALL_COLS = ("code", "name", "margin_buy", "margin_sell", "margin_repay", "margin_prev", "margin_today", "margin_limit",
+                   "short_buy", "short_sell", "short_repay", "short_prev", "short_today", "short_limit", "offset", "note", "date")
+MARGIN_MARKET_KEYS = ("margin_lots_prev", "margin_lots", "margin_buy_lots", "margin_sell_lots", "margin_repay_lots",
+                      "short_lots_prev", "short_lots", "short_buy_lots", "short_sell_lots", "short_repay_lots",
+                      "margin_amt_prev", "margin_amt", "margin_buy_amt", "margin_sell_amt", "margin_repay_amt")
+_CODE_RE = re.compile(r"\d{4,6}[A-Z]?")
+_last_net = 0.0
+
+
+def _throttle() -> None:
+    """只在真的要打網路時呼叫 (快取命中不等)。"""
+    global _last_net
+    wait = MIN_GAP - (time.time() - _last_net)
+    if wait > 0:
+        time.sleep(wait)
+    _last_net = time.time()
+
+
+def _nodata_stat(stat: str) -> bool:
+    return any(k in stat for k in ("沒有符合", "無資料", "查詢日期"))
+
+
+def _check_stat(j, what: str) -> dict:
+    """stat≠OK：「沒有符合條件 / 查詢日期…」→ NoData；其他 (伺服器忙碌、非 JSON) → RuntimeError。兩者都不會被 cached() 寫入。"""
+    if not isinstance(j, dict):
+        raise RuntimeError(f"{what}: 非 dict 回應 ({type(j).__name__})")
+    stat = str(j.get("stat") or "")
+    if stat.upper() != "OK":
+        if _nodata_stat(stat):
+            raise NoData(f"{what}: {stat}")
+        raise RuntimeError(f"{what}: stat={stat[:60] or '(空)'}")
+    return j
+
+
+def parse_margin_market(table: dict) -> dict:
+    """MI_MARGN tables[0] 三列 (融資(交易單位) / 融券(交易單位) / 融資金額(仟元)) → 張與億 (含現償)。"""
+    out: dict = {}
+    for row in table.get("data") or []:
+        item = str(row[0])
+        buy, sell, repay, prev, today = (num(x) for x in row[1:6])
+        if item.startswith("融資(交易"):
+            out.update(margin_lots_prev=prev, margin_lots=today, margin_buy_lots=buy, margin_sell_lots=sell, margin_repay_lots=repay)
+        elif item.startswith("融券"):
+            out.update(short_lots_prev=prev, short_lots=today, short_buy_lots=buy, short_sell_lots=sell, short_repay_lots=repay)
+        elif item.startswith("融資金額"):
+            k = 1e3 / YI
+            out.update(margin_amt_prev=_mul(prev, k), margin_amt=_mul(today, k), margin_buy_amt=_mul(buy, k),
+                       margin_sell_amt=_mul(sell, k), margin_repay_amt=_mul(repay, k))
+    return out
+
+
+def _mul(v, k):
+    return None if v is None else v * k
+
+
+def parse_margin_all(j, ymd: str) -> dict:
+    """MI_MARGN selectType=ALL 回應 → {"date": ISO, "market": 三列 dict, "stocks": [16 欄 dict (含 note)]}。
+    stat 含「沒有符合」→ NoData；其他非 OK / 缺表 → RuntimeError (不可快取)。"""
+    _check_stat(j, f"MI_MARGN ALL {ymd}")
+    tables = j.get("tables") or []
+    if len(tables) < 2 or not tables[1].get("data"):
+        raise RuntimeError(f"MI_MARGN ALL {ymd}: stat OK 但無個股表 ({len(tables)} tables)")
+    iso = ymd_to_iso(str(j.get("date") or ymd))
+    rows = []
+    for r in tables[1]["data"]:
+        rows.append({
+            "code": str(r[0]).strip(), "name": str(r[1]).strip(),
+            "margin_buy": num(r[2]), "margin_sell": num(r[3]), "margin_repay": num(r[4]),
+            "margin_prev": num(r[5]), "margin_today": num(r[6]), "margin_limit": num(r[7]),
+            "short_buy": num(r[8]), "short_sell": num(r[9]), "short_repay": num(r[10]),
+            "short_prev": num(r[11]), "short_today": num(r[12]), "short_limit": num(r[13]),
+            "offset": num(r[14]), "note": (str(r[15]).strip() if len(r) > 15 and r[15] is not None else ""),
+            "date": iso,
+        })
+    return {"date": iso, "market": parse_margin_market(tables[0]), "stocks": rows}
+
+
+def _norm_stock_row(r: dict, iso: str) -> dict:
+    """舊快取列可能缺 note (2026-10-13 那天由 margin_stocks() 寫入) / date。"""
+    out = {k: r.get(k) for k in MARGIN_ALL_COLS}
+    out["note"] = str(r.get("note") or "").strip()
+    out["date"] = str(r.get("date") or iso)
+    return out
+
+
+def _norm_market(ms) -> dict | None:
+    """MS 快取 (margin_daily 格式) → 補齊三個現償欄：恆等式 今日 = 前日 + 新增 − 了結 − 現償 (492 日 0 違反) 反推。"""
+    if not isinstance(ms, dict) or ms.get("margin_lots") is None:
+        return None
+    out = {k: ms.get(k) for k in MARGIN_MARKET_KEYS}
+
+    def fill(repay, prev, add, sub, today, nd):
+        if out.get(repay) is None and all(out.get(k) is not None for k in (prev, add, sub, today)):
+            out[repay] = round(out[prev] + out[add] - out[sub] - out[today], nd)
+    fill("margin_repay_lots", "margin_lots_prev", "margin_buy_lots", "margin_sell_lots", "margin_lots", 0)
+    fill("short_repay_lots", "short_lots_prev", "short_sell_lots", "short_buy_lots", "short_lots", 0)   # 融券：賣出 = 新增、買進 = 回補
+    fill("margin_repay_amt", "margin_amt_prev", "margin_buy_amt", "margin_sell_amt", "margin_amt", 5)
+    return out
+
+
+def margin_stocks_hist(ymd: str) -> dict:
+    """MI_MARGN selectType=ALL 單日 (可回補 2001-06~)：
+    {"date": ISO, "market": {margin_lots_prev, margin_lots, margin_buy_lots, margin_sell_lots, margin_repay_lots,
+                             short_lots_prev, short_lots, short_buy_lots(回補), short_sell_lots(新增), short_repay_lots,
+                             margin_amt_prev, margin_amt, margin_buy_amt, margin_sell_amt, margin_repay_amt (億)} | None,
+     "stocks": [{code, name, margin_buy, margin_sell, margin_repay, margin_prev, margin_today, margin_limit,
+                 short_buy, short_sell, short_repay, short_prev, short_today, short_limit, offset, note, date}, ...]}
+    stat 含「沒有符合」(休市 / 週間假日 / 尚未公布，同一回應) → raise NoData；其他非 OK → raise RuntimeError；兩者皆不快取。
+    快取 key twse:MI_MARGN:ALL:{ymd} (list 格式，與本機 491 日快取及 margin_stocks() 相容) 讀取 TTL 10 年；
+    舊 margin_stocks() 寫入的 [] 會被清掉重抓。"""
+    ymd = ymd.replace("-", "")
+    key, ms_key = f"twse:MI_MARGN:ALL:{ymd}", f"twse:MI_MARGN:MS:{ymd}"
+
+    def load():
+        _throttle()
+        j = get_json(f"{BASE}/marginTrading/MI_MARGN", params={"response": "json", "selectType": "ALL", "date": ymd}, timeout=60)
+        parsed = parse_margin_all(j, ymd)
+        cache_put(ms_key, {"date": parsed["date"], **parsed["market"]})     # 同一請求順手補 margin_daily 的快取 (含現償三欄)
+        return parsed["stocks"]
+
+    rows = cached(key, TTL_FOREVER, load, allow_stale=False)
+    if not isinstance(rows, list) or not rows:                             # 舊 margin_stocks() stat≠OK 寫的 [] / 壞格式 → 清掉重抓
+        cache_delete(key)
+        rows = cached(key, TTL_FOREVER, load, allow_stale=False)
+    iso = str((rows[0] or {}).get("date") or ymd_to_iso(ymd))
+    stocks = [_norm_stock_row(r, iso) for r in rows if isinstance(r, dict)]
+    market = _norm_market(cache_get(ms_key, TTL_FOREVER))
+    if market is None:                                                       # 舊快取日沒有 MS 快取 (理論上 494/492 日皆有)：補抓一次
+        try:
+            _throttle()
+            market = _norm_market(margin_daily(ymd))
+        except Exception as e:  # noqa: BLE001
+            log.warning("MI_MARGN MS %s 補抓失敗: %s", ymd, e)
+            market = None
+    return {"date": iso, "market": market, "stocks": stocks}
+
+
+def identity_err(rows, tol: float = 0.5):
+    """恆等式檢查：融資 today = prev + buy − sell − repay；融券 today = prev + sell(新增) − buy(回補) − repay。
+    任一不成立 (|殘差| > tol) 或欄位缺 → True (該列標 identity_err、不進統計)。
+    rows：margin_stocks_hist 的 stocks 列 (margin_*/short_*) 或 store.margin_stock_daily 列 (m_*/s_*)；list → list[bool]、DataFrame → Series。"""
+    is_df = isinstance(rows, pd.DataFrame)
+    df = rows if is_df else pd.DataFrame(list(rows))
+    if df.empty:
+        return pd.Series([], dtype=bool) if is_df else []
+    if "m_today" in df.columns:
+        m, s = ("m_prev", "m_buy", "m_sell", "m_repay", "m_today"), ("s_prev", "s_sell", "s_buy", "s_repay", "s_today")
+    else:
+        m, s = ("margin_prev", "margin_buy", "margin_sell", "margin_repay", "margin_today"), ("short_prev", "short_sell", "short_buy", "short_repay", "short_today")
+
+    def bad(cols):
+        v = [pd.to_numeric(df[c], errors="coerce") if c in df.columns else pd.Series(np.nan, index=df.index) for c in cols]
+        prev, add, sub, rep, today = v
+        resid = today - (prev + add - sub - rep)
+        return ~(resid.abs() <= tol)          # NaN → True
+    err = bad(m) | bad(s)
+    return err if is_df else err.tolist()
+
+
+def parse_closes(j, ymd: str) -> dict[str, list]:
+    """MI_INDEX ALLBUT0999 → {code: [close, vol_lots]}；只留代號 (4~6 碼 + 可選英文字尾) 有收盤價的列 (無成交「--」不留)。"""
+    _check_stat(j, f"MI_INDEX {ymd}")
+    tbl = next((t for t in (j.get("tables") or []) if "證券代號" in (t.get("fields") or [])), None)
+    if tbl is None or not tbl.get("data"):
+        raise RuntimeError(f"MI_INDEX {ymd}: stat OK 但無個股表 (尚未公布 / 格式變更)")
+    f = tbl["fields"]
+    ic, ipx, ivol = f.index("證券代號"), f.index("收盤價"), f.index("成交股數")
+    out: dict[str, list] = {}
+    for row in tbl["data"]:
+        code = str(row[ic]).strip()
+        if not _CODE_RE.fullmatch(code):
+            continue
+        px = num(row[ipx])
+        if px is None or px <= 0:
+            continue
+        out[code] = [px, (num(row[ivol]) or 0.0) / 1000.0]
+    if not out:
+        raise RuntimeError(f"MI_INDEX {ymd}: 無有效收盤列")
+    return out
+
+
+def closes_all(ymd: str) -> dict[str, tuple[float, float]]:
+    """MI_INDEX type=ALLBUT0999 單日全市場收盤：{code: (close, vol_lots)} (約 30 KB/日，原始 249 KB 不留)。
+    2004-02-11 之前 (本機判定或 TWSE 回「查詢日期小於93年2月11日」) / 休市 → raise NoData；其他失敗 raise；不快取失敗。
+    快取 key twse:close_all:{ymd} 10 年。"""
+    ymd = ymd.replace("-", "")
+    if ymd < CLOSES_FROM:
+        raise NoData(f"MI_INDEX {ymd}: 查詢日期小於 93 年 2 月 11 日")
+
+    def load():
+        _throttle()
+        j = get_json(f"{BASE}/afterTrading/MI_INDEX", params={"response": "json", "type": "ALLBUT0999", "date": ymd}, timeout=60)
+        return parse_closes(j, ymd)
+    d = cached(f"twse:close_all:{ymd}", TTL_FOREVER, load, allow_stale=False)
+    return {k: (float(v[0]), float(v[1])) for k, v in d.items()}
 
 
 # ---------------------------------------------------------------- 市場成交 / 指數
