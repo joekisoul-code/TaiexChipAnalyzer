@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 import time
@@ -347,6 +348,7 @@ def main() -> None:
     except Exception as e:  # noqa: BLE001
         print("  relations_map dump failed:", e)
     res = None
+    _mg_exd = None                     # 追蹤清單除息事件 (完整模式才抓；margin_dyn FIFO 用)
     if not args.fast:
         res = chips.assess_watchlist(chips.WATCHLIST, use_wantgoo=use_wg)
         slim = {}
@@ -376,6 +378,7 @@ def main() -> None:
             _exd_up = _xd.upcoming_market(asof_px, _xd.get_json)          # 全市場已公告除息 (App pullbackLocal；不做 15% 過濾)
         except Exception as e:  # noqa: BLE001
             print("  exdiv for pullback failed:", e)
+        _mg_exd = _exd                                                   # 融資 FIFO 估計成本的除息扣除也用這份 (下方 margin_dyn)
         try:
             from chip.predict import stock_pullback as _sp2
             for sid in list(slim.keys()):
@@ -393,7 +396,7 @@ def main() -> None:
     else:
         # fast 模式不重算追蹤清單/國際研究；Pages 部署是整站覆蓋 (force_orphan)，若不把上次發布的檔案帶回來，
         # 盤中每 5 分鐘一次的 fast 會把 watchlist.json / global.json 洗掉 (SKYNET 個股籌碼成本會 404)
-        for name in ("watchlist", "global", "desk", "desk_archive"):
+        for name in ("watchlist", "global", "desk", "desk_archive", "margin"):
             if not (DATA / f"{name}.json").exists():
                 try:
                     r = requests.get(gov8.PAGES_URL.rstrip("/") + f"/data/{name}.json", timeout=20)
@@ -463,6 +466,34 @@ def main() -> None:
         print("  " + _ra.report_txt(_rp, fast=args.fast))
     except Exception as e:  # noqa: BLE001
         print("  radar_pool failed:", e)
+    # 融資行為動態 (margin_dyn v1.0，2026-10-14；規格 scratchpad/margin/SPEC.md §3.5)：全市場 2001~ 序列 / 流量 / 自算維持率 / 12 事件配對統計 /
+    # 個股 (追蹤 5 + 雷達候選池 ≤100，需要上面的 _pools) / 七榜排行 → margin.json。完整模式先回補個股面板 (MARGIN_BACKFILL_DAYS 日，缺日先補最近再往回)；
+    # fast 不連網、整份沿用上次發布 (meta.carried)；任何失敗不中斷發布，帶回上次發布 (比照 desk _guard_degraded)，fast 帶回名單 (上方) 也含 margin。
+    # 全部 label 只有 descriptive / risk_descriptive (predictive 只來自 data/models/margin_validated.json，目前空)。train 模式另寫 Tier-1 種子 data/margin_market.json。
+    try:
+        from chip.analysis import margin_dyn
+        _mg_prev = margin_dyn.published()
+        if not args.fast:
+            print("  margin backfill:", margin_dyn.backfill(int(os.getenv("MARGIN_BACKFILL_DAYS", "40") or 0)))
+        # watch_res：追蹤清單評估 ∪ 除息事件 ({sid: {"exdiv": exdiv.load_all 的 events}}，FIFO 成本在除息日扣現金股利)
+        _mg_res = {sid: {**((res or {}).get(sid) or {}), "exdiv": ev} for sid, ev in (_mg_exd or {}).items() if isinstance(ev, dict)} or res
+        try:
+            _mg = margin_dyn.build(scored, _mg_res, pools=_pools, prev=_mg_prev, fast=args.fast)
+        except Exception as e:  # noqa: BLE001
+            if not _mg_prev:
+                raise
+            print("  margin build failed, carrying over last published:", e)
+            _mg = dict(_mg_prev)
+            _mg["meta"] = {**(_mg_prev.get("meta") or {}), "carried": True, "carried_parts": list(margin_dyn.PARTS), "mode": "fast" if args.fast else "full",
+                           "carry_reason": str(e)[:120]}
+        dump("margin", _mg)
+        _mgm, _mgk = _mg.get("meta") or {}, _mg.get("market") or {}
+        print(f"  margin: date {_mgk.get('date')} amt {_mgk.get('amt')} maint {((_mgk.get('maint') or {}).get('value'))} ({(_mgk.get('maint') or {}).get('src')})"
+              f" stocks {len(_mg.get('stocks') or {})} alerts {len(_mg.get('alerts') or [])} carried {_mgm.get('carried_parts') or _mgm.get('carried')}")
+        if args.train:
+            print("  margin seed:", margin_dyn.write_seed(_mg))
+    except Exception as e:  # noqa: BLE001
+        print("  margin failed:", e)
     # 時點帳本 (pr2 P5，2026-10-05)：force_orphan 讓 forecast.json 沒有歷史 → 每次完整發布追加一行「真的顯示過什麼」(叫牌/水準/verdict 桶/挖寶 A/A+)；
     # 先把上一版帶回：Pages (備援 raw gh-pages) ∪ data/cache 備份 (在 Actions cache 內) ∪ 本機，ts 去重、保留最後 400 行、寫回兩處 → 單次抓取失敗不會洗掉歷史；
     # fast 模式只帶回不追加

@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "fast | full | train | research (挖寶研究，不發布) | research_intraday (小時模型資料來源研究 + 前一日隔夜跳空 prev_og 特徵驗證，不發布)"
+        description: "fast | full | train | margin_backfill (融資個股面板 / 維持率自算回補 450 日 ≈50 分，之後照常 full 發布；分批往回補到 2004-02) | research (挖寶研究，不發布) | research_intraday (小時模型資料來源研究 + 前一日隔夜跳空 prev_og 特徵驗證，不發布)"
         default: "full"
 
 permissions:
@@ -31,6 +31,8 @@ jobs:
       TZ: Asia/Taipei
       FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
       TREASURE_BACKFILL_DAYS: "95"   # 挖寶雲端帳本：缺的日期自動回填 (已掃過的日期跳過，平常零成本；某天排程失敗也會補)
+      MARGIN_BACKFILL_DAYS: "40"     # 融資個股面板 (margin_dyn)：每次 full 回補 ≤40 個缺日 (先補最近再往回；TWSE ALL + MI_INDEX 同主機節流 ≈5.7 s/日 → ≈4 分)
+      MARGIN_PANEL_FROM: ${{ vars.MARGIN_PANEL_FROM }}   # 回補起點 (預設 2024-10-01)；近 2 年收盤補齊後設 repo var 往前拉 (最早 2004-02-11，維持率自算) → margin_backfill 分批
       CHIP_WATCHLIST: ${{ vars.CHIP_WATCHLIST }}
     steps:
       - uses: actions/checkout@v4
@@ -93,6 +95,7 @@ jobs:
           case "${{ steps.mode.outputs.mode }}" in
             fast)  python tools/export_static.py --fast --no-wantgoo ;;
             train) python cli.py optimize && python cli.py global && python cli.py cross && python tools/export_static.py --train ;;
+            margin_backfill) python -c "from chip.analysis import margin_dyn; print(margin_dyn.backfill(450))" && python tools/export_static.py ;;
             *)     python tools/export_static.py ;;
           esac
       - name: commit retrained models (train 模式：把 data/models 與小時模型盤中歷史 data/intraday_marks.json 推回 main，之後每次排程都用新模型)
@@ -101,6 +104,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/models data/intraday_marks.json
+          if [ -f data/margin_market.json ]; then git add data/margin_market.json; fi   # 融資 Tier-1 種子 (margin_dyn.write_seed；Actions cache / Pages 都沒有時重建 2001~ 序列)
           git diff --cached --quiet || (git commit -m "weekly retrain: update models [skip ci]" && git push origin HEAD:main)
       - name: deploy to GitHub Pages
         if: ${{ !startsWith(steps.mode.outputs.mode, 'research') }}

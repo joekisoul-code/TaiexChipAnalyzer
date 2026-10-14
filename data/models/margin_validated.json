@@ -1,0 +1,6 @@
+{
+  "version": "1.0",
+  "updated": "2026-10-14",
+  "note": "margin_dyn 唯一的 predictive 標籤來源 (SPEC §2 / §3.2)。只有樣本外配對對照顯著且逐年一致的事件 / 指標才可列入；目前研究結論 (A1 confirmed：153 + 114 檢定無一過 Bonferroni / BH) 為空集合，App 徽章『已驗證』永不出現。格式：validated: [{id, since, note}] 或 [id, ...]。",
+  "validated": []
+}

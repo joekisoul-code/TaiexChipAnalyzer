@@ -50,7 +50,8 @@ YEAR_DIFF = 4
 EPISODE_GAP = 10
 THROTTLE = 2.2                     # TWSE 節流秒數 (測試設 0)
 SIZE_LIMIT = 900 * 1024
-PANEL_FROM = os.getenv("MARGIN_PANEL_FROM", "2024-10-01")
+PANEL_FROM = os.getenv("MARGIN_PANEL_FROM") or "2024-10-01"   # 個股面板 / 回補起點；Actions 以 vars.MARGIN_PANEL_FROM 往前拉 (空字串 = 預設)
+TPEX_FROM = "2007-01-01"           # TPEx 上櫃餘額可回補下限 (SPEC §2.1)
 VALIDATED_PATH = config.DATA_DIR / "models" / "margin_validated.json"
 SEED_PATH = config.DATA_DIR / "margin_market.json"
 WATCH_IDS = ["2330", "00631L", "00685L", "00981A", "00988A"]
@@ -169,8 +170,17 @@ def _fetch_holidays(year: int):
 
 
 def _sleep() -> None:
-    if THROTTLE > 0:
-        time.sleep(THROTTLE)
+    """請求間節流。資料層 (chip.sources.twse / tpex) 自帶 MIN_GAP 節流且只在真的打網路時等 (快取命中不等)，
+    有的話這裡不再重複等 (否則每日多 4.4 s，450 日回補會超過 60 分)；資料層沒有節流機制才用 THROTTLE。"""
+    if THROTTLE <= 0:
+        return
+    try:
+        tw = importlib.import_module("chip.sources.twse")
+        if float(getattr(tw, "MIN_GAP", 0) or 0) > 0 and callable(getattr(tw, "_throttle", None)):
+            return
+    except Exception:  # noqa: BLE001
+        pass
+    time.sleep(THROTTLE)
 
 
 def _ymd(date: str) -> str:
@@ -704,68 +714,115 @@ def backfill(max_days: int = 40, direction: str = "forward_then_back", *, today:
     last_have = max(have) if have else None
     fwd = sorted(d for d in missing if last_have is None or d > last_have)
     back = sorted((d for d in missing if last_have is not None and d < last_have), reverse=True)
-    order = (fwd + back) if direction == "forward_then_back" else (back + fwd)
     nod_close = _nodata("twse_close")
     need_close = [d for d in _panel_dates_without_close() if d >= MAINT_FROM and d not in nod_close]
     budget = int(max_days or 0)
     done = set()
-    for d in order:
-        if budget <= 0:
-            break
-        try:
-            res = _fetch_margin_all(_ymd(d))
-        except Exception as e:  # noqa: BLE001
-            budget -= 1
-            if _is(e, "NoData"):
-                _mark_nodata(d, "twse_all"); rep["nodata"] += 1; done.add(d); _sleep()
-                continue
-            rep["failed"] += 1; rep["error"] = f"{d}: {e}"
-            break
-        budget -= 1
-        date, mkt, rows = _norm_day(res)
-        date = date or d
-        closes = None
-        if date >= MAINT_FROM:
-            _sleep()
+
+    def run_days(days: list[str]) -> bool:
+        """缺日：ALL + MI_INDEX + TPEx (每日 ≤3 請求)。回 False = 暫時失敗中斷 (下次重入)。"""
+        nonlocal budget
+        for d in days:
+            if budget <= 0:
+                return True
             try:
-                closes = _norm_closes(_fetch_closes(_ymd(date)))
-                rep["closes"] += 1
+                res = _fetch_margin_all(_ymd(d))
+            except Exception as e:  # noqa: BLE001
+                budget -= 1
+                if _is(e, "NoData"):
+                    if d >= today:                 # 當日 (TWSE 約 21:00 才公布) 的 NoData = 尚未公布，不寫 margin_nodata，下次再試 (仍計 pending)
+                        rep["notyet"] = rep.get("notyet", 0) + 1; _sleep()
+                        continue
+                    _mark_nodata(d, "twse_all"); rep["nodata"] += 1; done.add(d); _sleep()
+                    continue
+                rep["failed"] += 1; rep["error"] = f"{d}: {e}"
+                return False
+            budget -= 1
+            date, mkt, rows = _norm_day(res)
+            date = date or d
+            closes = None
+            if date >= MAINT_FROM:
+                _sleep()
+                try:
+                    closes = _norm_closes(_fetch_closes(_ymd(date)))
+                    rep["closes"] += 1
+                except Exception as e:  # noqa: BLE001
+                    if _is(e, "NoData"):
+                        _mark_nodata(date, "twse_close")
+                    else:
+                        log.warning("closes_all %s: %s", date, e)
+            _panel_upsert(date, rows, closes)
+            try:
+                _day_metrics(date, rows, closes, mkt)
+            except Exception as e:  # noqa: BLE001
+                log.debug("day metrics %s: %s", date, e)
+            done.add(d); rep["done"] += 1
+            rep["from"] = min(rep["from"] or date, date); rep["to"] = max(rep["to"] or date, date)
+            if _tpex_day(date) == "ok":
+                rep["tpex"] += 1
+            _sleep()
+        return True
+
+    def run_closes() -> bool:
+        """種子匯入的日子沒有收盤 → 補 MI_INDEX (最近的先)，順手自算該日維持率 / 互抵占比。"""
+        nonlocal budget
+        for d in need_close:
+            if budget <= 0:
+                return True
+            budget -= 1
+            try:
+                closes = _norm_closes(_fetch_closes(_ymd(d)))
             except Exception as e:  # noqa: BLE001
                 if _is(e, "NoData"):
-                    _mark_nodata(date, "twse_close")
-                else:
-                    log.warning("closes_all %s: %s", date, e)
-        _panel_upsert(date, rows, closes)
+                    _mark_nodata(d, "twse_close"); done.add(d); _sleep()
+                    continue
+                rep["failed"] += 1; rep["error"] = f"closes {d}: {e}"
+                return False
+            _panel_update_closes(d, closes)
+            rep["closes"] += 1; done.add(d)
+            try:
+                pan = load_panel(since=d, cols=["date", "code", "m_today", "m_prev", "m_limit", "note", "offset", "vol_lots"])
+                pan = pan[pan["date"] == d]
+                _day_metrics(d, pan.to_dict("records"), closes, None, _hist_amt(d))
+            except Exception as e:  # noqa: BLE001
+                log.debug("closes metrics %s: %s", d, e)
+            _sleep()
+        return True
+
+    def run_tpex() -> None:
+        """面板已有 (種子匯入) 但 daily_metrics 尚無上櫃合計的日子 → 補 TPEx (最近的先；NoData 寫 margin_nodata、NotYet 下次再試)。"""
+        nonlocal budget
+        key = METRIC_KEYS.get("tpex_margin_lots")
         try:
-            _day_metrics(date, rows, closes, mkt)
-        except Exception as e:  # noqa: BLE001
-            log.debug("day metrics %s: %s", date, e)
-        done.add(d); rep["done"] += 1
-        rep["from"] = min(rep["from"] or date, date); rep["to"] = max(rep["to"] or date, date)
-        if _tpex_day(date) == "ok":
-            rep["tpex"] += 1
-        _sleep()
-    for d in need_close:                                   # 種子匯入的日子沒有收盤 → 補 MI_INDEX
-        if budget <= 0:
-            break
-        budget -= 1
-        try:
-            closes = _norm_closes(_fetch_closes(_ymd(d)))
-        except Exception as e:  # noqa: BLE001
-            if _is(e, "NoData"):
-                _mark_nodata(d, "twse_close"); done.add(d); _sleep()
-                continue
-            rep["failed"] += 1; rep["error"] = f"closes {d}: {e}"
-            break
-        _panel_update_closes(d, closes)
-        rep["closes"] += 1; done.add(d)
-        try:
-            pan = load_panel(since=d, cols=["date", "code", "m_today", "m_prev", "m_limit", "note", "offset", "vol_lots"])
-            pan = pan[pan["date"] == d]
-            _day_metrics(d, pan.to_dict("records"), closes, None, _hist_amt(d))
-        except Exception as e:  # noqa: BLE001
-            log.debug("closes metrics %s: %s", d, e)
-        _sleep()
+            got = store.load_metrics([key]) if key else pd.DataFrame()
+            have_t = set(got.loc[got[key].notna(), "date"].astype(str).str[:10]) if not got.empty and key in got else set()
+        except Exception:  # noqa: BLE001
+            have_t = set()
+        nod_t = _nodata("tpex")
+        todo = [d for d in sorted(set(_panel_dates()), reverse=True) if d >= TPEX_FROM and d < today and d not in have_t and d not in nod_t]
+        rep["pending_tpex"] = len(todo)
+        for d in todo:
+            if budget <= 0:
+                return
+            budget -= 1
+            st = _tpex_day(d)
+            if st == "ok":
+                rep["tpex"] += 1; rep["pending_tpex"] -= 1
+            elif st == "closed":
+                rep["pending_tpex"] -= 1
+            elif st == "fail":
+                rep["failed"] += 1; rep.setdefault("error", f"tpex {d}")
+                return
+
+    # 順序：最近缺日 (forward) → 種子日補收盤 (近 2 年，維持率 / 股價欄要用) → 更早的缺日 (back；MARGIN_PANEL_FROM 往前拉時才有) → 上櫃合計補齊
+    first, second = (fwd, back) if direction == "forward_then_back" else (back, fwd)
+    ok = run_days(first)
+    if ok:
+        ok = run_closes()
+    if ok:
+        ok = run_days(second)
+    if ok:
+        run_tpex()
     rep["pending"] = len([d for d in missing if d not in done])
     rep["pending_closes"] = len([d for d in need_close if d not in done])
     rep["seconds"] = round(time.time() - t0, 1)
@@ -1177,7 +1234,7 @@ def market_view(hist: pd.DataFrame, scored: pd.DataFrame | None = None) -> tuple
     tp_rows = h.dropna(subset=["tpex_margin_amt"])
     tpL = tp_rows.iloc[-1] if len(tp_rows) else None
     view = {
-        "date": str(L["date"]), "amt": _r(L["margin_amt"], 1), "lots": _r(L["margin_lots"], 0), "short": _r(L["short_lots"], 0),
+        "date": str(L["date"]), "amt": _r(L["margin_amt"], 1), "lots": _r(L["margin_lots"], 0),       # 融券在下方 short{lots,...} (同 key 重複會被蓋掉)
         "chg1": _r(L["chg1"], 1), "chg5": _r(L["chg5"], 1), "chg20": _r(L["chg20"], 1), "chg60": _r(L["chg60"], 1),
         "pct5": _r(L["pct5"], 2), "pct20": _r(L["pct20"], 2), "pct60": _r(L["pct60"], 2), "acc5": acc, "acc_text": acc_txt, "streak": st,
         "pct250": _r(L["pct250"], 0), "pct1250": _r(L["pct1250"], 0), "dhi250": _r(L["dhi250"], 1), "dlo250": _r(L["dlo250"], 1),
@@ -1572,10 +1629,18 @@ def stock_features(df_code: pd.DataFrame, closes=None, exdiv_events=None) -> pd.
     out["bal_vs_ma60"] = (s / s.rolling(60).mean() - 1).to_numpy() * 100
     padj = close / adj                                        # 分割時價格同步換到今日股數基準
     okp = np.isfinite(lots_adj) & np.isfinite(padj) & (lots_adj > 0)
-    first = int(np.argmax(okp)) if okp.any() else 0
-    cost = _fifo_cost(padj, buy, exits, lots_adj[first] if okp.any() else 0.0, padj[first] if okp.any() else np.nan, div)
-    cost[:min(BURN_IN, n)] = np.nan
-    out["burn_in"] = np.arange(n) < BURN_IN
+    cost = np.full(n, np.nan)
+    burn = np.arange(n) < BURN_IN
+    if okp.any():
+        # 起點 = 第一個「有餘額且有收盤」的列 (冷啟動時面板前段沒有收盤：種子匯入後收盤由 backfill 逐日補)；起點之前的流量不進帳本
+        # (否則起點前的了結會沖掉代表起點餘額的種子批次)；burn-in 以起點起算且要求 ≥ BURN_IN 個有價列
+        first = int(np.argmax(okp))
+        cost[first:] = _fifo_cost(padj[first:], buy[first:], exits[first:], float(lots_adj[first]), float(padj[first]), div[first:] if div is not None else None)
+        burn = burn | (np.arange(n) < first + BURN_IN) | (np.cumsum(np.isfinite(padj)) < BURN_IN)
+    else:
+        burn[:] = True
+    cost[burn] = np.nan
+    out["burn_in"] = burn
     out["cost_fifo"] = cost
     out["pnl_fifo"] = (close / cost - 1) * 100
     out["maint_est"] = close / (cost * MARGIN_RATIO) * 100
@@ -2074,3 +2139,28 @@ def build(scored: pd.DataFrame | None = None, watch_res: dict | None = None, poo
     meta["carried_parts"] = carried
     out["meta"] = meta
     return size_guard(out)
+
+
+def write_seed(out: dict, path: Path | str | None = None) -> Path | None:
+    """Tier-1 精簡種子 (§3.4)：history (2001~ 6 欄) + flows (2 年) → data/margin_market.json (≈350 KB)，train 模式隨 models 一起 git add；
+    market_history() 讀它當最後備援 (Actions cache 與 Pages 都沒有時仍能重建全市場序列)。沿用 (carried) 或空的 history 不覆寫既有種子；回寫入路徑或 None。"""
+    p = Path(path) if path else SEED_PATH
+    hist = (out or {}).get("history") or {}
+    rows = hist.get("rows") if isinstance(hist, dict) else None
+    if not rows or list(hist.get("cols") or []) != HISTORY_COLS or "history" in (((out or {}).get("meta") or {}).get("carried_parts") or []):
+        return None
+    if p.exists():
+        try:
+            old = json.loads(p.read_text(encoding="utf-8"))
+            if len(((old.get("history") or {}).get("rows") or [])) > len(rows) * 1.02:      # 縮水保護：新種子比舊的少 >2% 不覆寫
+                return None
+        except Exception:  # noqa: BLE001
+            pass
+    seed = {"meta": {"generated": ((out.get("meta") or {}).get("generated")), "version": VERSION, "history_days": len(rows)},
+            "history": {"cols": list(hist["cols"]), "rows": rows}}
+    fl = out.get("flows") or {}
+    if isinstance(fl, dict) and fl.get("rows"):
+        seed["flows"] = {"cols": list(fl.get("cols") or FLOW_COLS), "rows": fl["rows"]}
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(clean(seed), ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    return p
