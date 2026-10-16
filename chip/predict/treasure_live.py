@@ -1138,6 +1138,9 @@ def evaluate(prev: dict, mk: dict, max_fetch: int = 200, upto: str | None = None
     n = 0
     todo = _todo(prev, cal is not None)
     lo = min((str(x["date"])[:10] for _, x, _ in todo if _ISO.fullmatch(str(x.get("date") or "")[:10])), default=None) if cal is not None else None   # 對齊範圍 = 最早一筆要處理的推薦日起
+    # 10-16：對齊終點 = 回填截止日或大盤最新收盤日 (mk 含掃描日 mkt_close)。原本只補到 Yahoo 最後一根 → Yahoo 晚一天出最新 K 棒時 (例 10-15)，
+    # 結尾缺日不會用盤後表補，追蹤中列的「第幾天 / 至今」停在前一日 (1303 10-08 推薦在 10-16 仍顯示第 3 天)
+    hi = (upto or (max((k for k in mk if _ISO.fullmatch(str(k))), default=None) if mk else None)) if cal is not None else None
     cache: dict[str, list] = {}
     for kind, x, need in todo[:max_fetch * 2]:
         if n >= max_fetch and x["code"] not in cache:
@@ -1147,7 +1150,7 @@ def evaluate(prev: dict, mk: dict, max_fetch: int = 200, upto: str | None = None
             if b is None:
                 b = bars(x["code"]); n += 1          # 與評分同一份 2 年日 K 快取
                 if cal is not None:
-                    b = align_bars(b, cal, x["code"], lo=lo)
+                    b = align_bars(b, cal, x["code"], lo=lo, hi=hi)
                 cache[x["code"]] = b
             if upto:
                 b = [r for r in b if str(r["date"])[:10] <= upto]

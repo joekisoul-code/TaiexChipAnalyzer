@@ -382,6 +382,24 @@ def test_mi_fetch_budget():
     assert snap == ["2026-10-01", "2026-10-02", "2026-10-05"], snap
 
 
+def test_trailing_missing_day_filled_up_to_market_date():
+    """10-16：Yahoo 還沒出最新交易日 (10-13) 的 K 棒、大盤 mk 已有 10-13 → 用盤後表補結尾那天，追蹤中列「第幾天 / 至今」不停在前一日。
+    1303 型：10-08 推薦，10-09 休市 → 10-12 第 1 天、10-13 第 2 天。"""
+    B = {"1303": [bar(d, 100.0) for d in TW_NOW if "2026-09-01" <= d <= "2026-10-12"]}   # Yahoo 只到 10-12
+    MI = {"2026-10-13": {"1303": {"open": 101.0, "high": 113.0, "low": 100.5, "close": 112.0, "volume": 2e6}},
+          "2026-10-12": {"1303": {"close": 100.0}}}
+
+    def led():
+        return {"ledger": {"treasure": [], "surge": [{"code": "1303", "name": "南亞", "date": "2026-10-08", "entry": 100.0, "mktEntry": 1000.0, "status": "追蹤"}]}}
+    with patched(TL, "bars", lambda code, years="2y": B[code]), patched(TL, "_fmtqik_days", fake_fmtqik()), patched(TL, "market_snapshot", fake_snapshot(MI)):
+        new = led(); TL.evaluate(new, MK, cal=cal())
+        old = led(); TL.evaluate(old, {d: v for d, v in MK.items() if d <= "2026-10-12"}, cal=cal())   # 大盤也只到 10-12 → 不補 (不超前)
+    s = new["ledger"]["surge"][0]
+    assert s["days"] == 2 and s["lastDate"] == "2026-10-13" and abs(s["cur"] - 12.0) < 1e-6, s
+    o = old["ledger"]["surge"][0]
+    assert o["days"] == 1 and o["lastDate"] == "2026-10-12", o
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):
