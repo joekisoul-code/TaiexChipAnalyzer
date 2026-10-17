@@ -1,7 +1,7 @@
 {
- "generated": "2026-10-11 08:53:55",
+ "generated": "2026-10-18 06:13:58",
  "schema": "event_calendar/v1",
- "asof": "2026-10-11",
+ "asof": "2026-10-18",
  "params_version": "2026-09-27",
  "horizon_days": 120,
  "health": {
@@ -20,38 +20,6 @@
   "us_calendar": "NYSE 規則 + ^GSPC 實際交易日 (過去)"
  },
  "events": [
-  {
-   "date": "2026-10-09",
-   "tw_session": "2026-10-12",
-   "prev_td": "2026-10-08",
-   "event_type": "post_closure_session",
-   "title_zh": "國慶日連假後復市 (休 1 個平日，含 2 個美股交易日)",
-   "date_confidence": "confirmed",
-   "source": "TWSE holidaySchedule API",
-   "n_us": 2,
-   "closed_weekdays": 1,
-   "range_k1_factor": 1.414,
-   "beyond_horizon": false
-  },
-  {
-   "date": "2026-10-14",
-   "tw_session": "2026-10-15",
-   "event_type": "us_cpi",
-   "title_zh": "美國 9 月 CPI",
-   "date_confidence": "scheduled",
-   "source": "bls.gov CPI schedule",
-   "beyond_horizon": false
-  },
-  {
-   "date": "2026-10-15",
-   "tw_session": "2026-10-16",
-   "issue_date": "2026-10-15",
-   "event_type": "tsmc_call",
-   "title_zh": "台積電 2026 Q3 法說會 (14:00 台北)",
-   "date_confidence": "confirmed",
-   "source": "TSMC IR financial calendar / teleconference (2026-09-27 查核：10-15 14:00~15:30 台北)",
-   "beyond_horizon": false
-  },
   {
    "date": "2026-10-23",
    "tw_session": "2026-10-23",
@@ -344,7 +312,7 @@
    "n_us": 8,
    "closed_weekdays": 7,
    "range_k1_factor": 2.828,
-   "beyond_horizon": true
+   "beyond_horizon": false
   },
   {
    "date": "2027-02-05",
@@ -353,7 +321,7 @@
    "title_zh": "美國 1 月非農就業 (估計)",
    "date_confidence": "estimated",
    "source": "規則估計：月初第一個週五；待 BLS 公告",
-   "beyond_horizon": true
+   "beyond_horizon": false
   },
   {
    "date": "2027-02-15",
