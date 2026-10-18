@@ -155,7 +155,9 @@ def load(stock_id: str, wg: dict | None = None) -> dict:
 
 # ------------------------------------------------------------------ 成本與分布
 def cost_table(flows: pd.DataFrame, price: float | None) -> pd.DataFrame:
-    """各路資金在 5/20/60 日的累積淨買張數、買方平均成本 (或出貨均價)、現價相對成本。"""
+    """各路資金在 5/20/60 日的累積淨買張數、買方平均成本 (或出貨均價)、現價相對成本。
+    N日口徑 = 'buy' (N日成本為買超日加權收盤均價) / 'sell' (淨賣超 → N日成本為賣超日加權均價 = 出貨均價) / None；
+    另給 N日買超成本 (一律買超加權，與八大行庫分布區塊 c20/c60 同口徑)、N日出貨均價。"""
     rows = []
     who = {"foreign": "外資", "trust": "投信", "dealer": "自營商", "main": "主力 (券商分點)", "gov8": "八大行庫", "margin_chg": "融資 (散戶)"}
     for col, name in who.items():
@@ -167,20 +169,22 @@ def cost_table(flows: pd.DataFrame, price: float | None) -> pd.DataFrame:
             net = float(t[col].sum())
             buys = t[t[col] > 0]
             sells = t[t[col] < 0]
-            if net > 0 and not buys.empty:
-                cost = float((buys[col] * buys["close"]).sum() / buys[col].sum())
-                rec[f"{w}日淨買(張)"] = round(net)
-                rec[f"{w}日成本"] = round(cost, 2)
-                rec[f"{w}日現價vs成本%"] = round((price / cost - 1) * 100, 2) if price and cost else None
-            elif net < 0 and not sells.empty:
-                cost = float((sells[col] * sells["close"]).sum() / sells[col].sum())
-                rec[f"{w}日淨買(張)"] = round(net)
-                rec[f"{w}日成本"] = round(cost, 2)
-                rec[f"{w}日現價vs成本%"] = round((price / cost - 1) * 100, 2) if price and cost else None
+            # 10-18 chips-2：買超加權成本與賣超加權出貨均價分開給 (「N日成本」沿用舊口徑：淨買→買超成本、淨賣→出貨均價，以「N日口徑」標明)
+            bcost = float((buys[col] * buys["close"]).sum() / buys[col].sum()) if not buys.empty else None
+            savg = float((sells[col] * sells["close"]).sum() / sells[col].sum()) if not sells.empty else None
+            rec[f"{w}日淨買(張)"] = round(net)
+            if net > 0 and bcost is not None:
+                cost, kind = bcost, "buy"
+            elif net < 0 and savg is not None:
+                cost, kind = savg, "sell"
             else:
-                rec[f"{w}日淨買(張)"] = round(net)
-                rec[f"{w}日成本"] = None
-                rec[f"{w}日現價vs成本%"] = None
+                cost, kind = None, None
+            rec[f"{w}日成本"] = round(cost, 2) if cost is not None else None
+            rec[f"{w}日現價vs成本%"] = round((price / cost - 1) * 100, 2) if price and cost else None
+            rec[f"{w}日口徑"] = kind
+            rec[f"{w}日買超成本"] = round(bcost, 2) if bcost is not None else None
+            rec[f"{w}日現價vs買超成本%"] = round((price / bcost - 1) * 100, 2) if price and bcost else None
+            rec[f"{w}日出貨均價"] = round(savg, 2) if savg is not None else None
         rows.append(rec)
     return pd.DataFrame(rows)
 

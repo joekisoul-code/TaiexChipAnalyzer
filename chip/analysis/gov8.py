@@ -324,6 +324,12 @@ def watchlist(res: dict | None) -> dict:
                 rec["vs20"] = r0.get("20日現價vs成本%")
                 rec["cost60"] = r0.get("60日成本")
                 rec["vs60"] = r0.get("60日現價vs成本%")
+                # 10-18 chips-2：cost20/cost60 淨賣超時是出貨均價 → basis20/60 標明 ('buy'/'sell')；buy_cost* 一律買超加權 (= 分布區塊 c20/c60 口徑)
+                for w in (20, 60):
+                    rec[f"basis{w}"] = r0.get(f"{w}日口徑")
+                    rec[f"buy_cost{w}"] = r0.get(f"{w}日買超成本")
+                    rec[f"buy_vs{w}"] = r0.get(f"{w}日現價vs買超成本%")
+                    rec[f"sell_avg{w}"] = r0.get(f"{w}日出貨均價")
         try:
             bk = histock.government_bank_stock(sid)
             if not bk.empty:
