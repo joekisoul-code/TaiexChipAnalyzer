@@ -149,12 +149,20 @@ def train(scored: pd.DataFrame, night=None, write: bool = True, verbose: bool = 
     return out
 
 
-def build(scored: pd.DataFrame, night=None) -> dict | None:
-    """今日各有效資訊的讀數落在哪一檔 (高檔/中間/低檔，門檻用全歷史 20/80 分位) → 每個視野的多空票數與敘述。"""
+def build(scored: pd.DataFrame, night=None, snapshot: dict | None = None) -> dict | None:
+    """今日各有效資訊的讀數落在哪一檔 (高檔/中間/低檔，門檻用全歷史 20/80 分位) → 每個視野的多空票數與敘述。
+    snapshot = realtime.snapshot()：10-18 F3 build_matrix 以「下一列日期」對夜盤 → 最後一列 (今日) 的夜盤永遠 NaN；
+    夜盤已收 (short_term.night_final) 時以 snapshot tx_night.change_pct 補今日讀數 (同 short_term.forecast)。"""
     st = M.load_json("infomap")
     if not st:
         return None
     d = _frame(scored, night)
+    try:
+        from .short_term import night_final, NIGHT_FEATURE
+        if night_final(snapshot) and NIGHT_FEATURE in d.columns and len(d):
+            d.loc[d.index[-1], NIGHT_FEATURE] = float(snapshot["tx_night"]["change_pct"])
+    except Exception as e:  # noqa: BLE001
+        log.warning("infomap night fill: %s", e)
     row = d.iloc[-1]
     out = {"date": str(row["date"])[:10], "trained_at": st.get("trained_at"), "h": {}, "groups": {g: v["any_valid"] for g, v in (st.get("groups") or {}).items()}}
     for h in HORIZONS:

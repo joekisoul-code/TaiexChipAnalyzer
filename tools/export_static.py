@@ -313,7 +313,7 @@ def main() -> None:
         print("  es_evening failed:", e)
     try:   # 預測邏輯總表 (2026-09-24)：今日各有效資訊讀數所在檔位 → 各視野多空票
         from chip.predict import infomap, short_term as _st3
-        fc["infomap"] = infomap.build(backtest.load_long("2010-01-01"), _st3._night_hist())
+        fc["infomap"] = infomap.build(backtest.load_long("2010-01-01"), _st3._night_hist(), snap)   # 10-18 F3：補今日夜盤讀數
         fc["asia_dates"] = _st3.asia_last_dates()   # 亞股同日資料新鮮度 (2026-09-24：嚴格同日，缺就 NaN)
     except Exception as e:  # noqa: BLE001
         print("  infomap failed:", e)
