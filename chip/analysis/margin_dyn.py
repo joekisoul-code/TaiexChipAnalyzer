@@ -2417,7 +2417,10 @@ def split(out: dict) -> tuple[dict, dict | None]:
     core["meta"] = meta
     h = out.get("history") if isinstance(out.get("history"), dict) else {}
     rows = list(h.get("rows") or [])
-    core["history_tail"] = {"cols": list(h.get("cols") or HISTORY_COLS), "rows": rows[-HIST_TAIL:]}
+    if not rows and _has_rows(out.get("history_tail")):
+        core["history_tail"] = out["history_tail"]   # 核心-only prev (margin_hist 抓不到) → 保留上次尾段，雜湊不變
+    else:
+        core["history_tail"] = {"cols": list(h.get("cols") or HISTORY_COLS), "rows": rows[-HIST_TAIL:]}
     d = core.get("derived")
     if isinstance(d, dict) and len(d.get("rows") or []) > DERIVED_KEEP:
         core["derived"] = _cut_table(d, lambda r: r[-DERIVED_KEEP:])

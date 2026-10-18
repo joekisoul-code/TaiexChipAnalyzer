@@ -210,6 +210,28 @@ def test_full_then_fast_hashes_unchanged():
     assert P.hash_obj(clean(h4)) == m_full["margin_hist"] and P.hash_obj(clean(c4)) == m_full["margin"]
 
 
+def test_fast_without_margin_hist_keeps_tail_and_hash():
+    """fast 時 margin_hist.json 抓不到 (Pages + raw 都 404) → prev 只有核心：split 保留上次 history_tail，margin 雜湊不變、不產生 margin_hist。"""
+    pages = Path(tempfile.mkdtemp(prefix="nohist_", dir=_TMP)) / "data"
+    c, _ = M.split(_full_out())
+    dump(pages, "margin", c)
+    m_full = P.manifest(pages)
+    assert len(c["history_tail"]["rows"]) == M.HIST_TAIL
+    fs = _FakeSession(pages, fail={"margin_hist.json"})
+    with patched(M, "session", lambda: fs):
+        prev = M.published()
+        assert "history" not in prev and "margin_hist.json" in fs.calls, "只拿到核心"
+        c2, h2 = M.split(M.build(None, None, None, prev=prev, fast=True))
+    assert h2 is None
+    assert c2["history_tail"] == json.loads((pages / "margin.json").read_text(encoding="utf-8"))["history_tail"], "尾段沿用"
+    fast = Path(tempfile.mkdtemp(prefix="nohist_fast_", dir=_TMP)) / "data"
+    dump(fast, "margin", c2)
+    assert P.manifest(fast)["margin"] == m_full["margin"]
+    # 真的沒有任何 history (無 prev 尾段) → 空尾段，不捏造
+    c3, h3 = M.split({"meta": {}, "market": {}})
+    assert c3["history_tail"]["rows"] == [] and h3 is None
+
+
 def test_carry_hist_when_nothing_to_write():
     pages = Path(tempfile.mkdtemp(prefix="pg_", dir=_TMP)) / "data"
     _, h = M.split(_full_out())
