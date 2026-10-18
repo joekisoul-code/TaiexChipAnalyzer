@@ -174,7 +174,8 @@ def build(fc: dict, hourly: dict | None, snap: dict | None, scored: pd.DataFrame
     if x.get("p_up_adj") is not None:   # pr2 起停用 (learn.PLATT_ENABLED=False)，保留相容
         ln.append(f"校準上漲率 {float(x['p_up_adj']):.0%}")
     if x.get("recent_hit") is not None and x.get("recent_n"):
-        ln.append(f"近期實際命中 {float(x['recent_hit']):.0%}/{int(x['recent_n'])} 次" + (f" (同期上漲率 {float(x['recent_up_rate']):.0%})" if x.get("recent_up_rate") is not None else ""))
+        from .learn import recent_hit_label      # 10-18 F7：多為回填 → 「近期 (多為回填) 命中」
+        ln.append(f"{recent_hit_label(x.get('recent_n_published'), x.get('recent_n_backfill'))} {float(x['recent_hit']):.0%}/{int(x['recent_n'])} 次" + (f" (同期上漲率 {float(x['recent_up_rate']):.0%})" if x.get("recent_up_rate") is not None else ""))
     if x.get("recent_flag") == "below":
         ln.append("近期低於長期 (僅供參考，不改叫牌)")
     elif x.get("recent_flag") == "above":

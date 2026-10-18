@@ -319,6 +319,8 @@ def _group_stats(rs: list[dict], *, degrade_enabled: bool | None = None, platt_e
     hits = [bool(r["realized"]["hit"]) for r in calls]
     out = {"n_eval": len(ev), "n_calls": len(calls), "n_pending": len([r for r in rs if not r.get("realized")]),
            "n_published": sum(1 for r in rs if not r.get("backfill")), "n_backfill": sum(1 for r in rs if r.get("backfill")),   # pr2 P5：真實發布 vs 回填
+           # 10-18 F7：叫牌 (n_calls) 中真實發布 vs 回填 → next_days.recent_n_published / recent_n_backfill，文案「近期 (多為回填) 命中」
+           "n_calls_published": sum(1 for r in calls if not r.get("backfill")), "n_calls_backfill": sum(1 for r in calls if r.get("backfill")),
            "hit_all": round(float(np.mean(hits)), 3) if hits else None,
            "hit_ewm": round(_ewm_hit(hits), 3) if hits else None,
            "brier": round(float(np.mean([r["realized"]["brier"] for r in ev])), 4) if ev else None,
@@ -454,6 +456,14 @@ def summarize(rows: list[dict]) -> dict:
 
 
 # ------------------------------------------------------------------ 套用到本次預測
+def recent_hit_label(n_pub, n_bf) -> str:
+    """10-18 F7：近期命中的標籤。叫牌多數為回填 (事後以當年前模型重算，非當時發布) → 「近期 (多為回填) 命中」；
+    真實發布 ≥ 回填 → 「近期實際命中」；數量不明 (舊資料) → 「近期命中」，不冒稱實際。與 App bfMost 同規則 (nb > np)。"""
+    if n_pub is None or n_bf is None:
+        return "近期命中"
+    return "近期 (多為回填) 命中" if n_bf > n_pub else "近期實際命中"
+
+
 def adjust_forecast(fc: dict, summary: dict) -> dict:
     """依近期對帳結果把 recent_hit / recent_up_rate / recent_flag / learn_note 寫進 next_days 與 horizons (pr2：只顯示不調整)。
     DEGRADE_ENABLED / PLATT_ENABLED 為 True 時才走舊路徑 (call 改中性並留 call_model、寫 p_up_adj)；預設不寫 p_up_adj、不設 call_degraded，
@@ -474,6 +484,7 @@ def adjust_forecast(fc: dict, summary: dict) -> dict:
             g = gv
         elif v and v not in ("base", "daily", ""):   # 同變體對帳不足 (含 n_calls=0)
             x["recent_hit"] = g.get("hit_ewm"); x["recent_n"] = g.get("n_calls"); x["recent_up_rate"] = g.get("up_rate")
+            x["recent_n_published"] = g.get("n_calls_published"); x["recent_n_backfill"] = g.get("n_calls_backfill")
             x["learn_note"] = f"近期對帳為不含夜盤紀錄 (命中 {g['hit_ewm']:.0%}，n={g['n_calls']})，不套用到含夜盤叫牌" if g.get("n_calls") else ""
             return
         adj = g.get("adjust") or {}
@@ -482,6 +493,7 @@ def adjust_forecast(fc: dict, summary: dict) -> dict:
             a, b, k = adj["platt"]
             x["p_up_adj"] = round(_apply_platt(a, b, p), 3)
         x["recent_hit"] = g.get("hit_ewm"); x["recent_n"] = g.get("n_calls"); x["recent_hit20"] = g.get("hit20")
+        x["recent_n_published"] = g.get("n_calls_published"); x["recent_n_backfill"] = g.get("n_calls_backfill")
         x["recent_up_rate"] = g.get("up_rate")            # LC-08：同期上漲率對照 (不含夜盤 1~2 日叫牌 2026 命中 ≈ 上漲率)
         x["recent_flag"] = adj.get("recent_flag")         # below / above / None：近期 vs 長期 (±DEGRADE_GAP)，只顯示不改叫牌
         note = adj.get("note") or ""
@@ -490,7 +502,7 @@ def adjust_forecast(fc: dict, summary: dict) -> dict:
             x["call"] = "中性"; x["call_strength"] = ""
             x["call_degraded"] = True
         if g.get("n_calls"):
-            note = (note + "；" if note else "") + f"近期實際命中 {g['hit_ewm']:.0%} (n={g['n_calls']})" + (f"、同期上漲率 {g['up_rate']:.0%}" if g.get("up_rate") is not None else "")
+            note = (note + "；" if note else "") + f"{recent_hit_label(g.get('n_calls_published'), g.get('n_calls_backfill'))} {g['hit_ewm']:.0%} (n={g['n_calls']})" + (f"、同期上漲率 {g['up_rate']:.0%}" if g.get("up_rate") is not None else "")
         x["learn_note"] = note
     for x in fc.get("next_days") or []:
         apply(x, int(x.get("n") or 0))

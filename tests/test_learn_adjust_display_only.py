@@ -71,7 +71,12 @@ def test_a_degrade_display_only():
     assert x["call"] == "偏多" and x["call_strength"] == "強" and "call_degraded" not in x and "call_model" not in x
     assert "p_up_adj" not in x and x["p_up"] == 0.85
     assert x["recent_flag"] == "below" and abs(x["recent_hit"] - g["hit_ewm"]) < 1e-9 and x["recent_n"] == 60 and abs(x["recent_up_rate"] - 0.75) < 1e-9
-    assert "不改叫牌" in x["learn_note"] and "同期上漲率 75%" in x["learn_note"] and "近期實際命中" in x["learn_note"]
+    assert "不改叫牌" in x["learn_note"] and "同期上漲率 75%" in x["learn_note"]
+    # 10-18 F7：60 筆叫牌中 40 筆回填 → 標「近期 (多為回填) 命中」並帶出真實/回填筆數
+    assert g["n_calls_published"] == 20 and g["n_calls_backfill"] == 40
+    assert x["recent_n_published"] == 20 and x["recent_n_backfill"] == 40
+    assert "近期 (多為回填) 命中" in x["learn_note"] and "近期實際命中" not in x["learn_note"]
+    assert L.recent_hit_label(30, 10) == "近期實際命中" and L.recent_hit_label(None, None) == "近期命中"
     assert out["learn"]["flags"] == {"degrade": False, "platt": False, "touch_factor": False, "level_adj": False} and "停用" in out["learn"]["note"]   # r6：加 level_adj 旗標
     # 高於長期 → above，同樣不改叫牌
     rows2 = _mkt_rows(60, 1, "night", lambda i: i % 10 != 9, 0.80)   # 0.9 vs 0.80

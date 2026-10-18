@@ -108,7 +108,24 @@ def test_learn_extra_uses_recent_flag():
         fc["next_days"][0].update({"recent_hit": 0.56, "recent_n": 88, "recent_up_rate": 0.558, "recent_flag": "below"})
         V = VD.build(fc, None, {"phase": "closed"}, None, None)
     ln = [e for e in V["extra"] if e["key"] == "learn"][0]["note"]
-    assert "近期實際命中 56%/88 次 (同期上漲率 56%)" in ln and "不改叫牌" in ln and "校準" not in ln and "降級" not in ln
+    # 10-18 F7：無 recent_n_published/backfill (舊資料) → 不冒稱「實際」
+    assert "近期命中 56%/88 次 (同期上漲率 56%)" in ln and "實際" not in ln and "不改叫牌" in ln and "校準" not in ln and "降級" not in ln
+
+
+def _learn_note(**kw):
+    with tables():
+        fc = _fc("base")
+        fc["next_days"][0].update({"recent_hit": 0.6, "recent_up_rate": 0.55, **kw})
+        V = VD.build(fc, None, {"phase": "closed"}, None, None)
+    return [e for e in V["extra"] if e["key"] == "learn"][0]["note"]
+
+
+def test_learn_extra_backfill_label():
+    """10-18 F7：叫牌多數為回填 → 「近期 (多為回填) 命中」；真實發布 ≥ 回填 → 「近期實際命中」。"""
+    ln = _learn_note(recent_n=130, recent_n_published=18, recent_n_backfill=112)
+    assert "近期 (多為回填) 命中 60%/130 次" in ln and "實際" not in ln, ln
+    ln = _learn_note(recent_n=40, recent_n_published=25, recent_n_backfill=15)
+    assert "近期實際命中 60%/40 次" in ln and "回填" not in ln, ln
 
 
 if __name__ == "__main__":
