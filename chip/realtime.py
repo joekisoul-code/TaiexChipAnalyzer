@@ -47,6 +47,8 @@ def session_phase(t: dt.datetime | None = None) -> str:
         return "night"
     if t.weekday() >= 5:
         return "closed"
+    if t.weekday() == 0 and tm < dt.time(5, 0):   # 10-18 RT-4：週日晚上沒有夜盤 → 週一 00:00~05:00 休市 (不是 night)
+        return "closed"
     if dt.time(8, 30) <= tm < SESSION_OPEN:
         return "pre"
     if SESSION_OPEN <= tm < SESSION_CLOSE:
@@ -93,8 +95,13 @@ def futures_quotes(night: bool = False) -> dict | None:
            "bid": num(near.get("CBidPrice1")), "ask": num(near.get("CAskPrice1")),
            "bid_size": num(near.get("CBidSize1")), "ask_size": num(near.get("CAskSize1"))}
     if last and spot:
-        out["basis"] = last - spot
-        out["basis_pct"] = (last / spot - 1) * 100
+        if night:
+            # 10-18 RT-3：夜盤時段現貨已收 (spot = 日盤 13:30 現貨收盤) → 這是「夜盤相對現貨收盤」，不是期現價差；不輸出 basis/basis_pct
+            out["vs_spot_close"] = last - spot
+            out["vs_spot_close_pct"] = (last / spot - 1) * 100
+        else:
+            out["basis"] = last - spot
+            out["basis_pct"] = (last / spot - 1) * 100
     return out
 
 
@@ -104,7 +111,8 @@ def _sum_sizes(s: str | None) -> float:
 
 
 def large_caps() -> pd.DataFrame:
-    """40 檔權值股即時報價：code, name, last, prev, chg_pct, volume, bid_size, ask_size, time"""
+    """40 檔權值股即時報價：code, name, last, prev, chg_pct, volume, bid_size, ask_size, time
+    MIS 欄位：a/f = 五檔賣價/賣量 (委賣)，b/g = 五檔買價/買量 (委買)。10-18 RT-1 前 f/g 對調 → bid_ask_ratio 實為委賣/委買。"""
     codes = "|".join(f"tse_{c}.tw" for c in LARGE_CAPS)
 
     def load():
@@ -119,9 +127,16 @@ def large_caps() -> pd.DataFrame:
         if not last or not prev:
             continue
         out.append({"code": m.get("c"), "name": m.get("n"), "last": last, "prev": prev, "chg_pct": (last / prev - 1) * 100,
-                    "volume": num(m.get("v")), "bid_size": _sum_sizes(m.get("f")), "ask_size": _sum_sizes(m.get("g")),
+                    "volume": num(m.get("v")), "bid_size": _sum_sizes(m.get("g")), "ask_size": _sum_sizes(m.get("f")),
                     "time": m.get("%") or m.get("t")})
     return pd.DataFrame(out)
+
+
+def breadth_of(lc: pd.DataFrame) -> dict:
+    """權值股廣度 + 委買/委賣比 (bid_ask_ratio > 1 = 委買多於委賣)。"""
+    up, down = int((lc["chg_pct"] > 0).sum()), int((lc["chg_pct"] < 0).sum())
+    return {"n": len(lc), "up": up, "down": down, "flat": len(lc) - up - down,
+            "avg_chg": float(lc["chg_pct"].mean()), "bid_ask_ratio": float(lc["bid_size"].sum() / max(1, lc["ask_size"].sum()))}
 
 
 # ------------------------------------------------------------------ 綜合快照
@@ -172,9 +187,7 @@ def snapshot(scored: pd.DataFrame | None = None) -> dict:
     try:
         lc = large_caps()
         if not lc.empty:
-            up, down = int((lc["chg_pct"] > 0).sum()), int((lc["chg_pct"] < 0).sum())
-            snap["breadth"] = {"n": len(lc), "up": up, "down": down, "flat": len(lc) - up - down,
-                               "avg_chg": float(lc["chg_pct"].mean()), "bid_ask_ratio": float(lc["bid_size"].sum() / max(1, lc["ask_size"].sum()))}
+            snap["breadth"] = breadth_of(lc)
             snap["large_caps"] = lc.sort_values("chg_pct", ascending=False).to_dict("records")
             tsmc = lc[lc["code"] == "2330"]
             if not tsmc.empty:
