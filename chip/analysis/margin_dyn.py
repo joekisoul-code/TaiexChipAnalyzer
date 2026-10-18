@@ -1345,10 +1345,13 @@ def _weekly(h: pd.DataFrame) -> list[dict]:
     try:
         wk = h.copy()
         wk["wk"] = pd.to_datetime(wk["date"]).dt.to_period("W").astype(str)
+        wk["pc"] = wk["close"].astype(float).ffill().shift(1)    # 10-18 chips-1：前週最後收盤 → 本週最後收盤 (與 chg1 週加總同一時間窗)
         for _k, grp in list(wk.groupby("wk"))[-12:]:
             cl = grp["close"].astype(float).dropna()
+            base = grp["pc"].iloc[0]
+            base = float(base) if pd.notna(base) else (float(cl.iloc[0]) if len(cl) >= 2 else None)
             out.append({"week": str(grp["date"].iloc[0])[:10], "chg": _r(grp["chg1"].sum(), 0), "days": int(len(grp)),
-                        "ret": _r((cl.iloc[-1] / cl.iloc[0] - 1) * 100, 2) if len(cl) >= 2 else None})
+                        "ret": _r((cl.iloc[-1] / base - 1) * 100, 2) if len(cl) and base else None})
     except Exception as e:  # noqa: BLE001
         log.debug("weekly: %s", e)
     return out

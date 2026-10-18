@@ -95,6 +95,24 @@ def _event_stats(h: pd.DataFrame, mask: pd.Series) -> dict | None:
     return out
 
 
+def _weekly(h: pd.DataFrame) -> list[dict]:
+    """週別統計 (近 12 週)：官股週淨買賣 vs 指數週漲跌 (前週最後收盤 → 本週最後收盤)。"""
+    weekly = []
+    try:
+        wk = h.copy()
+        wk["wk"] = pd.to_datetime(wk["date"]).dt.to_period("W").astype(str)
+        wk["pc"] = wk["close"].astype(float).ffill().shift(1)    # 10-18 chips-1：前週最後收盤 → 本週最後收盤 (與週淨買賣加總同一時間窗)
+        for _k, grp in list(wk.groupby("wk"))[-12:]:
+            cl = grp["close"].astype(float).dropna()
+            base = grp["pc"].iloc[0]
+            base = float(base) if pd.notna(base) else (float(cl.iloc[0]) if len(cl) >= 2 else None)
+            weekly.append({"week": str(grp["date"].iloc[0])[:10], "net": round(float(grp["gov8_net"].sum()), 0), "days": int(len(grp)),
+                           "ret": round(float(cl.iloc[-1] / base - 1) * 100, 2) if len(cl) and base else None})
+    except Exception as e:  # noqa: BLE001
+        log.debug("gov8 weekly: %s", e)
+    return weekly
+
+
 def market_view(hist: pd.DataFrame, scored: pd.DataFrame | None) -> tuple[dict, pd.DataFrame]:
     h = hist.dropna(subset=["gov8_net"]).copy()
     if h.empty:
@@ -196,16 +214,7 @@ def market_view(hist: pd.DataFrame, scored: pd.DataFrame | None) -> tuple[dict, 
     inv_rng = float(inv.max() - inv.min())
     inv_pos = round(float((inv.iloc[-1] - inv.min()) / inv_rng * 100), 0) if inv_rng > 0 else None
     # 週別統計 (近 12 週)：官股週淨買賣 vs 指數週漲跌
-    weekly = []
-    try:
-        wk = h.copy()
-        wk["wk"] = pd.to_datetime(wk["date"]).dt.to_period("W").astype(str)
-        for _k, grp in list(wk.groupby("wk"))[-12:]:
-            cl = grp["close"].astype(float).dropna()
-            weekly.append({"week": str(grp["date"].iloc[0])[:10], "net": round(float(grp["gov8_net"].sum()), 0), "days": int(len(grp)),
-                           "ret": round(float(cl.iloc[-1] / cl.iloc[0] - 1) * 100, 2) if len(cl) >= 2 else None})
-    except Exception as e:  # noqa: BLE001
-        log.debug("gov8 weekly: %s", e)
+    weekly = _weekly(h)
     view = {
         "date": str(last["date"]), "net": round(net, 1), "cum5": round(cum5, 1), "cum20": round(float(last["cum20"]), 1), "cum60": round(float(last["cum60"]), 1),
         "cum120": round(float(last["cum120"]), 1), "z20": round(float(last["z20"]), 2) if pd.notna(last["z20"]) else None,
