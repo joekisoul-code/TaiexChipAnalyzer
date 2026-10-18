@@ -164,10 +164,42 @@ def build_frame(use_wantgoo: bool = True) -> tuple[pd.DataFrame, dict]:
         _patch(fut_latest.iloc[0].to_dict(), {c: c for c in fut_latest.columns if c != "date"})
     df = df.sort_values("date").reset_index(drop=True)
     df = df[df["close"].notna()].reset_index(drop=True)
+    df = fill_maint_twse(df)
     meta["_built_at"] = dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M:%S")
     meta["_wantgoo"] = wg
     meta["_gov8_rank"] = _safe(histock.government_banks_ranking, meta, "HiStock 八大行庫排行")
     return add_features(df), meta
+
+
+def fill_maint_twse(df: pd.DataFrame, metrics: pd.DataFrame | None = None) -> pd.DataFrame:
+    """10-18 chips-3：玩股網維持率 (maint_ratio) 抓不到時，以 margin_dyn 的 TWSE 自算維持率 (daily_metrics maint_twse，
+    只取 maint_cov == 100 的完整覆蓋日) 補「最後一筆玩股網值之後」的尾段；同日優先，缺時最多沿用前 1 個交易日，不更早。
+    補上的列 maint_twse_fill = 1.0 (其餘 0.0，數值欄避免 object 欄混入下游)，歷史段不動 (避免改到模型訓練特徵)。"""
+    d = df.copy()
+    if "maint_ratio" not in d:
+        d["maint_ratio"] = np.nan
+    d["maint_twse_fill"] = 0.0
+    try:
+        m = metrics if metrics is not None else store.load_metrics(["maint_twse", "maint_cov"])
+        if m is None or m.empty or "maint_twse" not in m:
+            return d
+        m = m.copy()
+        if "maint_cov" in m:
+            m = m[pd.to_numeric(m["maint_cov"], errors="coerce") == 100]
+        mp = dict(zip(m["date"].astype(str).str[:10], pd.to_numeric(m["maint_twse"], errors="coerce")))
+        lv = d["maint_ratio"].last_valid_index()
+        start = 0 if lv is None else int(lv) + 1
+        dates = d["date"].astype(str).str[:10].tolist()
+        for i in range(start, len(d)):
+            v = mp.get(dates[i])
+            if (v is None or v != v) and i >= 1:
+                v = mp.get(dates[i - 1])          # 最多差 1 個交易日 (TWSE 晚到)
+            if v is not None and v == v:
+                d.at[d.index[i], "maint_ratio"] = float(v)
+                d.at[d.index[i], "maint_twse_fill"] = 1.0
+    except Exception as e:  # noqa: BLE001
+        log.warning("fill_maint_twse: %s", e)
+    return d
 
 
 # ============================================================ 衍生指標
@@ -178,6 +210,8 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
               "top10_spec_net", "oi_market"):
         if c not in d:
             d[c] = np.nan
+    if "maint_twse_fill" in d:      # 維持率來源旗標跟著 ffill (沿用的值標示同一來源)
+        d["maint_twse_fill"] = d["maint_twse_fill"].where(d["maint_ratio"].notna()).ffill(limit=3)
     for c in ("pcr_oi", "top10_spec_net", "oi_market", "maint_ratio", "fut_foreign_net_oi"):
         d[c] = d[c].ffill(limit=3)
     c = d["close"].astype(float)
@@ -409,9 +443,9 @@ def _row_factors(r: pd.Series, weights: dict) -> list[Factor]:
         cm = "融資與指數同步，籌碼健康"
     add("margin", f"餘額 {fmt(r.get('margin_amt'), 0, sign=False)} 億｜日變 {fmt(r.get('margin_chg1'))}｜20日 {fmt(m20)}% vs 指數 {fmt(r20)}%", cm, tags)
     mr = r.get("maint_ratio")
-    add("maint", f"{fmt(mr, 2, '%', sign=False)}",
+    add("maint", f"{fmt(mr, 2, '%', sign=False)}" + (" (TWSE自算)" if pd.notna(mr) and r.get("maint_twse_fill") == 1.0 else ""),
         "維持率偏低，接近斷頭區，需留意追繳賣壓" if pd.notna(mr) and mr < 160 else
-        "維持率健康" if pd.notna(mr) and mr >= 170 else "維持率尚可" if pd.notna(mr) else "需玩股網資料",
+        "維持率健康" if pd.notna(mr) and mr >= 170 else "維持率尚可" if pd.notna(mr) else "無維持率資料 (玩股網與 TWSE 自算皆缺)",
         ["維持率警戒"] if pd.notna(mr) and mr < 160 else [])
     add("short", f"餘額 {fmt(r.get('short_lots'), 0, sign=False)} 張｜5日 {fmt(r.get('short_chg5'), 0)}｜券資比 {fmt(r.get('short_ratio'), 2, '%', sign=False)}",
         "上漲中融券增加 → 軋空動能" if r["ret5"] > 0 and (r.get("short_chg5") or 0) > 0 else
