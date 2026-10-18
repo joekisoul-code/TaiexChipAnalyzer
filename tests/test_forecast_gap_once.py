@@ -21,7 +21,16 @@ GAP_BETA = 0.48
 NIGHT = -2.42
 
 
+def _no_io():
+    # 不碰真實資料目錄：events.build 會寫 data/models/event_calendar.json、crossmkt/patterns 讀模型檔
+    from chip.predict import events as EV, crossmkt as XM
+    EV.build = lambda *a, **k: {}
+    EV.for_forecast = lambda *a, **k: {}
+    XM.smart_overlay = lambda *a, **k: None
+
+
 def _patch():
+    _no_io()
     MF.night_gap_beta = lambda: (GAP_BETA, 0.6, 700)
     MF._ST_nf = lambda snap: True
 
@@ -88,6 +97,7 @@ def test_hourly_override_updates_close_q():
 
 
 def test_no_night_no_gap_keys():
+    _no_io()
     MF.night_gap_beta = lambda: (GAP_BETA, 0.6, 700)
     MF._ST_nf = lambda snap: False
     out = MF.refine_short_term(_fc([_row(1, "base", -1.0, -2.2, 0.3)]), None, _snap(), None)
