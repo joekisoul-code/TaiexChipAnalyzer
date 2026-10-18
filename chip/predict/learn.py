@@ -376,6 +376,14 @@ def _touch_stats(rs: list[dict]) -> dict:
             "enabled": TOUCH_FACTOR_ENABLED, "note": note}
 
 
+ETF_GATE_SINCE = "2026-09-24"     # commit 40db9f6：ETF 不套用個股模型 (之後一律中性)
+
+
+def _etf_pre_gate(r: dict) -> bool:
+    """10-18 stocks-3：ETF (代號 00 開頭) 在 ETF 閘門之前寫入的個股叫牌 → 量的是已不存在的模型設定，不進 stocks 對帳統計。"""
+    return str(r.get("sid") or "").startswith("00") and str(r.get("as_of") or "") < ETF_GATE_SINCE
+
+
 def summarize(rows: list[dict]) -> dict:
     mk = [r for r in rows if r.get("kind") == "mkt" and not r.get("live")]
     out = {"market": {"by_h": {}, "touch": {}, "trend7": None, "recent": []}, "stocks": {}}
@@ -431,15 +439,16 @@ def summarize(rows: list[dict]) -> dict:
     rec = [r for r in mk if r.get("h") in (1, 2, 3, 5) and r.get("call") != "中性"][-40:]
     out["market"]["recent"] = [{"as_of": r["as_of"], "h": r["h"], "target": r.get("target") or (r["realized"] or {}).get("date"), "call": r["call"] + (r.get("strength") or ""),
                                 "p_up": r["p_up"], "ret": (r["realized"] or {}).get("ret"), "hit": (r["realized"] or {}).get("hit"), "variant": r.get("variant")} for r in rec][::-1]
-    for sid in sorted({r["sid"] for r in rows if r.get("kind") == "stk"}):
-        rs = [r for r in rows if r.get("kind") == "stk" and r["sid"] == sid]
+    stk = [r for r in rows if r.get("kind") == "stk" and not _etf_pre_gate(r)]
+    for sid in sorted({r["sid"] for r in stk}):
+        rs = [r for r in stk if r["sid"] == sid]
         # 個股降級本輪 (pr2) 未驗證 → 維持現行行為 (degrade/platt 照舊計算；export_static 只用 adjust.degrade)
         o = {"by_h": {str(h): _group_stats([r for r in rs if r.get("h") == h], degrade_enabled=True, platt_enabled=True) for h in (5, 10, 20) if any(r.get("h") == h for r in rs)}}
         o["recent"] = [{"as_of": r["as_of"], "h": r["h"], "call": r["call"], "p_up": r["p_up"], "rel": (r["realized"] or {}).get("rel"), "hit": (r["realized"] or {}).get("hit")} for r in rs if r.get("call") != "中性"][-15:][::-1]
         out["stocks"][sid] = o
-    ab = [r for r in rows if r.get("kind") == "stk" and r.get("abs_call") and (r.get("realized") or {}).get("abs_hit") is not None]
+    ab = [r for r in stk if r.get("abs_call") and (r.get("realized") or {}).get("abs_hit") is not None]
     out["stocks_abs"] = {"n": len(ab), "hit": round(sum(r["realized"]["abs_hit"] for r in ab) / len(ab), 3) if ab else None,
-                         "pending": sum(1 for r in rows if r.get("kind") == "stk" and r.get("abs_call") and not r.get("realized")),
+                         "pending": sum(1 for r in stk if r.get("abs_call") and not r.get("realized")),
                          "note": "股價偏漲 (個股跑贏大盤 + 大盤看多) 的實帳：股價本身上漲比例；回測 5/10 日約 63%"}
     return out
 
