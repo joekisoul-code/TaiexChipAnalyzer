@@ -264,7 +264,8 @@ def test_derived_by_hand():
     # 全市場 Σ餘額/Σ限額 不存在
     js = json.dumps(clean(view), ensure_ascii=False)
     assert "use_pct" not in js and "usage_total" not in js
-    assert len(view["weekly"]) == 12 and all(set(w) == {"week", "chg", "days", "ret"} for w in view["weekly"])
+    assert len(view["weekly"]) == 12 and all(set(w) == {"week", "chg", "days", "ret", "ret_basis"} for w in view["weekly"])   # 10-18 chips-1 審查：加口徑鍵
+    assert view["weekly_ret_basis"] == "prev_close" and all(w["ret_basis"] == "prev_close" for w in view["weekly"])
 
 
 def test_maint_pct2004_gated_by_coverage():
