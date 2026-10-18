@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import math
 
 import pandas as pd
 
@@ -349,11 +350,34 @@ def _tone(r: dict) -> str:
     return "偏多" if diff >= 0.04 else "偏空" if diff <= -0.04 else "中性"
 
 
+def _num(v):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _close_band(nd: dict) -> tuple[float, float]:
+    """收盤約 20~80% 區間：r2m 起 level_lo/level_hi 被 range_levels 覆寫為路徑型「約兩成機率觸及」下緣/上緣 (= buy_at/sell_at)，
+    舊收盤分位存在 close_q_lo/close_q_hi → 有就用它，缺才退回 level_lo/level_hi；再夾住讓 lo ≤ level ≤ hi (跳空/小時模型只移 level)。"""
+    lv = _num(nd.get("level"))
+    lo, hi = _num(nd.get("close_q_lo")), _num(nd.get("close_q_hi"))
+    if lo is None or hi is None:
+        lo, hi = _num(nd.get("level_lo")), _num(nd.get("level_hi"))
+    lo = lv if lo is None else lo
+    hi = lv if hi is None else hi
+    if lv is not None:
+        lo, hi = min(lo, lv), max(hi, lv)
+    return lo, hi
+
+
 def summarize(fc: dict) -> str:
     h10, h5, h20 = fc["horizons"][10], fc["horizons"][5], fc["horizons"][20]
     txt = ""
     for nd in fc.get("next_days", []):
-        txt += f"{nd['label']} {nd['date']}：{_tone(nd)}，上漲率 {nd['p_up']:.0%} (基準 {nd['base_hit']:.0%})，預估收盤 {nd['level']:,.0f} (區間 {nd['level_lo']:,.0f}~{nd['level_hi']:,.0f})。"
+        lo, hi = _close_band(nd)
+        txt += f"{nd['label']} {nd['date']}：{_tone(nd)}，上漲率 {nd['p_up']:.0%} (基準 {nd['base_hit']:.0%})，預估收盤 {nd['level']:,.0f} (區間 {lo:,.0f}~{hi:,.0f})。"
     txt += (f" 未來 10 日：模型期望報酬 {h10['pred']:+.2f}%，落在歷史第 {h10['bin'] + 1}/5 分位；同分位過去實際上漲率 {h10['p_up']:.0%}"
            f"（基準 {h10['base_hit']:.0%}）、平均 {h10['hist_mean']:+.2f}%、20~80% 區間 {h10['q20']:+.2f}% ~ {h10['q80']:+.2f}% → {_tone(h10)}。"
            f" 5 日 {_tone(h5)} ({h5['p_up']:.0%})；20 日 {_tone(h20)} ({h20['p_up']:.0%}，平均 {h20['hist_mean']:+.2f}%)。")
