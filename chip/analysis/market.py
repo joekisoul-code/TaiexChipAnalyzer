@@ -173,7 +173,7 @@ def build_frame(use_wantgoo: bool = True) -> tuple[pd.DataFrame, dict]:
 
 def fill_maint_twse(df: pd.DataFrame, metrics: pd.DataFrame | None = None) -> pd.DataFrame:
     """10-18 chips-3：玩股網維持率 (maint_ratio) 抓不到時，以 margin_dyn 的 TWSE 自算維持率 (daily_metrics maint_twse，
-    只取 maint_cov == 100 的完整覆蓋日) 補「最後一筆玩股網值之後」的尾段；同日優先，缺時最多沿用前 1 個交易日，不更早。
+    只取 maint_cov > 0 的 twse 來源日，負值 partial 不用) 補「最後一筆玩股網值之後」的尾段；同日優先，缺時最多沿用前 1 個交易日，不更早。
     補上的列 maint_twse_fill = 1.0 (其餘 0.0，數值欄避免 object 欄混入下游)，歷史段不動 (避免改到模型訓練特徵)。"""
     d = df.copy()
     if "maint_ratio" not in d:
@@ -184,8 +184,8 @@ def fill_maint_twse(df: pd.DataFrame, metrics: pd.DataFrame | None = None) -> pd
         if m is None or m.empty or "maint_twse" not in m:
             return d
         m = m.copy()
-        if "maint_cov" in m:
-            m = m[pd.to_numeric(m["maint_cov"], errors="coerce") == 100]
+        if "maint_cov" in m:     # 10-18 審查：cov 為市值覆蓋率 (實際 99.6~99.99，不會剛好 100)；>0 = twse 來源、負值 = partial (同 margin_dyn.market_view)
+            m = m[pd.to_numeric(m["maint_cov"], errors="coerce") > 0]
         mp = dict(zip(m["date"].astype(str).str[:10], pd.to_numeric(m["maint_twse"], errors="coerce")))
         lv = d["maint_ratio"].last_valid_index()
         start = 0 if lv is None else int(lv) + 1

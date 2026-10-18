@@ -31,7 +31,7 @@ def _df(wg_until=None):
     return d
 
 
-def _metrics(d, days, cov=100):
+def _metrics(d, days, cov=99.65):        # 真實 maint_cov 是市值覆蓋率 99.6~99.99，不會剛好 100
     return pd.DataFrame({"date": [d["date"].iloc[i] for i in days], "maint_twse": [183.4] * len(days), "maint_cov": [cov] * len(days)})
 
 
@@ -49,6 +49,16 @@ def test_partial_coverage_not_used():
     d = _df()
     out = MK.fill_maint_twse(d, _metrics(d, [N - 1], cov=-90))
     assert out["maint_ratio"].isna().all()
+    out = MK.fill_maint_twse(d, _metrics(d, [N - 1], cov=-80))
+    assert out["maint_ratio"].isna().all() and (out["maint_twse_fill"] == 0.0).all()
+
+
+def test_real_coverage_below_100_is_filled():
+    """10-18 審查：真實 DB maint_cov 範圍 99.63~99.99、無一筆 == 100 → 舊的 == 100 過濾讓補值永遠不跑。"""
+    d = _df()
+    for cov in (99.65, 99.63, 99.99, 100):
+        out = MK.fill_maint_twse(d, _metrics(d, [N - 1], cov=cov))
+        assert out["maint_ratio"].iloc[N - 1] == 183.4 and out["maint_twse_fill"].iloc[N - 1] == 1.0, cov
 
 
 def test_assess_factor_and_checklist_use_twse():
