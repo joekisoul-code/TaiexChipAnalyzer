@@ -276,14 +276,26 @@ def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, sign
         beta, corr, n = night_gap_beta()
         gap = beta * float(tn["change_pct"]) / 100
         for x in nd:
+            if x.get("variant") == "night":
+                # 10-18 F1：短線 v2 夜盤變體已把 night_chg_pct 當特徵 (hist_mean/q20/q80 已含夜盤) → 不再乘 (1+gap)，否則跳空算兩次
+                x["gap_adj"] = round(gap * 100, 2)
+                x["gap_in_model"] = True
+                continue
             hm = (x.get("hist_mean") or 0) / 100
             x["level_raw"] = x["level"]
             x["level"] = round(base_px * (1 + gap) * (1 + hm))
             if x.get("range_mode") is None:      # 路徑型水準已含 (或刻意不含) 夜盤位移，再乘跳空會重複計算
                 x["level_lo"] = round(base_px * (1 + gap) * (1 + (x.get("q20") or 0) / 100))
                 x["level_hi"] = round(base_px * (1 + gap) * (1 + (x.get("q80") or 0) / 100))
+            # 10-18 F2(c)：收盤分位 close_q_* 與 level 同口徑 (路徑型 level_lo/hi 不動，但收盤分位要跟著跳空)
+            for k_ in ("close_q_lo", "close_q_hi"):
+                if x.get(k_) is not None:
+                    x[k_] = round(base_px * (1 + gap) * (1 + (x.get("q20" if k_ == "close_q_lo" else "q80") or 0) / 100))
             x["gap_adj"] = round(gap * 100, 2)
+            x["gap_in_model"] = False
         for h, r in hz.items():
+            if r.get("variant") == "night":
+                r["gap_in_model"] = True      # 水準本來就沒乘跳空；夜盤變體已含夜盤
             r["gap_adj"] = round(gap * 100, 2)
         notes.append(f"夜盤台指 {tn['change_pct']:+.2f}% → 預期跳空 {gap * 100:+.2f}% (歷史 β={beta:.2f}、r={corr:.2f}、n={n})，已併入各日水準")
     # 2) 隔天用小時模型 13:30 目標
@@ -293,6 +305,11 @@ def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, sign
         keep = {k: nd[0].get(k) for k in ("p_up", "level", "hist_mean", "caveat")}
         hk = ("p_up", "base_hit", "pred", "hist_mean", "q20", "q80", "level") if nd[0].get("range_mode") else ("p_up", "base_hit", "pred", "hist_mean", "q20", "q80", "level", "level_lo", "level_hi")
         nd[0].update({k: t.get(k) for k in hk if t.get(k) is not None})      # 路徑型 level_lo/level_hi 不被小時模型收盤分位覆寫
+        if nd[0].get("range_mode") and t.get("level_lo") is not None and t.get("level_hi") is not None:
+            # 10-18 F2(b)：收盤分位改用小時模型 13:30 的 20/80% (與覆寫後的 level 同一模型)
+            nd[0]["close_q_lo"], nd[0]["close_q_hi"] = round(t["level_lo"]), round(t["level_hi"])
+        if gap is not None:
+            nd[0]["gap_in_model"] = True   # 小時模型 13:30 目標本身含前晚夜盤，gap_adj 僅供參考
         nd[0]["source"] = "小時模型 13:30 目標 (含前晚夜盤跳空，樣本外 IC≈0.6、命中 74% vs 基準 57%)"
         nd[0]["daily_model"] = keep
         notes.append(f"隔天改用小時模型收盤目標 {t.get('level'):,.0f} (上漲率 {t.get('p_up', 0):.0%})；日模型原值 {keep['level']:,.0f} ({(keep['p_up'] or 0):.0%})")
