@@ -244,6 +244,23 @@ def holder_trend(conc: pd.DataFrame) -> dict:
             "big1000_chg4w": chg("big1000", 4), "foreign_chg4w": chg("foreign_hold", 4)}
 
 
+def annotate_holders(holders: dict, source: str | None) -> dict:
+    """10-18 stocks-1：retail20 鍵名沿用 (舊 App 相容)，但集保來源 (股權分散 / TDCC open data) 實為級距 1~3 = <10 張；
+    retail_lots 標明門檻 (10 或 20)，holders_source 標來源；集保來源沒有外資持股、12 週變化需每週累積 → 附 *_why 說明 None 的原因。"""
+    if not holders:
+        return holders
+    h = dict(holders)
+    src = source or "玩股網大戶籌碼"
+    h["retail_lots"] = 10 if "<10" in src else 20
+    h["holders_source"] = src
+    if source:      # 集保路徑 (玩股網無資料)
+        if h.get("foreign_hold") is None:
+            h["foreign_hold_why"] = "集保股權分散無外資持股比例 (玩股網無此檔大戶籌碼頁)"
+        if h.get("big400_chg12w") is None:
+            h["big400_chg12w_why"] = "集保歷史不足 13 週 (每週累積中)"
+    return h
+
+
 def broker_summary(broker: list, price: float | None) -> pd.DataFrame:
     if not broker:
         return pd.DataFrame()
@@ -274,7 +291,7 @@ def assess(stock_id: str, wg: dict | None = None, quote: dict | None = None) -> 
     costs = cost_table(flows, price)
     vp = volume_profile(price_df, 60)
     vp120 = volume_profile(price_df, 120, 40)
-    holders = holder_trend(d["concentration"])
+    holders = annotate_holders(holder_trend(d["concentration"]), d.get("concentration_source"))
     brokers = broker_summary(d["broker"], price)
     fl = flows.iloc[-1] if not flows.empty else {}
 
@@ -306,7 +323,7 @@ def assess(stock_id: str, wg: dict | None = None, quote: dict | None = None) -> 
         if holders.get("big400_chg4w") is not None:
             t += f"，4 週 {holders['big400_chg4w']:+.2f}%、12 週 {holders['big400_chg12w']:+.2f}%" if holders.get("big400_chg12w") is not None else f"，4 週 {holders['big400_chg4w']:+.2f}%"
             score += 0.75 if holders["big400_chg4w"] > 0.3 else -0.75 if holders["big400_chg4w"] < -0.3 else 0
-        t += f"；散戶 (<20 張) {holders['retail20']:.2f}%" + (f" (4 週 {holders['retail_chg4w']:+.2f}%)" if holders.get("retail_chg4w") is not None else "")
+        t += f"；散戶 (<{holders.get('retail_lots', 20)} 張) {holders['retail20']:.2f}%" + (f" (4 週 {holders['retail_chg4w']:+.2f}%)" if holders.get("retail_chg4w") is not None else "")
         notes.append(t)
     if "skp20" in flows and pd.notna(fl.get("skp20")):
         notes.append(f"主力籌碼集中度 5 日 {fl['skp5'] * 100:+.1f}% / 20 日 {fl['skp20'] * 100:+.1f}%")
