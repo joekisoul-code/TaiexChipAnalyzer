@@ -95,6 +95,12 @@ def _event_stats(h: pd.DataFrame, mask: pd.Series) -> dict | None:
     return out
 
 
+def weekly_ret_basis(rows: list[dict]) -> str | None:
+    """週別表整體口徑：全部列都是前週收 → 'prev_close'；有退回首日收的列 → 'mixed' (App 照舊口徑標示)；無列 → None。"""
+    b = {r.get("ret_basis") for r in rows or []}
+    return None if not b else ("prev_close" if b == {"prev_close"} else "mixed")
+
+
 def _weekly(h: pd.DataFrame) -> list[dict]:
     """週別統計 (近 12 週)：官股週淨買賣 vs 指數週漲跌 (前週最後收盤 → 本週最後收盤)。"""
     weekly = []
@@ -105,9 +111,10 @@ def _weekly(h: pd.DataFrame) -> list[dict]:
         for _k, grp in list(wk.groupby("wk"))[-12:]:
             cl = grp["close"].astype(float).dropna()
             base = grp["pc"].iloc[0]
+            basis = "prev_close" if pd.notna(base) else "first_close"     # 10-18 審查：口徑鍵給 App 判斷 (最舊一週無前收 → 週內首日收)
             base = float(base) if pd.notna(base) else (float(cl.iloc[0]) if len(cl) >= 2 else None)
             weekly.append({"week": str(grp["date"].iloc[0])[:10], "net": round(float(grp["gov8_net"].sum()), 0), "days": int(len(grp)),
-                           "ret": round(float(cl.iloc[-1] / base - 1) * 100, 2) if len(cl) and base else None})
+                           "ret": round(float(cl.iloc[-1] / base - 1) * 100, 2) if len(cl) and base else None, "ret_basis": basis})
     except Exception as e:  # noqa: BLE001
         log.debug("gov8 weekly: %s", e)
     return weekly
@@ -219,7 +226,7 @@ def market_view(hist: pd.DataFrame, scored: pd.DataFrame | None) -> tuple[dict, 
         "date": str(last["date"]), "net": round(net, 1), "cum5": round(cum5, 1), "cum20": round(float(last["cum20"]), 1), "cum60": round(float(last["cum60"]), 1),
         "cum120": round(float(last["cum120"]), 1), "z20": round(float(last["z20"]), 2) if pd.notna(last["z20"]) else None,
         "ma20": round(float(last["ma20"]), 1), "inv": round(float(inv.iloc[-1]), 0), "inv_pos": inv_pos, "inv_max": round(float(inv.max()), 0), "inv_min": round(float(inv.min()), 0),
-        "behav": behav, "power": round(float(power), 0), "power_text": power_text, "weekly": weekly,
+        "behav": behav, "power": round(float(power), 0), "power_text": power_text, "weekly": weekly, "weekly_ret_basis": weekly_ret_basis(weekly),
         "streak": st, "z5": round(float(last["z5"]), 2) if pd.notna(last["z5"]) else None, "z1": round(float(last["z1"]), 2) if pd.notna(last["z1"]) else None,
         "percentile": round(pct, 0), "corr60": round(corr60, 2) if corr60 is not None else None,
         "corr_text": ("逆勢操作 (跌買漲賣) 性格明顯" if corr60 is not None and corr60 < -0.2 else "偏順勢 (漲買跌賣)" if corr60 is not None and corr60 > 0.2 else "與漲跌無明顯關係") if corr60 is not None else "",

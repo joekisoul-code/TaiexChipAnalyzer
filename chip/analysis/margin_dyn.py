@@ -1349,9 +1349,10 @@ def _weekly(h: pd.DataFrame) -> list[dict]:
         for _k, grp in list(wk.groupby("wk"))[-12:]:
             cl = grp["close"].astype(float).dropna()
             base = grp["pc"].iloc[0]
+            basis = "prev_close" if pd.notna(base) else "first_close"     # 10-18 審查：口徑鍵給 App 判斷 (最舊一週無前收 → 週內首日收)
             base = float(base) if pd.notna(base) else (float(cl.iloc[0]) if len(cl) >= 2 else None)
             out.append({"week": str(grp["date"].iloc[0])[:10], "chg": _r(grp["chg1"].sum(), 0), "days": int(len(grp)),
-                        "ret": _r((cl.iloc[-1] / base - 1) * 100, 2) if len(cl) and base else None})
+                        "ret": _r((cl.iloc[-1] / base - 1) * 100, 2) if len(cl) and base else None, "ret_basis": basis})
     except Exception as e:  # noqa: BLE001
         log.debug("weekly: %s", e)
     return out
@@ -1422,7 +1423,8 @@ def market_view(hist: pd.DataFrame, scored: pd.DataFrame | None = None) -> tuple
                  "lots": _r(tpL["tpex_margin_lots"], 0) if tpL is not None else None, "pct5": _r(tpL["tpex_pct5"]) if tpL is not None else None,
                  "pct20": _r(tpL["tpex_pct20"]) if tpL is not None else None, "short_lots": _r(tpL["tpex_short_lots"], 0) if tpL is not None else None,
                  "both_amt": _r(tpL["both_amt"], 1) if tpL is not None else None, "status": "ok" if tpL is not None else "none"},
-        "behav60": _behav60(h), "weekly": _weekly(h),
+        "behav60": _behav60(h), "weekly": (wk_rows := _weekly(h)),
+        "weekly_ret_basis": (None if not wk_rows else "prev_close" if all(w.get("ret_basis") == "prev_close" for w in wk_rows) else "mixed"),
         "verdict": {"text": verdict, "label": "descriptive"},
         "mode": {"id": quad, "text": mode_txt, "label": "descriptive"},
         "max_inc": {"date": str(h.loc[h["chg1"].idxmax(), "date"]), "v": _r(h["chg1"].max(), 1)} if h["chg1"].notna().any() else None,
