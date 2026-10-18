@@ -1171,11 +1171,28 @@ def opt_history(prev: dict, feat: dict) -> list[dict]:
     return [rows[d] for d in sorted(rows)][-OPT_HIST_MAX:]
 
 
+def _pcr_official(date: str | None) -> float | None:
+    """10-18 chips-4：期交所官方 PutCallOIRatio% (taifex.put_call_ratio，與 market.json 因子同源) 的同日值；
+    desk opt.pcr_oi 是有效系列 put/call OI 自算加總，口徑不同 → 另給 pcr_oi_official 供並列。非同日或抓不到 → None。"""
+    if not date:
+        return None
+    try:
+        from ..sources import taifex
+        df = taifex.put_call_ratio()
+        row = df[df["date"].astype(str).str[:10] == str(date)[:10]]
+        v = float(row["pcr_oi"].iloc[-1]) if len(row) else None
+        return round(v, 2) if v is not None and v == v else None
+    except Exception as e:  # noqa: BLE001
+        log.debug("pcr official: %s", e)
+        return None
+
+
 def opt_block(feat: dict, hist: list[dict], last_trading: str | None, ev: dict) -> dict:
     if not feat:
         return {}
     h = pd.DataFrame(hist)
     out = {k: feat.get(k) for k in ("date", "iv5", "iv21", "iv42", "ivk", "rr25", "ts_5_21", "p25_21", "c25_21", "F_near", "pcr_oi", "near", "month", "series", "calendar_fallback")}
+    out["pcr_oi_official"] = _pcr_official(feat.get("date"))      # 官方口徑 (同日)；pcr_oi 為自算
     out["carried"] = bool(feat.get("_carried"))
     out["source"] = feat.get("source")
     out["stale"] = bool(last_trading and feat.get("date") and feat["date"] < last_trading)
