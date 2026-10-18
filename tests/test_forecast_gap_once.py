@@ -67,6 +67,21 @@ def test_night_variant_not_double_counted():
     assert x2["close_q_lo"] <= x2["level"] <= x2["close_q_hi"], x2
     assert x2["level_lo"] == round(BASE * 0.97)        # 路徑型不動
     assert out["horizons"][5]["gap_in_model"] is True
+    gn = _gap_note(out)
+    assert "已併入" not in gn and "未另乘夜盤調整" in gn and "夜盤調整 -1.16%" in gn and "預期跳空" not in gn, gn
+
+
+def _gap_note(out):
+    ns = [t for t in out["short_term_notes"] if t.startswith("夜盤台指")]
+    assert len(ns) == 1, out["short_term_notes"]
+    return ns[0]
+
+
+def test_mixed_variants_note_counts_applied_days():
+    _patch()
+    out = MF.refine_short_term(_fc([_row(1, "night", -1.0, -2.2, 0.3), _row(2, "base", -1.0, -2.2, 0.3), _row(3, "night", -1.0, -2.2, 0.3)]), None, _snap(), None)
+    gn = _gap_note(out)
+    assert "已併入 1 日" in gn and "10-20" in gn and "其餘 2 日" in gn and "各日水準" not in gn, gn
 
 
 def test_base_variant_still_applies_gap_and_close_q_follows():
@@ -80,6 +95,7 @@ def test_base_variant_still_applies_gap_and_close_q_follows():
     assert x["close_q_hi"] == round(BASE * (1 + gap) * 1.003), x
     assert x["close_q_lo"] <= x["level"] <= x["close_q_hi"], x
     assert x["level_lo"] == round(BASE * 0.97)
+    assert "已併入各日水準 (1 日皆非夜盤變體)" in _gap_note(out)
 
 
 def test_hourly_override_updates_close_q():
@@ -94,6 +110,12 @@ def test_hourly_override_updates_close_q():
     assert x["close_q_lo"] <= x["level"] <= x["close_q_hi"]
     assert x["level_lo"] == round(BASE * 0.97)        # 路徑型 level_lo 不被小時模型覆寫
     assert x["gap_in_model"] is True
+    assert "未另乘夜盤調整" in _gap_note(out)
+    # 非夜盤變體被小時模型覆寫 → 乘過的跳空已被丟棄，文案也不能說已併入
+    nd = [_row(1, "base", -1.0, -2.2, 0.3, range_mode="path")]
+    hourly["day"] = nd[0]["date"]
+    out = MF.refine_short_term(_fc(nd), hourly, _snap(), None)
+    assert out["next_days"][0]["gap_in_model"] is True and "已併入" not in _gap_note(out)
 
 
 def test_no_night_no_gap_keys():
@@ -103,6 +125,7 @@ def test_no_night_no_gap_keys():
     out = MF.refine_short_term(_fc([_row(1, "base", -1.0, -2.2, 0.3)]), None, _snap(), None)
     x = out["next_days"][0]
     assert "gap_adj" not in x and "gap_in_model" not in x and x["level"] == round(BASE * 0.99)
+    assert not any(t.startswith("夜盤台指") for t in out["short_term_notes"])
 
 
 if __name__ == "__main__":

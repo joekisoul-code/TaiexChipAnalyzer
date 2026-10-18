@@ -272,6 +272,7 @@ def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, sign
     # 1) 夜盤跳空
     tn = snap.get("tx_night")
     gap = None
+    gap_note = None
     if tn and tn.get("change_pct") is not None and not live and _ST_nf(snap):   # 2026-09-24：夜盤收盤後才套夜盤跳空
         beta, corr, n = night_gap_beta()
         gap = beta * float(tn["change_pct"]) / 100
@@ -297,7 +298,7 @@ def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, sign
             if r.get("variant") == "night":
                 r["gap_in_model"] = True      # 水準本來就沒乘跳空；夜盤變體已含夜盤
             r["gap_adj"] = round(gap * 100, 2)
-        notes.append(f"夜盤台指 {tn['change_pct']:+.2f}% → 預期跳空 {gap * 100:+.2f}% (歷史 β={beta:.2f}、r={corr:.2f}、n={n})，已併入各日水準")
+        gap_note = (len(notes), f"夜盤台指 {tn['change_pct']:+.2f}% → 夜盤調整 {gap * 100:+.2f}% (歷史 β={beta:.2f}、r={corr:.2f}、n={n})")
     # 2) 隔天用小時模型 13:30 目標
     tg = (hourly or {}).get("targets") or {}
     if hourly and not hourly.get("live") and "13:30" in tg and nd and hourly.get("day") == nd[0]["date"]:
@@ -315,6 +316,17 @@ def refine_short_term(fc: dict, hourly: dict | None, snapshot: dict | None, sign
         notes.append(f"隔天改用小時模型收盤目標 {t.get('level'):,.0f} (上漲率 {t.get('p_up', 0):.0%})；日模型原值 {keep['level']:,.0f} ({(keep['p_up'] or 0):.0%})")
     elif nd and not nd[0].get("source"):
         nd[0]["source"] = "日模型 (1 日 IC 僅 0.02~0.04，可預測性低)"
+    if gap_note is not None:
+        # 10-18 審查：夜盤變體日 / 小時模型覆寫日已含夜盤、不另乘 → 文案依實際乘了跳空的日數寫，不再一律「已併入各日水準」
+        applied = [x for x in nd if x.get("gap_in_model") is False]
+        if not applied:
+            tail = "；各日預估來自夜盤變體模型或小時模型 13:30 目標 (已含夜盤)，未另乘夜盤調整，β 僅供參考"
+        elif len(applied) == len(nd):
+            tail = f"，已併入各日水準 ({len(nd)} 日皆非夜盤變體)"
+        else:
+            tail = (f"，已併入 {len(applied)} 日 (非夜盤變體：{'、'.join(str(x.get('date'))[5:10] for x in applied)}) 水準；"
+                    f"其餘 {len(nd) - len(applied)} 日模型已含夜盤，未另乘")
+        notes.insert(gap_note[0], gap_note[1] + tail)
     # 3) 5 日規則覆蓋
     cur = (signals_res or {}).get("current") or {}
     ev = (signals_res or {}).get("evaluation")
