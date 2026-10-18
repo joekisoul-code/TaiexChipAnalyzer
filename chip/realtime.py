@@ -33,6 +33,9 @@ LARGE_CAPS = ["2330", "2317", "2454", "2308", "2382", "2881", "2412", "2882", "2
               "3661", "2395", "6669", "3017", "2408", "2344", "3443", "2301", "1101", "1303"]
 SESSION_OPEN, SESSION_CLOSE = dt.time(9, 0), dt.time(13, 30)
 SESSION_MINUTES = 270
+# 10-18 RT-1 審查：MIS f/g 對調修正日。SQLite intraday 表此日前寫入的 bid_ask_ratio 實為 委賣/委買 (方向相反)；
+# 修正後 persist 每列另寫 bid_ask_conv = 1 (= 委買/委賣)。舊值未改寫 (是否一次取倒數由使用者決定)，讀取請用 store.load_intraday(fix_bid_ask=True)。
+BID_ASK_FIX_DATE = "2026-10-18"
 
 
 def now_tw() -> dt.datetime:
@@ -346,4 +349,5 @@ def persist(snap: dict) -> None:
         "basis_pct": tx.get("basis_pct"), "tx_oi": tx.get("oi"), "breadth_up": b.get("up"), "breadth_down": b.get("down"),
         "bid_ask_ratio": b.get("bid_ask_ratio"), "vol_pace": snap.get("vol_pace"), "amount_projected": snap.get("amount_projected"),
         "rt_score": (snap.get("score") or {}).get("score"),
+        "bid_ask_conv": 1.0 if b.get("bid_ask_ratio") is not None else None,   # 口徑旗標：1 = 委買/委賣 (RT-1 修正後)；無此鍵的舊列見 BID_ASK_FIX_DATE
     })

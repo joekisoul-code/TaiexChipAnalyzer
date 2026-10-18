@@ -75,6 +75,28 @@ def test_session_phase_monday_early_closed():
     assert RT.session_phase(T(2026, 10, 19, 15, 10)) == "night"
 
 
+def test_persist_writes_conv_flag_and_loader_fixes_old_rows():
+    """10-18 RT-1 審查：修正前寫入的 bid_ask_ratio 方向相反 → persist 寫口徑旗標 bid_ask_conv=1；store.normalize_bid_ask 只翻轉無旗標的舊列。"""
+    import pandas as pd
+    from chip import store
+    got = {}
+    orig = store.upsert_intraday
+    store.upsert_intraday = lambda ts, m: got.update(m)
+    try:
+        RT.persist({"ts": "2026-10-19 10:00:00", "taiex": {"last": 1.0}, "breadth": {"bid_ask_ratio": 1.75}})
+    finally:
+        store.upsert_intraday = orig
+    assert got["bid_ask_ratio"] == 1.75 and got["bid_ask_conv"] == 1.0
+    assert RT.BID_ASK_FIX_DATE == store.BID_ASK_FIX_DATE == "2026-10-18"
+    df = pd.DataFrame({"ts": ["2026-10-16 10:00:00", "2026-10-19 10:00:00", "2026-10-16 11:00:00"], "bid_ask_ratio": [0.5, 1.75, None],
+                       "bid_ask_conv": [None, 1.0, None]})
+    out = store.normalize_bid_ask(df)
+    assert out["bid_ask_ratio"].iloc[0] == 2.0 and out["bid_ask_ratio"].iloc[1] == 1.75 and pd.isna(out["bid_ask_ratio"].iloc[2])
+    assert df["bid_ask_ratio"].iloc[0] == 0.5                       # 不改原資料
+    no_flag_col = store.normalize_bid_ask(df.drop(columns=["bid_ask_conv"]))
+    assert no_flag_col["bid_ask_ratio"].iloc[1] == 1.75             # 修正日之後即使缺旗標也不翻
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):

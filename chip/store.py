@@ -70,13 +70,30 @@ def upsert_intraday(ts: str, metrics: dict) -> None:
             c.executemany("INSERT OR REPLACE INTO intraday VALUES (?,?,?)", rows)
 
 
-def load_intraday(date: str) -> pd.DataFrame:
-    """某日的盤中時間序列 (ts 為索引，欄位為指標)。"""
+BID_ASK_FIX_DATE = "2026-10-18"   # 同 realtime.BID_ASK_FIX_DATE (RT-1：此日前 bid_ask_ratio 實為 委賣/委買)
+
+
+def normalize_bid_ask(df: pd.DataFrame) -> pd.DataFrame:
+    """10-18 RT-1 審查：把舊口徑 bid_ask_ratio (無 bid_ask_conv 旗標且 ts < BID_ASK_FIX_DATE，實為 委賣/委買) 取倒數成 委買/委賣；
+    新列 (bid_ask_conv=1) 不動。不改資料庫，只改讀出的副本。"""
+    if df is None or df.empty or "bid_ask_ratio" not in df:
+        return df
+    d = df.copy()
+    conv = d["bid_ask_conv"] if "bid_ask_conv" in d else pd.Series(float("nan"), index=d.index)
+    old = conv.isna() & (d["ts"].astype(str).str[:10] < BID_ASK_FIX_DATE) & (pd.to_numeric(d["bid_ask_ratio"], errors="coerce") > 0)
+    d.loc[old, "bid_ask_ratio"] = 1.0 / d.loc[old, "bid_ask_ratio"].astype(float)
+    return d
+
+
+def load_intraday(date: str, fix_bid_ask: bool = False) -> pd.DataFrame:
+    """某日的盤中時間序列 (ts 為索引，欄位為指標)。
+    注意 (RT-1)：BID_ASK_FIX_DATE 前寫入的 bid_ask_ratio 方向相反 (委賣/委買)；fix_bid_ask=True 時讀出已換成 委買/委賣。"""
     with conn() as c:
         df = pd.read_sql_query("SELECT ts,key,value FROM intraday WHERE ts LIKE ?", c, params=(date + "%",))
     if df.empty:
         return df
-    return df.pivot_table(index="ts", columns="key", values="value", aggfunc="last").reset_index()
+    df = df.pivot_table(index="ts", columns="key", values="value", aggfunc="last").reset_index()
+    return normalize_bid_ask(df) if fix_bid_ask else df
 
 
 def save_snapshot(date: str, source: str, payload) -> None:
