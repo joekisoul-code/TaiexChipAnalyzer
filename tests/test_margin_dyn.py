@@ -718,15 +718,15 @@ def test_size_guard_three_levels():
     o = M.size_guard(big_out(), limit=10 ** 9)
     assert o["meta"]["size_guard"]["steps"] == []
     size0 = o["meta"]["size_guard"]["bytes"]
+    # 2026-10-18 拆檔：history / flows 另存 margin_hist.json → 不計入 margin.json 體積、永遠不砍 (原 history_2010 步驟移除)
+    assert size0 == M._size({k: v for k, v in big_out().items() if k != "history"})
     o = M.size_guard(big_out(), limit=size0 - 1)
-    assert o["meta"]["size_guard"]["steps"][0] == "history_2010" and all(r[0] >= "2010-01-01" for r in o["history"]["rows"])
+    assert o["meta"]["size_guard"]["steps"][0] == "stocks_60" and len(o["stocks"]) == 60 and "2330" in o["stocks"] and len(o["pool_ids"]) == 59
+    assert len(o["history"]["rows"]) == 6000, "history 不砍"
     size1 = o["meta"]["size_guard"]["bytes"]
     o = M.size_guard(big_out(), limit=size1 - 1)
-    assert o["meta"]["size_guard"]["steps"][:2] == ["history_2010", "stocks_60"] and len(o["stocks"]) == 60 and "2330" in o["stocks"] and len(o["pool_ids"]) == 59
-    size2 = o["meta"]["size_guard"]["bytes"]
-    o = M.size_guard(big_out(), limit=size2 - 1)
-    assert o["meta"]["size_guard"]["steps"] == ["history_2010", "stocks_60", "derived_250"] and len(o["derived"]["rows"]) == 250
-    assert o["history"]["cols"] == M.HISTORY_COLS
+    assert o["meta"]["size_guard"]["steps"] == ["stocks_60", "derived_250"] and len(o["derived"]["rows"]) == 250
+    assert o["history"]["cols"] == M.HISTORY_COLS and len(o["history"]["rows"]) == 6000 and "history_2010" not in o["meta"]["size_guard"]["steps"]
 
 
 # ------------------------------------------------------------------ (l) backfill

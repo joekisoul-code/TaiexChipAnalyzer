@@ -38,6 +38,10 @@ log = logging.getLogger(__name__)
 PAGES_URL = gov8.PAGES_URL
 NAME = "margin"
 RAW_URL = "https://raw.githubusercontent.com/joekisoul-code/TaiexChipAnalyzer/gh-pages/data/margin.json"
+HIST_NAME = "margin_hist"          # 2026-10-18 拆檔：history (2001~) / flows (2 年) 另存 margin_hist.json，App 只在詳細報告彈窗 lazy 載入
+HIST_RAW_URL = "https://raw.githubusercontent.com/joekisoul-code/TaiexChipAnalyzer/gh-pages/data/margin_hist.json"
+HIST_TAIL = 120                    # margin.json 內留的 history 尾段 (history_tail)
+DERIVED_KEEP = 250                 # margin.json 內 derived 保留列數 (build 內部仍算 400)
 MAX_STOCKS = 100
 HISTORY_FROM = "2001-01-01"
 MAINT_FROM = "2004-02-11"          # MI_INDEX 回補下限
@@ -235,11 +239,8 @@ def _fp(v, fmt: str = "{:+.1f}", unit: str = "%") -> str:
 
 
 # ------------------------------------------------------------------ 已發布資料 / 驗證名單 / 交易日曆
-def published(prev: dict | None = None) -> dict:
-    """Pages margin.json → raw gh-pages 備援 (同 gov8.published)。"""
-    if prev is not None:
-        return prev
-    for url in (PAGES_URL.rstrip("/") + f"/data/{NAME}.json", RAW_URL):
+def _get_published(name: str, raw_url: str) -> dict:
+    for url in (PAGES_URL.rstrip("/") + f"/data/{name}.json", raw_url):
         try:
             r = session().get(url, timeout=20)
             if r.ok:
@@ -247,8 +248,51 @@ def published(prev: dict | None = None) -> dict:
                 if isinstance(j, dict) and j:
                     return j
         except Exception as e:  # noqa: BLE001
-            log.debug("published %s unavailable (%s): %s", NAME, url, e)
+            log.debug("published %s unavailable (%s): %s", name, url, e)
     return {}
+
+
+def _has_rows(tbl) -> bool:
+    return isinstance(tbl, dict) and bool(tbl.get("rows"))
+
+
+def merge_hist(core: dict | None, hist: dict | None) -> dict:
+    """把 margin_hist.json 的 history / flows 併回 margin.json 核心 (= build 內部的完整形狀)；核心已自帶 history (舊格式) 或 hist 無列 → 原樣。"""
+    core = dict(core or {})
+    if not core or _has_rows(core.get("history")) or not isinstance(hist, dict) or not _has_rows(hist.get("history")):
+        return core
+    core["history"] = hist["history"]
+    if _has_rows(hist.get("flows")):
+        core["flows"] = hist["flows"]
+    return core
+
+
+def published(prev: dict | None = None) -> dict:
+    """Pages margin.json → raw gh-pages 備援 (同 gov8.published)；拆檔後 (meta.hist_file) 再抓 margin_hist.json 併回 history / flows。
+    舊格式 (history 內嵌) 直接回傳；margin_hist 抓不到 → 只回核心 (full 由 FinMind / SQLite / 種子重建；fast 不寫 margin_hist，保留帶回檔)。"""
+    if prev is not None:
+        return prev
+    j = _get_published(NAME, RAW_URL)
+    if j and not _has_rows(j.get("history")):
+        j = merge_hist(j, _get_published(HIST_NAME, HIST_RAW_URL))
+    return j
+
+
+def carry_hist(path: Path | str) -> bool:
+    """margin_hist.json 本次沒有可寫的內容時，把上次發布的原樣 (位元組) 帶回 (Pages 整站覆蓋，不帶就消失)；已存在或抓不到 → False。"""
+    p = Path(path)
+    if p.exists():
+        return False
+    for url in (PAGES_URL.rstrip("/") + f"/data/{HIST_NAME}.json", HIST_RAW_URL):
+        try:
+            r = session().get(url, timeout=20)
+            if r.ok and r.content.strip().startswith(b"{"):
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(r.content)
+                return True
+        except Exception as e:  # noqa: BLE001
+            log.debug("carry %s (%s): %s", HIST_NAME, url, e)
+    return False
 
 
 def validated_ids(path: Path | str | None = None) -> list[str]:
@@ -2134,22 +2178,24 @@ def _cut_table(tbl: dict, keep_rows) -> dict:
     return {"cols": tbl.get("cols"), "rows": keep_rows(rows)}
 
 
+def _core_size(out: dict) -> int:
+    return _size({k: v for k, v in out.items() if k not in ("history", "flows")})
+
+
 def size_guard(out: dict, limit: int = SIZE_LIMIT) -> dict:
-    """raw >900 KB → history 砍到 2010~ → stocks 砍到 60 檔 → derived 砍到 250 日。"""
+    """margin.json 核心 (不含另存 margin_hist.json 的 history / flows) raw >900 KB → stocks 砍到 60 檔 → derived 砍到 250 日。
+    2026-10-18 拆檔後 history 不再砍 (原 history_2010 步驟移除)。"""
     steps = []
-    size = _size(out)
-    if size > limit and out.get("history"):
-        out["history"] = _cut_table(out["history"], lambda rows: [r for r in rows if str(r[0]) >= "2010-01-01"])
-        steps.append("history_2010"); size = _size(out)
+    size = _core_size(out)
     if size > limit and out.get("stocks"):
         keep = (out.get("watch_ids") or []) + [c for c in (out.get("pool_ids") or []) if c not in (out.get("watch_ids") or [])]
         keep = [c for c in keep if c in out["stocks"]][:60] or list(out["stocks"])[:60]
         out["stocks"] = {k: out["stocks"][k] for k in keep}
         out["pool_ids"] = [c for c in (out.get("pool_ids") or []) if c in out["stocks"]]
-        steps.append("stocks_60"); size = _size(out)
+        steps.append("stocks_60"); size = _core_size(out)
     if size > limit and out.get("derived"):
         out["derived"] = _cut_table(out["derived"], lambda rows: rows[-250:])
-        steps.append("derived_250"); size = _size(out)
+        steps.append("derived_250"); size = _core_size(out)
     out.setdefault("meta", {})["size_guard"] = {"steps": steps, "bytes": size}
     return out
 
@@ -2210,6 +2256,7 @@ def build(scored: pd.DataFrame | None = None, watch_res: dict | None = None, poo
         meta["validated"] = []
     if fast:
         out = dict(prev) if prev else _skeleton(meta)
+        meta = {**pmeta, **meta}      # 保留上次的 size_guard / hist_file 等 → fast 帶回的 margin.json 內容雜湊與上次相同 (status.files)
         meta["carried"], meta["carried_parts"] = True, list(PARTS)
         out["meta"] = meta
         return out
@@ -2356,6 +2403,33 @@ def build(scored: pd.DataFrame | None = None, watch_res: dict | None = None, poo
     meta["carried_parts"] = carried
     out["meta"] = meta
     return size_guard(out)
+
+
+def split(out: dict) -> tuple[dict, dict | None]:
+    """build() 的完整輸出 → (margin.json 核心, margin_hist.json 或 None)。
+    核心：去掉 history / flows，加 history_tail (近 HIST_TAIL 列) 與 meta.hist_file，derived 只留近 DERIVED_KEEP 列；
+    hist：{meta: {generated, version, history_from, history_days, flows_from, flows_days}, history, flows}；history 無列 → None (不寫，保留帶回檔)。
+    確定性：同一份輸入 (fast 帶回的 prev) 去掉易變鍵後兩檔內容相同。"""
+    out = out or {}
+    core = {k: v for k, v in out.items() if k not in ("history", "flows")}
+    meta = dict(core.get("meta") or {})
+    meta["hist_file"] = HIST_NAME + ".json"
+    core["meta"] = meta
+    h = out.get("history") if isinstance(out.get("history"), dict) else {}
+    rows = list(h.get("rows") or [])
+    core["history_tail"] = {"cols": list(h.get("cols") or HISTORY_COLS), "rows": rows[-HIST_TAIL:]}
+    d = core.get("derived")
+    if isinstance(d, dict) and len(d.get("rows") or []) > DERIVED_KEEP:
+        core["derived"] = _cut_table(d, lambda r: r[-DERIVED_KEEP:])
+    if not rows:
+        return core, None
+    fl = out.get("flows") if isinstance(out.get("flows"), dict) else {"cols": FLOW_COLS, "rows": []}
+    frows = list(fl.get("rows") or [])
+    hist = {"meta": {"generated": meta.get("generated"), "version": VERSION, "history_from": str(rows[0][0]), "history_to": str(rows[-1][0]),
+                     "history_days": len(rows), "flows_from": str(frows[0][0]) if frows else None, "flows_days": len(frows)},
+            "history": {"cols": list(h.get("cols") or HISTORY_COLS), "rows": rows},
+            "flows": {"cols": list(fl.get("cols") or FLOW_COLS), "rows": frows}}
+    return core, hist
 
 
 def write_seed(out: dict, path: Path | str | None = None) -> Path | None:

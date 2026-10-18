@@ -396,7 +396,7 @@ def main() -> None:
     else:
         # fast 模式不重算追蹤清單/國際研究；Pages 部署是整站覆蓋 (force_orphan)，若不把上次發布的檔案帶回來，
         # 盤中每 5 分鐘一次的 fast 會把 watchlist.json / global.json 洗掉 (SKYNET 個股籌碼成本會 404)
-        for name in ("watchlist", "global", "desk", "desk_archive", "margin"):
+        for name in ("watchlist", "global", "desk", "desk_archive", "margin", "margin_hist"):
             if not (DATA / f"{name}.json").exists():
                 try:
                     r = requests.get(gov8.PAGES_URL.rstrip("/") + f"/data/{name}.json", timeout=20)
@@ -480,6 +480,11 @@ def main() -> None:
                     _mg_prev = {}
             except Exception as e:  # noqa: BLE001
                 print("  margin local prev unreadable:", e); _mg_prev = {}
+        if _mg_prev and not ((_mg_prev.get("history") or {}).get("rows") if isinstance(_mg_prev.get("history"), dict) else None)                 and (DATA / "margin_hist.json").exists():         # 拆檔 (2026-10-18)：Pages 的 margin_hist 抓不到 → 用帶回名單剛復原的本機 margin_hist.json 併回 history / flows
+            try:
+                _mg_prev = margin_dyn.merge_hist(_mg_prev, json.loads((DATA / "margin_hist.json").read_text(encoding="utf-8")))
+            except Exception as e:  # noqa: BLE001
+                print("  margin_hist local unreadable:", e)
         if not args.fast:
             try:      # 回補失敗 (sqlite 鎖 / 非預期格式) 不影響 build 與帶回
                 print("  margin backfill:", margin_dyn.backfill(int(os.getenv("MARGIN_BACKFILL_DAYS", "40") or 0)))
@@ -500,7 +505,13 @@ def main() -> None:
                 _mg = dict(_mg_prev)
                 _mg["meta"] = {**(_mg_prev.get("meta") or {}), "carried": True, "carried_parts": list(margin_dyn.PARTS), "mode": "fast" if args.fast else "full",
                                "carry_reason": str(e)[:120]}
-            dump("margin", _mg)
+            # 拆檔 (2026-10-18)：核心 margin.json (面板用；history_tail 近 120 列、derived 近 250 列) + margin_hist.json (history 2001~ / flows，詳細報告 lazy 載入)
+            _mg_core, _mg_hist = margin_dyn.split(_mg)
+            dump("margin", _mg_core)
+            if _mg_hist:
+                dump("margin_hist", _mg_hist)
+            elif margin_dyn.carry_hist(DATA / "margin_hist.json"):   # 本次沒有 history 可寫 → 帶回上次發布 (Pages 整站覆蓋)
+                print("  carried over margin_hist.json from Pages")
             _mgm, _mgk = _mg.get("meta") or {}, _mg.get("market") or {}
             print(f"  margin: date {_mgk.get('date')} amt {_mgk.get('amt')} maint {((_mgk.get('maint') or {}).get('value'))} ({(_mgk.get('maint') or {}).get('src')})"
                   f" stocks {len(_mg.get('stocks') or {})} alerts {len(_mg.get('alerts') or [])} carried {_mgm.get('carried_parts') or _mgm.get('carried')}")
@@ -639,7 +650,16 @@ def main() -> None:
                                 break
                     except Exception as e3:  # noqa: BLE001
                         print("  desk_archive local backup failed:", e3)
-    dump("status", {"ready": True, "updated": time.strftime("%Y-%m-%d %H:%M:%S"), "mode": "fast" if args.fast else "full", "seconds": round(time.time() - t0)})
+    # 發布檔內容雜湊 (2026-10-18；chip/publish_manifest.py)：必須在所有 data 檔寫完之後算，status.json 自己不列入；App 比對雜湊沒變就不重新下載
+    try:
+        from chip import publish_manifest as _pm
+        _files = _pm.manifest(DATA)
+    except Exception as e:  # noqa: BLE001
+        print("  files manifest failed:", e); _pm, _files = None, None
+    _status = {"ready": True, "updated": time.strftime("%Y-%m-%d %H:%M:%S"), "mode": "fast" if args.fast else "full", "seconds": round(time.time() - t0)}
+    if _files:
+        _status["files"], _status["files_v"] = _files, _pm.FILES_V
+    dump("status", _status)
     print(f"done in {time.time() - t0:.0f}s → {SITE}")
 
 
