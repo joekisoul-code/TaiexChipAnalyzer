@@ -1,5 +1,5 @@
 {
- "trained_at": "2026-10-18 07:55:52",
+ "trained_at": "2026-10-19 14:22:21",
  "margin": 0.07,
  "depth": 3,
  "min_leaf": 120,
@@ -48,15 +48,15 @@
     "base": 0.544,
     "oos": {
      "n_days": 3365,
-     "n_calls": 1353,
-     "cov": 0.402,
-     "hit": 0.528,
+     "n_calls": 1347,
+     "cov": 0.4,
+     "hit": 0.522,
      "base": 0.549,
-     "yr_min": 0.459,
-     "yr_med": 0.549,
+     "yr_min": 0.455,
+     "yr_med": 0.528,
      "years": 14,
-     "up_hit": 0.579,
-     "dn_hit": 0.447
+     "up_hit": 0.57,
+     "dn_hit": 0.446
     },
     "rules": [
      {
@@ -363,9 +363,9 @@
      "hi20_dist": -1.2499,
      "ma20_slope": 0.3373,
      "streak": 1.0,
-     "margin_chg5_pct": 0.3676,
-     "smart2": -0.1721,
-     "composite_smooth": 4.2,
+     "margin_chg5_pct": 0.3673,
+     "smart2": -0.1824,
+     "composite_smooth": 4.0,
      "days_to_settle": 14.0,
      "dow": 2.0,
      "amount_5d_ratio": 1.0005
@@ -729,8 +729,8 @@
      "ma20_slope": 0.4317,
      "streak": 1.0,
      "margin_chg5_pct": 0.6289,
-     "smart2": -0.1732,
-     "composite_smooth": 1.8,
+     "smart2": -0.1829,
+     "composite_smooth": 1.9,
      "days_to_settle": 14.0,
      "dow": 2.0,
      "amount_5d_ratio": 1.0073
@@ -764,15 +764,15 @@
     "base": 0.559,
     "oos": {
      "n_days": 3363,
-     "n_calls": 1178,
-     "cov": 0.35,
-     "hit": 0.514,
+     "n_calls": 1199,
+     "cov": 0.357,
+     "hit": 0.535,
      "base": 0.563,
-     "yr_min": 0.364,
+     "yr_min": 0.446,
      "yr_med": 0.529,
      "years": 14,
-     "up_hit": 0.551,
-     "dn_hit": 0.465
+     "up_hit": 0.561,
+     "dn_hit": 0.5
     },
     "rules": [
      {
@@ -1079,9 +1079,9 @@
      "hi20_dist": -1.2482,
      "ma20_slope": 0.3369,
      "streak": 1.0,
-     "margin_chg5_pct": 0.3666,
-     "smart2": -0.1716,
-     "composite_smooth": 4.2,
+     "margin_chg5_pct": 0.3659,
+     "smart2": -0.1797,
+     "composite_smooth": 4.0,
      "days_to_settle": 14.0,
      "dow": 2.0,
      "amount_5d_ratio": 1.0005
@@ -1445,8 +1445,8 @@
      "ma20_slope": 0.431,
      "streak": 1.0,
      "margin_chg5_pct": 0.6249,
-     "smart2": -0.1721,
-     "composite_smooth": 1.8,
+     "smart2": -0.1824,
+     "composite_smooth": 1.9,
      "days_to_settle": 14.0,
      "dow": 2.0,
      "amount_5d_ratio": 1.0072
@@ -1485,15 +1485,15 @@
     "base": 0.576,
     "oos": {
      "n_days": 3361,
-     "n_calls": 1624,
-     "cov": 0.483,
-     "hit": 0.471,
+     "n_calls": 1847,
+     "cov": 0.55,
+     "hit": 0.47,
      "base": 0.583,
-     "yr_min": 0.375,
-     "yr_med": 0.447,
+     "yr_min": 0.384,
+     "yr_med": 0.452,
      "years": 14,
-     "up_hit": 0.546,
-     "dn_hit": 0.426
+     "up_hit": 0.549,
+     "dn_hit": 0.417
     },
     "rules": [
      {
@@ -1761,9 +1761,9 @@
      "hi20_dist": -1.2482,
      "ma20_slope": 0.3351,
      "streak": 1.0,
-     "margin_chg5_pct": 0.3652,
-     "smart2": -0.1705,
-     "composite_smooth": 4.2,
+     "margin_chg5_pct": 0.3645,
+     "smart2": -0.1792,
+     "composite_smooth": 4.0,
      "days_to_settle": 14.0,
      "dow": 2.0,
      "amount_5d_ratio": 1.0005
@@ -1800,15 +1800,15 @@
     "base": 0.593,
     "oos": {
      "n_days": 1644,
-     "n_calls": 1053,
-     "cov": 0.641,
-     "hit": 0.602,
+     "n_calls": 1095,
+     "cov": 0.666,
+     "hit": 0.599,
      "base": 0.595,
-     "yr_min": 0.538,
+     "yr_min": 0.534,
      "yr_med": 0.607,
      "years": 7,
-     "up_hit": 0.685,
-     "dn_hit": 0.483
+     "up_hit": 0.677,
+     "dn_hit": 0.489
     },
     "rules": [
      {
@@ -2117,8 +2117,8 @@
      "ma20_slope": 0.4308,
      "streak": 1.0,
      "margin_chg5_pct": 0.6242,
-     "smart2": -0.1716,
-     "composite_smooth": 1.85,
+     "smart2": -0.1797,
+     "composite_smooth": 1.95,
      "days_to_settle": 14.0,
      "dow": 2.0,
      "amount_5d_ratio": 1.0071

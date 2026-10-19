@@ -1,7 +1,7 @@
 {
- "generated": "2026-10-18 06:13:58",
+ "generated": "2026-10-19 14:30:01",
  "schema": "event_calendar/v1",
- "asof": "2026-10-18",
+ "asof": "2026-10-19",
  "params_version": "2026-09-27",
  "horizon_days": 120,
  "health": {
@@ -333,7 +333,7 @@
    "source": "NYSE 規則",
    "n_us": 0,
    "closed_weekdays": 0,
-   "beyond_horizon": true
+   "beyond_horizon": false
   },
   {
    "date": "2027-02-16",
