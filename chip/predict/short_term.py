@@ -322,7 +322,9 @@ def tier_stats(oos: pd.DataFrame) -> dict:
     # 強叫牌 (前/後 15%)
     slo, shi = float(oos["pred"].quantile(TIER_STRONG)), float(oos["pred"].quantile(1 - TIER_STRONG))
     sup, sdn = oos[oos["pred"] >= shi], oos[oos["pred"] <= slo]
-    return {"edge_lo": round(lo, 4), "edge_hi": round(hi, 4), "base_up": round(base_up, 3),
+    # 2026-10-19 選模改「叫牌超額」：每個交易日比基準多叫對幾次 = Σ啟用側 n×(命中−該側基準) ÷ 總日數 (覆蓋與命中一起算)
+    edge = ((len(up) * (up_hit - base_up)) if up_on else 0.0) + ((len(dn) * (dn_hit - (1 - base_up))) if dn_on else 0.0)
+    return {"edge_lo": round(lo, 4), "edge_hi": round(hi, 4), "base_up": round(base_up, 3), "edge_per100": round(float(edge) / len(oos) * 100, 3),
             "strong_lo": round(slo, 4), "strong_hi": round(shi, 4),
             "up_hit_strong": round(float((sup["actual"] > 0).mean()), 3) if len(sup) else None, "dn_hit_strong": round(float((sdn["actual"] < 0).mean()), 3) if len(sdn) else None,
             "up_hit": round(up_hit, 3), "up_n": int(len(up)), "up_on": up_on, "up_mean": round(float(up["actual"].mean()), 2) if len(up) else None,
@@ -357,17 +359,28 @@ def _report(oos: pd.DataFrame) -> dict:
             "tier_by_year": ts.get("by_year"), "calibration": met.get("calibration")}
 
 
-def _pick(cands: dict[str, pd.DataFrame]) -> tuple[str, dict]:
-    """依 OOS 叫牌命中率 (次序 IC) 選最佳。"""
+KEEP_BAND = 0.3   # 叫牌超額 (每 100 個交易日多叫對幾次) 差距在此以內 → 保留現行模型，不因小差距每週來回換
+
+
+def _score(rep: dict) -> tuple[float, float]:
+    return (float(rep["tiers"].get("edge_per100") or 0.0), float(rep.get("rank_ic") or 0.0))
+
+
+def _pick(cands: dict[str, pd.DataFrame], prev: str | None = None) -> tuple[str, dict]:
+    """依 OOS「叫牌超額」選最佳 (次序 IC 決勝)；現行模型 prev 落在最佳 KEEP_BAND 以內就保留。
+    2026-10-19 前用 (call_hit, IC)：只看命中率會偏好「只叫一邊、覆蓋 30%」的候選 (例 h1 base 0.559@60% → 0.580@30%)，
+    且小差距就換模型；改用超額後 h1/h2/h3 base 逐年 11/13、12/13、9/13 年較好 (scratchpad pick/)。"""
     best, best_key, reps = None, None, {}
     for k, oos in cands.items():
         if oos.empty:
             continue
         rep = _report(oos)
         reps[k] = rep
-        score = ((rep["tiers"].get("call_hit") or 0), rep.get("rank_ic") or 0)
+        score = _score(rep)
         if best is None or score > best:
             best, best_key = score, k
+    if prev and prev in reps and prev != best_key and _score(reps[prev])[0] >= best[0] - KEEP_BAND:
+        return prev, reps
     return best_key, reps
 
 
@@ -377,6 +390,7 @@ def train(write: bool = True, verbose: bool = True) -> dict:
     night = _night_hist()
     mat = build_matrix(scored, night)
     results = {}
+    prev_metrics = load_metrics() or {}   # 現行選擇 (KEEP_BAND 遲滯用)
     mn = mat.dropna(subset=[NIGHT_FEATURE])
     for h in HORIZONS:
         tgt = f"fwd{h}"
@@ -394,7 +408,7 @@ def train(write: bool = True, verbose: bool = True) -> dict:
                 cands[f"{sname}|ens"] = _combine(oos_l, oos_r) if not oos_l.empty and not oos_r.empty else pd.DataFrame()
                 for mk in ("lgb", "ridge", "ens"):
                     featmap[f"{sname}|{mk}"] = f
-            key, reps = _pick(cands)
+            key, reps = _pick(cands, ((prev_metrics.get(str(h)) or {}).get(variant) or {}).get("chosen"))
             results[h][variant] = {"chosen": key, "reports": reps}
             if verbose and key:
                 t = reps[key]["tiers"]
