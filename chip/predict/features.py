@@ -103,9 +103,30 @@ def add_time_features(d: pd.DataFrame) -> pd.DataFrame:
     return d
 
 
-def market_matrix(scored: pd.DataFrame) -> pd.DataFrame:
-    """從 score_frame 輸出建立特徵矩陣 (保留 date/close 與 fwd 欄位)。"""
+# 2026-10-19 融資研究 margin2/A：融資券 D 日約 21:00 才公布 → 15:40 完整重算與 17:00~20:30 fast 發布時，矩陣最後一列的融資欄是 NaN，
+#   同一個模型下午版與 21:45 版叫牌檔位只有 68~87% (短線) / 55~73% (日模型) 一致，h5 base 下午版 IC 0.067 → 0.017。
+#   改成模型一律用 D−1 融資券 (lag1；訓練與推論同一函式)：樣本外 call_hit 差 ≤1.0pt、IC 差 ≤0.005 (CI 皆含 0)，一整天輸入口徑一致。
+#   只影響模型矩陣；籌碼面板 / margin_dyn / 因子顯示照用當日融資。
+MARGIN_LAG = 1
+MARGIN_RAW = ("margin_amt", "margin_lots", "short_lots")
+
+
+def margin_lagged(scored: pd.DataFrame, lag: int = MARGIN_LAG) -> pd.DataFrame:
+    """融資券原始欄平移 lag 個交易日 (列) 後重跑 add_features → score_frame (融資衍生欄、f_margin/f_short、composite 一起更新)。"""
+    if not lag or not any(c in scored for c in MARGIN_RAW):
+        return scored
+    from ..analysis import market
     d = scored.copy()
+    for c in MARGIN_RAW:
+        if c in d:
+            d[c] = d[c].shift(lag)
+    out = market.score_frame(market.add_features(d))
+    return out.loc[:, ~out.columns.duplicated(keep="last")].copy()      # scored 已含衍生欄 → 重算的一份 (後面) 為準；copy 去碎片化
+
+
+def market_matrix(scored: pd.DataFrame) -> pd.DataFrame:
+    """從 score_frame 輸出建立特徵矩陣 (保留 date/close 與 fwd 欄位)。融資券用 D−1 (margin_lagged)。"""
+    d = margin_lagged(scored, MARGIN_LAG)
     c = d["close"].astype(float)
     d["foreign_z1"] = zscore(d["foreign"], 60)
     d["foreign_z5"] = zscore(d["foreign_5d"], 60)
