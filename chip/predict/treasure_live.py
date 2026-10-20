@@ -866,6 +866,7 @@ def _fin21_of(x: dict):
 
 PX_TOL = 0.01   # r7：推薦價 (證交所盤後原始收盤) 與 Yahoo 同日收盤差 >1% = Yahoo 事後因配股/減資把整段歷史回溯縮放 (09 筆實測 1.5~33%，其餘 <0.05%)
 PX_KEYS = ("status", "reason", "cur", "peak", "trough", "rel", "relMax", "days", "lastDate", "evalAt", "trail", "trailDate", "fin21", "fin21Date", "fin21_na",
+           "inv_ret", "inv_trail", "inv_trailDate", "inv_date", "inv_mkt", "inv_gap", "inv_na",   # 10-20 投資口徑
            "hitDay", "hitDate", "hitVal", "hitBy", "stopDay", "stopDate", "stopVal", "peakDay", "peakDate", "chk")
 WALK_KEYS = ("hitDay", "hitDate", "hitVal", "hitBy", "stopDay", "stopDate", "stopVal", "peakDay", "peakDate")   # _walk_* 產生的「第幾天」標記
 
@@ -1121,15 +1122,51 @@ def _todo(prev: dict, cal_on: bool = False) -> list[tuple]:
     (pxk 價格基準；cal_on 時已結案列的 calv 日曆標記)。need 的列排前面 (一次性檢查的大批舊列不擠掉每日對帳)。"""
     todo = []
     for x in prev["ledger"]["treasure"]:
-        need = x.get("status") == "追蹤" or x.get("trail") is None or (x.get("fin21") is None and not x.get("fin21_na") and (x.get("days") or 0) < T.H) or x.get("chk") is None
+        need = x.get("status") == "追蹤" or x.get("trail") is None or (x.get("fin21") is None and not x.get("fin21_na") and (x.get("days") or 0) < T.H) or x.get("chk") is None \
+            or (x.get("inv_ret") is None and not x.get("inv_na"))   # 10-20 投資口徑：舊結案列補一次
         if need or x.get("pxk") is None or (cal_on and x.get("calv") is None and _closed(x)):
             todo.append(("t", x, need))     # pr2：停損提早結案的列繼續追到第 21 日補 fin21；10-06：舊結案列補一次「第幾天」(chk)
     for x in prev["ledger"]["surge"]:
         need = x.get("status") == "追蹤" or (x.get("trail") is None and (x.get("days") or 0) < T.SURGE_N) or x.get("chk") is None \
-            or (x.get("fin20") is None and not x.get("fin20_na"))   # N3：trail 提早出場 / 舊列 (days 停在 20 以前或 =20 卻沒 fin20) 也追到補上 fin20
+            or (x.get("fin20") is None and not x.get("fin20_na")) or (x.get("inv_ret") is None and not x.get("inv_na"))   # 10-20 投資口徑；N3：trail 提早出場 / 舊列 (days 停在 20 以前或 =20 卻沒 fin20) 也追到補上 fin20
         if need or x.get("pxk") is None or (cal_on and x.get("calv") is None and _closed(x)):
             todo.append(("s", x, need))   # r7：pxk = 價格基準一次性檢查 (配股/減資回溯縮放)；只檢查不需修的列不重算 (結果維持原樣)
     return [t for t in todo if t[2]] + [t for t in todo if not t[2]]
+
+
+INV_BUY, INV_SELL = 0.001425, 0.001425 + 0.003   # 10-20 投資口徑成本：券商手續費 0.1425% (買、賣各一次，未打折) + 證交稅 0.3% (賣)；來回約 0.585%
+
+
+def _inv_fill(x: dict, b: list[dict], mk: dict, H: int) -> None:
+    """10-20 投資口徑 (真的買股票會拿到的結果)：推薦在盤後才公布 → 以「推薦日後第 1 個交易日開盤價」買進、第 H 個交易日收盤賣出
+    (與 fin21 / fin20 同一天)，扣來回成本 → inv_ret；照規則 (自買進價漲 10% 後、收盤從最高收盤回落 8% 就賣) → inv_trail；
+    同期加權指數 (推薦日收盤 → 第 H 日收盤) → inv_mkt；隔日開盤跳空 (相對推薦日同序列收盤) → inv_gap。只填一次；日 K 不足且超過
+    MAX_FIN21_WAIT_DAYS → inv_na。用未還原價 (除息日的下跌算虧損)，與回測 radar_bt.inv 同口徑 (scratchpad inv/inv_bt.py)。"""
+    if x.get("inv_ret") is not None or x.get("inv_na"):
+        return
+    d0 = str(x["date"])[:10]
+    since = [r for r in b if str(r["date"])[:10] > d0 and r.get("close")][:H]
+    if len(since) < H:
+        if b and (pd.Timestamp(str(b[-1]["date"])[:10]) - pd.Timestamp(d0)).days > MAX_FIN21_WAIT_DAYS:
+            x["inv_na"] = True
+        return
+    o = float(since[0].get("open") or 0)
+    if not (o > 0):
+        x["inv_na"] = True
+        return
+    cin = o * (1 + INV_BUY)
+    net = lambda px: round((float(px) * (1 - INV_SELL) / cin - 1) * 100, 2)  # noqa: E731
+    xh = float(since[-1]["close"]); xt, td = xh, str(since[-1]["date"])[:10]; pk = o
+    for r in since:
+        c = float(r["close"]); pk = max(pk, c)
+        if pk >= o * 1.1 and c <= pk * 0.92:
+            xt, td = c, str(r["date"])[:10]
+            break
+    m0, m1 = mk.get(d0), mk.get(str(since[-1]["date"])[:10])
+    c0 = _bar_on(b, d0)
+    x.update(inv_ret=net(xh), inv_trail=net(xt), inv_trailDate=td, inv_date=str(since[-1]["date"])[:10],
+             inv_mkt=round((float(m1) / float(m0) - 1) * 100, 2) if (m0 and m1) else None,
+             inv_gap=round((o / float(c0["close"]) - 1) * 100, 2) if c0 and float(c0.get("close") or 0) > 0 else None)
 
 
 def evaluate(prev: dict, mk: dict, max_fetch: int = 200, upto: str | None = None, cal: TradeCal | None = None) -> int:
@@ -1164,6 +1201,10 @@ def evaluate(prev: dict, mk: dict, max_fetch: int = 200, upto: str | None = None
                     ref = pd.Timestamp(upto) if upto else pd.Timestamp(dt.datetime.now(config.TZ).strftime("%Y-%m-%d"))
                     if (ref - pd.Timestamp(x["date"])).days > MAX_FIN21_WAIT_DAYS:
                         x["fin20_na"] = True
+                if x.get("status") not in (None, "追蹤") and x.get("inv_ret") is None and not x.get("inv_na"):   # 10-20 投資口徑：同上 (不再每次重抓)
+                    ref = pd.Timestamp(upto) if upto else pd.Timestamp(dt.datetime.now(config.TZ).strftime("%Y-%m-%d"))
+                    if (ref - pd.Timestamp(x["date"])).days > MAX_FIN21_WAIT_DAYS:
+                        x["inv_na"] = True
                 continue
             fix = _px_repair(x, b) if x.get("pxk") is None else False
             # BE-1 修：回填逐日模擬 (upto) 的日 K 被截到 upto，結案標記可能落在 upto 之後 → 不做一次性日曆核對 (只對齊)，留給不帶 upto 的對帳
@@ -1177,6 +1218,7 @@ def evaluate(prev: dict, mk: dict, max_fetch: int = 200, upto: str | None = None
             if not (need or fix):
                 continue
             (_eval_treasure(x, b, mk) if kind == "t" else _eval_surge(x, b))
+            _inv_fill(x, b, mk, T.H if kind == "t" else T.SURGE_N)   # 10-20 投資口徑 (到期滿日才填，只填一次)
             if cal is not None and not upto and x.get("calv") is None and _closed(x) and _cal_check(x, b, cal):
                 x["calv"] = 1
         except Exception as e:  # noqa: BLE001
@@ -1329,6 +1371,13 @@ RADAR_BT["div"] = {"A_hit": [0.520, 0.532], "A_win": [0.688, 0.701], "jun_hit": 
 #   結論：A+ 勝率/命中第 15 日飽和 (.815/.637 → 21 日 .813/.648 → 42 日 .780/.621)，21 日後平均報酬上升全來自同日池/TAIEX 漂移 (42−21 超額 −1.56 [−4.21,−0.55]，0/10 組為正)；
 #   巢狀選 h* (OOS 2023~2026，paired) 對 A+ 不勝固定 21 (三準則 Δ超額 −0.07/−0.18/−0.25，CI 全含 0) → 不改規則；A− 的 h*=5 +2.51 只對同日池成立 (原始報酬 / vs TAIEX / 勝率不升) → 描述性。
 #   只供 App 顯示 (model.radar_bt.horizon)，不進任何規則；A- = A 不含 A+ (同 RADAR_TIER 的 A)；數字 3 位小數；字串不得含 App 禁用詞 (test_ui_strings_no_banned_words)。
+# 10-20 投資口徑回測 (scratchpad inv/inv_bt.py；radar6 lab 10 組 = 5 種子 × 2 路徑、2022-01~2026-09 樣本外，每組平均)：推薦日後第 1 個交易日開盤買、
+#   第 21 (飆股 20) 個交易日收盤賣、扣來回 0.585%；win = 淨報酬 > 0、beat = 淨報酬 > 同期加權指數、trail = 照規則出場、gap = 隔日開盤跳空均值；
+#   win_close / avg_close = 原收盤口徑 (與 RADAR_TIER / RADAR_BT 相同，驗證 69,374 筆 100% 吻合)。
+RADAR_BT["inv"] = {"label": "signal", "period": "2022-01~2026-09", "n_sets": 10, "research_date": "2026-10-20", "cost": 0.585,
+                    "rule": "成本 = 推薦日後第 1 個交易日開盤價；結算 = 第 21 個交易日 (飆股第 20 個) 收盤價；扣手續費 0.1425%×2 + 證交稅 0.3%；未還原除息",
+                    "tiers": {"A+": {"n": 128, "win": 0.781, "win_rng": [0.746, 0.819], "avg": 10.71, "med": 8.43, "q10": -8.0, "win_trail": 0.795, "avg_trail": 8.99, "beat": 0.523, "mkt_avg": 7.79, "gap": 0.94, "win_close": 0.813, "avg_close": 12.37}, "A": {"n": 170, "win": 0.558, "win_rng": [0.512, 0.593], "avg": 3.15, "med": 1.99, "q10": -13.7, "win_trail": 0.569, "avg_trail": 2.06, "beat": 0.41, "mkt_avg": 3.62, "gap": 0.23, "win_close": 0.594, "avg_close": 3.99}, "B+": {"n": 483, "win": 0.525, "win_rng": [0.51, 0.542], "avg": 3.26, "med": 0.99, "q10": -13.4, "win_trail": 0.543, "avg_trail": 2.56, "beat": 0.417, "mkt_avg": 3.17, "gap": 0.52, "win_close": 0.56, "avg_close": 4.42}, "B": {"n": 5475, "win": 0.458, "win_rng": [0.452, 0.462], "avg": 0.73, "med": -1.1, "q10": -15.3, "win_trail": 0.479, "avg_trail": 0.54, "beat": 0.399, "mkt_avg": 1.72, "gap": 0.31, "win_close": 0.484, "avg_close": 1.64}, "S3": {"n": 681, "win": 0.492, "win_rng": [0.479, 0.504], "avg": 3.36, "med": -0.21, "q10": -18.1, "win_trail": 0.539, "avg_trail": 2.18, "beat": 0.45, "mkt_avg": 2.28, "gap": 0.48, "win_close": 0.519, "avg_close": 4.48}}}
+
 RADAR_BT["horizon"] = {
     "label": "descriptive", "period": "2022-01~2026-09", "n_sets": 10, "research_date": "2026-10-14", "src": "L3-R1 horizon.py (lab)",
     "hs": [5, 10, 15, 21, 30, 42], "n_per_set": {"A+": 128.0, "A-": 170.2, "B+": 433.7},   # 每組筆數 (10 組平均)；A- = A 不含 A+
