@@ -1,7 +1,7 @@
 {
- "generated": "2026-10-19 14:30:01",
+ "generated": "2026-10-25 06:13:27",
  "schema": "event_calendar/v1",
- "asof": "2026-10-19",
+ "asof": "2026-10-25",
  "params_version": "2026-09-27",
  "horizon_days": 120,
  "health": {
@@ -20,17 +20,6 @@
   "us_calendar": "NYSE 規則 + ^GSPC 實際交易日 (過去)"
  },
  "events": [
-  {
-   "date": "2026-10-23",
-   "tw_session": "2026-10-23",
-   "event_type": "pre_holiday_session",
-   "title_zh": "光復節連假前最後交易日",
-   "date_confidence": "confirmed",
-   "source": "TWSE holidaySchedule API",
-   "n_us": 1,
-   "next_td": "2026-10-27",
-   "beyond_horizon": false
-  },
   {
    "date": "2026-10-24",
    "tw_session": "2026-10-27",
@@ -342,7 +331,7 @@
    "title_zh": "美國 1 月 CPI (估計)",
    "date_confidence": "estimated",
    "source": "規則估計：月 10~15 日週中；待 BLS 公告",
-   "beyond_horizon": true
+   "beyond_horizon": false
   },
   {
    "date": "2027-02-26",
@@ -411,6 +400,38 @@
    "title_zh": "央行理監事會 (約 16:00 公布) (估計)",
    "date_confidence": "estimated",
    "source": "規則估計：季末月第三個週四",
+   "beyond_horizon": true
+  },
+  {
+   "date": "2027-03-28",
+   "tw_session": "2027-03-29",
+   "prev_td": "2027-03-26",
+   "event_type": "us_holiday_no_session",
+   "title_zh": "前一晚美股休市 (耶穌受難日)",
+   "date_confidence": "scheduled",
+   "source": "NYSE 規則",
+   "n_us": 0,
+   "closed_weekdays": 0,
+   "beyond_horizon": true
+  },
+  {
+   "date": "2027-04-02",
+   "tw_session": "2027-04-02",
+   "event_type": "pre_holiday_session",
+   "title_zh": "清明節、兒童節連假前最後交易日",
+   "date_confidence": "estimated",
+   "source": "2027 TWSE 行事曆未公布；平日規則 + 農曆表",
+   "n_us": 1,
+   "next_td": "2027-04-07",
+   "beyond_horizon": true
+  },
+  {
+   "date": "2027-04-02",
+   "tw_session": "2027-04-07",
+   "event_type": "us_nfp",
+   "title_zh": "美國 3 月非農就業 (估計)",
+   "date_confidence": "estimated",
+   "source": "規則估計：月初第一個週五；待 BLS 公告",
    "beyond_horizon": true
   }
  ]
