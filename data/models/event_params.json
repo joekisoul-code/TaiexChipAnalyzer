@@ -359,11 +359,11 @@
     0.857
    ],
    "width_ratio_fit": {
-    "n": 190,
+    "n": 191,
     "from": "2001-03-01",
-    "to": "2026-10-12",
-    "raw": 0.7936,
-    "fitted_at": "2026-10-25"
+    "to": "2026-10-27",
+    "raw": 0.7945,
+    "fitted_at": "2026-11-01"
    },
    "beta": "TAIEX close-to-close vs SOX, prior 750 normal days, no intercept",
    "touch_prob": 0.15,
