@@ -106,6 +106,7 @@ def build_frame(use_wantgoo: bool = True) -> tuple[pd.DataFrame, dict]:
     twse_inst = _safe(twse.institutional_daily, meta, "TWSE 三大法人(當日)")
     twse_margin = _safe(twse.margin_daily, meta, "TWSE 融資融券(當日)")
     twse_mkt = _safe(twse.market_daily, meta, "TWSE 市場成交(當月)", pd.DataFrame())
+    twse_ohlc = _safe(twse.taiex_ohlc, meta, "TWSE 加權指數日K(當月)", pd.DataFrame())   # 2026-10-31：FinMind 晚到時補最新日開高低
     wg = _safe(wantgoo.fetch_market, meta, "玩股網 (Playwright)") if use_wantgoo else None
     from ..sources import global_markets as gm
     glob = _safe(lambda: gm.aligned_features(price["date"]) if not price.empty else pd.DataFrame(), meta, "Yahoo 國際市場", pd.DataFrame())
@@ -160,6 +161,11 @@ def build_frame(use_wantgoo: bool = True) -> tuple[pd.DataFrame, dict]:
     if not twse_mkt.empty:
         for _, r in twse_mkt.iterrows():
             _patch(r.to_dict(), {"close": "close", "amount": "amount", "change": "change"})
+    if isinstance(twse_ohlc, pd.DataFrame) and not twse_ohlc.empty:   # 只補缺的 (FinMind 有就用 FinMind)；沒有收盤的日子不新增列
+        _have = set(df["date"])
+        for _, r in twse_ohlc.iterrows():
+            if r["date"] in _have:
+                _patch(r.to_dict(), {"open": "open", "high": "high", "low": "low"})
     if isinstance(fut_latest, pd.DataFrame) and not fut_latest.empty:
         _patch(fut_latest.iloc[0].to_dict(), {c: c for c in fut_latest.columns if c != "date"})
     df = df.sort_values("date").reset_index(drop=True)

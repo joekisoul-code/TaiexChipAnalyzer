@@ -116,6 +116,7 @@ def build_matrix(scored: pd.DataFrame, night: pd.DataFrame | None = None) -> pd.
     d["gap_open"] = (o / prev - 1) * 100
     d["range_pct"] = (h - l) / prev * 100
     d["clv"] = np.where((h - l) > 0, ((c - l) - (h - c)) / (h - l).replace(0, np.nan), 0.0)
+    d.loc[h.isna() | l.isna(), "clv"] = np.nan   # 2026-10-31：高低價缺 (FinMind 晚到) 時是「不知道」，不是收在最低 (原本被當 0)
     d["up5"] = (d["ret1"] > 0).astype(int).rolling(5).sum()
     # 夜盤：FinMind after_market 的 date = 該夜盤準備的「隔一交易日」→ 列 D 要用 date == D 的下一列日期 的夜盤
     d[NIGHT_FEATURE] = np.nan

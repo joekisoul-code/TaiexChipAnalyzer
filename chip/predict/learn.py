@@ -201,10 +201,49 @@ def _price_map(frame: pd.DataFrame) -> tuple[list[str], dict]:
     d = frame.dropna(subset=["close"]).copy()
     d["date"] = d["date"].astype(str).str[:10]
     dates = d["date"].tolist()
-    px = {r.date: {"close": float(r.close), "high": float(r.high) if "high" in d and pd.notna(r.high) else float(r.close),
-                   "low": float(r.low) if "low" in d and pd.notna(r.low) else float(r.close),
-                   "open": float(r.open) if "open" in d and pd.notna(r.open) else float(r.close)} for r in d.itertuples()}
+    has = lambda r, k: k in d and pd.notna(getattr(r, k))  # noqa: E731
+    px = {r.date: {"close": float(r.close), "high": float(r.high) if has(r, "high") else float(r.close),
+                   "low": float(r.low) if has(r, "low") else float(r.close),
+                   "open": float(r.open) if has(r, "open") else float(r.close),
+                   "ok": bool(has(r, "high") and has(r, "low") and has(r, "open"))} for r in d.itertuples()}   # 2026-10-31 ok = 真的開高低 (不是收盤代替)
     return dates, px
+
+
+def _path_fields(r: dict, dates: list[str], px: dict, i0: int, h: int) -> dict | None:
+    """h≤3 的觸及對帳 (買/賣點、停損、目標)；路徑內任一天沒有真的高低價 → None (延後，不拿收盤代替)。"""
+    js = range(i0 + 1, i0 + h + 1)
+    if not all(px[dates[j]]["ok"] for j in js):
+        return None
+    lo = min(px[dates[j]]["low"] for j in js)
+    hi = max(px[dates[j]]["high"] for j in js)
+    return {"path_low": round(lo, 2), "path_high": round(hi, 2), "buy_touch": bool(lo <= r["buy_at"]), "sell_touch": bool(r.get("sell_at") and hi >= r["sell_at"]),
+            "stop_hit": bool(r.get("stop") and lo <= r["stop"]), "target_hit": bool(r.get("target_px") and hi >= r["target_px"])}
+
+
+def _repair(r: dict, dates: list[str], px: dict) -> bool:
+    """2026-10-31：舊對帳在開高低缺時拿收盤代替 (路徑高低相同 / 跳空 = 全日漲跌)；資料補齊後重算該部分 (只動受影響欄位)。"""
+    rz = r.get("realized") or {}
+    as_of = str(r.get("as_of"))[:10]
+    if as_of not in px:
+        return False
+    i0 = dates.index(as_of); h = int(r.get("h") or 0)
+    if r.get("kind") == "gap":
+        t = str(rz.get("date") or "")[:10]
+        if t not in px or not px[t]["ok"] or not (rz.get("gap_pending") or (rz.get("gap") is not None and rz.get("gap") == rz.get("ret"))):
+            return False
+        base = float(r.get("base") or px[as_of]["close"]); ag = (px[t]["open"] / base - 1) * 100
+        est = float(r.get("est_gap") or 0); dir_pred = 1 if est > 0.15 else -1 if est < -0.15 else 0
+        rz.update(gap=round(ag, 3), err=round(ag - est, 3), dir_hit=(None if dir_pred == 0 else bool(np.sign(ag) == dir_pred)),
+                  filled=(px[t]["low"] <= base) if ag > 0 else (px[t]["high"] >= base) if ag < 0 else None)
+        rz.pop("gap_pending", None); rz["repaired"] = "ohlc"
+        return True
+    if r.get("buy_at") and 0 < h <= 3 and (rz.get("path_pending") or ("path_low" in rz and rz.get("path_low") == rz.get("path_high"))) and i0 + h < len(dates):
+        pf = _path_fields(r, dates, px, i0, h)
+        if pf is None:
+            return False
+        rz.update(pf); rz.pop("path_pending", None); rz["repaired"] = "ohlc"
+        return True
+    return False
 
 
 def evaluate(rows: list[dict], frames: dict[str, pd.DataFrame], market_close: dict[str, float] | None = None) -> int:
@@ -212,7 +251,18 @@ def evaluate(rows: list[dict], frames: dict[str, pd.DataFrame], market_close: di
     done = 0
     cache = {}
     for r in rows:
-        if r.get("realized") or r.get("p_up") is None:
+        if r.get("realized"):   # 2026-10-31：開高低缺時延後 / 用收盤代替的舊對帳 → 資料到了重算
+            rz0 = r["realized"]
+            if (rz0.get("path_pending") or rz0.get("gap_pending") or ("path_low" in rz0 and rz0.get("path_low") == rz0.get("path_high"))
+                    or (r.get("kind") == "gap" and rz0.get("gap") is not None and rz0.get("gap") == rz0.get("ret"))):
+                fr0 = frames.get(r.get("sid") or "TAIEX")
+                if fr0 is not None and not fr0.empty:
+                    if r["sid"] not in cache:
+                        cache[r["sid"]] = _price_map(fr0)
+                    if _repair(r, *cache[r["sid"]]):
+                        done += 1
+            continue
+        if r.get("p_up") is None:
             continue
         fr = frames.get(r.get("sid") or "TAIEX")
         if fr is None or fr.empty:
@@ -228,6 +278,8 @@ def evaluate(rows: list[dict], frames: dict[str, pd.DataFrame], market_close: di
         if r.get("kind") == "gap":   # 跳空預判：目標日開盤 vs 前收 (實際跳空)、收盤是否守住跳空方向
             t_date = str(r.get("target") or "")[:10]
             if t_date not in px or i0 + 1 >= len(dates) or dates[i0 + 1] != t_date:
+                continue
+            if not px[t_date]["ok"]:   # 2026-10-31：目標日開盤價還沒到 → 延後 (原本拿收盤當開盤，跳空 = 全日漲跌)
                 continue
             base = float(r.get("base") or px[as_of]["close"])
             ag = (px[t_date]["open"] / base - 1) * 100; cr = (px[t_date]["close"] / base - 1) * 100
@@ -275,10 +327,11 @@ def evaluate(rows: list[dict], frames: dict[str, pd.DataFrame], market_close: di
         if r.get("abs_call"):   # 股價偏漲：對帳股價本身 (非相對大盤)
             rz["abs_hit"] = bool(ret > 0)
         if r.get("buy_at") and h <= 3:
-            lo = min(px[dates[j]]["low"] for j in range(i0 + 1, i0 + h + 1))
-            hi = max(px[dates[j]]["high"] for j in range(i0 + 1, i0 + h + 1))
-            rz.update({"path_low": round(lo, 2), "path_high": round(hi, 2), "buy_touch": bool(lo <= r["buy_at"]), "sell_touch": bool(r.get("sell_at") and hi >= r["sell_at"]),
-                       "stop_hit": bool(r.get("stop") and lo <= r["stop"]), "target_hit": bool(r.get("target_px") and hi >= r["target_px"])})
+            pf = _path_fields(r, dates, px, i0, h)
+            if pf is None:
+                rz["path_pending"] = True   # 2026-10-31：高低價還沒到 → 方向先對帳、觸及之後補
+            else:
+                rz.update(pf)
         r["realized"] = rz
         done += 1
     return done

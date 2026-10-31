@@ -339,6 +339,18 @@ def market_daily(month: str | None = None) -> pd.DataFrame:
     return pd.DataFrame(cached(f"twse:FMTQIK:{month}", ttl, load))
 
 
+def taiex_ohlc(month: str | None = None) -> pd.DataFrame:
+    """2026-10-31 加權指數當月日 K (MI_5MINS_HIST)：date, open, high, low, close。收盤後當天就有 (FinMind TaiwanStockPrice TAIEX 常晚到隔天)；
+    市場日框架用它補最新交易日的開高低 → 晚間預測的 K 棒特徵與 learn 觸及對帳不再拿收盤代替。數值與 FinMind 相同 (10-27~10-30 逐筆核對)。"""
+    def load():
+        j = get_json(f"{BASE}/TAIEX/MI_5MINS_HIST", params={"response": "json", "date": (month + "01") if month else ""})
+        if not _ok(j):
+            return []
+        return [{"date": roc_to_iso(r[0]), "open": num(r[1]), "high": num(r[2]), "low": num(r[3]), "close": num(r[4])} for r in j["data"]]
+    ttl = config.TTL_HISTORY if (month and month < dt.date.today().strftime("%Y%m")) else config.TTL_INTRADAY
+    return pd.DataFrame(cached(f"twse:MI_5MINS_HIST:{month}", ttl, load))
+
+
 def index_realtime(codes: tuple[str, ...] = ("tse_t00.tw", "otc_o00.tw")) -> list[dict]:
     """即時報價 (5 秒快取)。指數代碼 tse_t00.tw (加權) / otc_o00.tw (櫃買)，個股 tse_2330.tw / otc_6488.tw。"""
     def load():
