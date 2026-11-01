@@ -5,6 +5,7 @@
 - 視窗 = 近 MARKS_WINDOW_DAYS 日曆天；intraday_marks 抓不到的日子 (None) 略過
 - 表帶 open_at = "09:05" (App 依此切換即時口徑)
 - cells_rb / marks_rb：再分現價離今日低點反彈幾 σ (r0/r1/r2)
+- _hour_high_table：高點版 (鏡像；fin_q80)
 
     python tests/test_pullback_marks.py
 """
@@ -73,6 +74,20 @@ def main():
     up_rb = P._rb_bin(100.6 + 50, 100.6, 1.0)
     assert t["cells_rb"][f"10:00|up|shallow|{up_rb}"]["p_done"] == 1.0 and t["rb_cuts"] == list(P.RB_CUTS), t["cells_rb"]
     assert sum(c["n"] for k, c in t["marks_rb"].items() if k.startswith("10:00|")) == 60
+    n += 3
+
+    # 2b. 高點版 = 低點版的鏡像：把每個價格對 100 鏡射 (200 − x)、lo ↔ hi → 結果與低點版相同 (開低 ↔ 開高)
+    def mirror(r):
+        f = lambda x: round(200 - x, 6)  # noqa: E731
+        return {"prev_close": f(r["prev_close"]), "open": f(r["open"]), **{k: f(r[k]) for k in MK},
+                "hi": {k: f(v) for k, v in r["lo"].items()}, "lo": {k: f(v) for k, v in r["hi"].items()}}
+    th = P._hour_high_table(m, {d: mirror(r) for d, r in mk2.items()})
+    sw = lambda k: k.replace("|dn|", "|@|").replace("|up|", "|dn|").replace("|@|", "|up|")  # noqa: E731
+    for k, c in t["cells"].items():
+        assert th["cells"][sw(k)]["p_done"] == c["p_done"] and th["cells"][sw(k)]["n"] == c["n"], (k, th["cells"].get(sw(k)), c)
+    for k, c in t["cells_rb"].items():
+        assert th["cells_rb"][sw(k)]["p_done"] == c["p_done"], k
+    assert "fin_q80" in th["marks"]["10:00"] and th["marks"]["10:00"]["fin_q80"] > 0 and "fin_q20" not in th["marks"]["10:00"]
     n += 3
 
     # 3. 視窗：只取近 MARKS_WINDOW_DAYS 日曆天，None (抓不到) 略過

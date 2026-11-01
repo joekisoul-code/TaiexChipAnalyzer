@@ -124,44 +124,62 @@ def _hour_low_table(m: pd.DataFrame, marks: dict[str, dict] | None = None) -> di
     開盤 / 高低 = 09:05 口徑 (見模組說明 5)。
     2026-11-01 加 cells_rb / marks_rb (再分「現價離今日低點反彈幾 σ」r0/r1/r2)：走動式 (每年用前 3 年建表) 2019~2026 Brier 0.200 → 0.153 (8/8 年較好)，
     「已出現」(p ≥ .75) 命中 83.0% → 89.8% (叫 2,917 → 3,693 次)、「還沒到」(p ≤ .55) 51.1% → 68.7%；App 優先查 cells_rb → marks_rb → 舊 cells。"""
+    return _hl_table(m, marks, "lo")
+
+
+def _hour_high_table(m: pd.DataFrame, marks: dict[str, dict] | None = None) -> dict:
+    """盤中高點判斷 (低點版的鏡像，2026-11-01)：deep = 累積高點距開盤 ≥ +0.5σ、rb = 現價離今日高點回落幾 σ → 高點已出現機率、最終高點 (相對該時點價) q80/q50。
+    走動式 2019~2026 Brier 0.202 → 0.151 (加回落維度，8/8 年較好)；「已出現」命中 80.9% → 90.8% (叫 3,734 次)、「還沒到」49.3% → 66.7% (2,311 次)。"""
+    return _hl_table(m, marks, "hi")
+
+
+def _hl_table(m: pd.DataFrame, marks: dict[str, dict] | None, side: str) -> dict:
+    lo_side = side == "lo"
     try:
         marks = _marks_window() if marks is None else marks
     except Exception as e:  # noqa: BLE001
-        log.warning("hour_low_table: %s", e)
+        log.warning("hour_%s_table: %s", side, e)
         return {}
     sig = dict(zip(m["date"], m["sigma_range"]))
     rows = []
     for d_, rec in sorted(marks.items()):
-        if not rec.get("prev_close") or "13:30" not in rec or "13:30" not in (rec.get("lo") or {}) or d_ not in sig:
+        if not rec.get("prev_close") or "13:30" not in rec or "13:30" not in (rec.get(side) or {}) or d_ not in sig:
             continue
-        fin_low, op, pc, s = rec["lo"]["13:30"], rec["open"], rec["prev_close"], sig[d_]
+        fin, op, pc, s = rec[side]["13:30"], rec["open"], rec["prev_close"], sig[d_]
         if not (s and s > 0):
             continue
         for mk in HL_MARKS:
-            if mk not in rec or mk not in rec["lo"]:
+            if mk not in rec or mk not in rec[side]:
                 continue
-            px, lo = rec[mk], rec["lo"][mk]
+            px, ex = rec[mk], rec[side][mk]
             gap = (op / pc - 1) * 100
-            rows.append({"mark": mk, "g": "dn" if gap < -0.15 else "up" if gap > 0.15 else "flat", "deep": ((lo / op - 1) * 100 / s) <= -0.5, "rb": _rb_bin(px, lo, s), "done": lo <= fin_low * 1.0003, "fin": (fin_low / px - 1) * 100})
+            mv = (ex / op - 1) * 100 / s
+            rows.append({"mark": mk, "g": "dn" if gap < -0.15 else "up" if gap > 0.15 else "flat",
+                         "deep": mv <= -0.5 if lo_side else mv >= 0.5,
+                         "rb": _rb_bin(px, ex, s) if lo_side else _rb_bin(ex, px, s),
+                         "done": ex <= fin * 1.0003 if lo_side else ex >= fin / 1.0003, "fin": (fin / px - 1) * 100})
     if not rows:
         return {}
     h = pd.DataFrame(rows)
+    q = 0.2 if lo_side else 0.8
+    cell = lambda g: _cell(g, q)  # noqa: E731
     out = {"n_days": int(len(h) / max(1, h["mark"].nunique())), "open_at": OPEN_AT, "source": "TWSE 每 5 秒指數", "window_days": MARKS_WINDOW_DAYS, "rb_cuts": list(RB_CUTS), "cells": {}, "marks": {}, "cells_rb": {}, "marks_rb": {}}
     for mk, g in h.groupby("mark"):
-        out["marks"][mk] = {"n": int(len(g)), "p_done": round(float(g["done"].mean()), 3), "fin_q20": round(float(g["fin"].quantile(0.2)), 2), "fin_q50": round(float(g["fin"].median()), 2)}
+        out["marks"][mk] = cell(g)
         for (gg, dp), g3 in g.groupby(["g", "deep"]):
             if len(g3) >= 20:
-                out["cells"][f"{mk}|{gg}|{'deep' if dp else 'shallow'}"] = _cell(g3)
+                out["cells"][f"{mk}|{gg}|{'deep' if dp else 'shallow'}"] = cell(g3)
         for rb, g3 in g.groupby("rb"):
-            out["marks_rb"][f"{mk}|{rb}"] = _cell(g3)
+            out["marks_rb"][f"{mk}|{rb}"] = cell(g3)
         for (gg, dp, rb), g3 in g.groupby(["g", "deep", "rb"]):
             if len(g3) >= 20:
-                out["cells_rb"][f"{mk}|{gg}|{'deep' if dp else 'shallow'}|{rb}"] = _cell(g3)
+                out["cells_rb"][f"{mk}|{gg}|{'deep' if dp else 'shallow'}|{rb}"] = cell(g3)
     return out
 
 
-def _cell(g: pd.DataFrame) -> dict:
-    return {"n": int(len(g)), "p_done": round(float(g["done"].mean()), 3), "fin_q20": round(float(g["fin"].quantile(0.2)), 2), "fin_q50": round(float(g["fin"].median()), 2)}
+def _cell(g: pd.DataFrame, q: float = 0.2) -> dict:
+    """q = 0.2 → fin_q20 (低點：最終低點的兩成分位)；0.8 → fin_q80 (高點)。"""
+    return {"n": int(len(g)), "p_done": round(float(g["done"].mean()), 3), f"fin_q{round(q * 100)}": round(float(g["fin"].quantile(q)), 2), "fin_q50": round(float(g["fin"].median()), 2)}
 
 
 def _hour_of_low(marks: dict[str, dict] | None = None) -> dict:
@@ -335,6 +353,7 @@ def train(scored: pd.DataFrame, write: bool = True, verbose: bool = True, ivk_hi
     except Exception as e:  # noqa: BLE001
         log.warning("pullback night variant: %s", e)
     out["hour_low_table"] = _hour_low_table(m, marks)
+    out["hour_high_table"] = _hour_high_table(m, marks)
     if verbose:
         for key, s in out["supports"].items():
             print(f"  支撐 {s['name']}: 回測 {s['n_tested']} 次 止跌率 {s['hold_rate']} (多頭 {s.get('hold_bull')} / 空頭 {s.get('hold_bear')}，年最低 {s['hold_yr_min']})，止跌後 3 日 {s['bounce3_after_hold']}%，跌破後 3 日 {s['break3_after_fail']}%")
@@ -354,7 +373,7 @@ def build(scored: pd.DataFrame, base_px: float | None = None, night_ret: float |
     close = float(row["close"].iloc[0]); px0 = float(base_px or close); sg = float(row["sigma_range"].iloc[0])
     use_night = night_ret is not None and np.isfinite(float(night_ret)) and bool((st.get("night") or {}).get("k"))
     out = {"date": str(row["date"].iloc[0]), "sigma": round(sg, 3), "variant": "night" if use_night else "base", "night_ret": round(float(night_ret), 2) if use_night else None,
-           "k": {}, "supports": [], "hour_of_low": st.get("hour_of_low") or {}, "hour_low_table": st.get("hour_low_table") or {}}
+           "k": {}, "supports": [], "hour_of_low": st.get("hour_of_low") or {}, "hour_low_table": st.get("hour_low_table") or {}, "hour_high_table": st.get("hour_high_table") or {}}
     if use_night:
         row["night_chg_pct"] = float(np.clip(float(night_ret), -8, 8))
     night_ok = bool((st.get("night") or {}).get("aligned"))      # B1 停損 (0a)：只有對齊重訓後的夜盤模型才可能覆寫 buy_at/stop
