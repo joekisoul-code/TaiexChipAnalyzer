@@ -149,13 +149,14 @@ def _hl_table(m: pd.DataFrame, marks: dict[str, dict] | None, side: str) -> dict
     except Exception as e:  # noqa: BLE001
         log.warning("hour_%s_table: %s", side, e)
         return {}
-    sig = dict(zip(m["date"], m["sigma_range"]))
+    # 11-01 用前一交易日 σ：App 盤中拿到的 pullback.sigma = 最後一筆收盤日 (= 昨天)；原本用當天 σ (含當天收盤) 有輕微偷看
+    sig = dict(zip(m["date"], m["sigma_range"].shift(1)))
     rows = []
     for d_, rec in sorted(marks.items()):
         if not rec.get("prev_close") or "13:30" not in rec or "13:30" not in (rec.get(side) or {}) or d_ not in sig:
             continue
         fin, op, pc, s = rec[side]["13:30"], rec["open"], rec["prev_close"], sig[d_]
-        if not (s and s > 0):
+        if not (s and s > 0):   # NaN (第一筆) 也略過
             continue
         for mk in HL_MARKS:
             if mk not in rec or mk not in rec[side]:
@@ -168,7 +169,7 @@ def _hl_table(m: pd.DataFrame, marks: dict[str, dict] | None, side: str) -> dict
                          "deep": mv <= -0.5 if lo_side else mv >= 0.5,
                          "rb": _rb_bin(px, ex, s) if lo_side else _rb_bin(ex, px, s),
                          "ob": None if not other else _ob_bin(((other / px - 1) if lo_side else (px / other - 1)) * 100 / s),
-                         "done": ex <= fin * 1.0003 if lo_side else ex >= fin / 1.0003, "fin": (fin / px - 1) * 100})
+                         "done": ex <= fin * 1.0003 if lo_side else ex >= fin / 1.0003, "fin": (fin / px - 1) * 100, "fs": (fin / px - 1) * 100 / s})
     if not rows:
         return {}
     h = pd.DataFrame(rows)
@@ -192,8 +193,12 @@ def _hl_table(m: pd.DataFrame, marks: dict[str, dict] | None, side: str) -> dict
 
 
 def _cell(g: pd.DataFrame, q: float = 0.2) -> dict:
-    """q = 0.2 → fin_q20 (低點：最終低點的兩成分位)；0.8 → fin_q80 (高點)。"""
-    return {"n": int(len(g)), "p_done": round(float(g["done"].mean()), 3), f"fin_q{round(q * 100)}": round(float(g["fin"].quantile(q)), 2), "fin_q50": round(float(g["fin"].median()), 2)}
+    """q = 0.2 → fin_q20 (低點：最終低點的兩成分位)；0.8 → fin_q80 (高點)。
+    11-01 另存 σ 單位分位 fs_q20/q80/q50 (App 乘當日 σ)：% 分位跨年波動差很大，走動式實際觸及 30% (年 5~59%)；σ 單位 20% (年 16~25%)、pinball 0.110→0.080。"""
+    c = {"n": int(len(g)), "p_done": round(float(g["done"].mean()), 3), f"fin_q{round(q * 100)}": round(float(g["fin"].quantile(q)), 2), "fin_q50": round(float(g["fin"].median()), 2)}
+    if "fs" in g:
+        c[f"fs_q{round(q * 100)}"], c["fs_q50"] = round(float(g["fs"].quantile(q)), 3), round(float(g["fs"].median()), 3)
+    return c
 
 
 def _hour_of_low(marks: dict[str, dict] | None = None) -> dict:

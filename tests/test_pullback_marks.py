@@ -6,6 +6,7 @@
 - 表帶 open_at = "09:05" (App 依此切換即時口徑)
 - cells_rb / marks_rb：再分現價離今日低點反彈幾 σ (r0/r1/r2)
 - _hour_high_table：高點版 (鏡像；fin_q80)
+- σ 用前一交易日 (App 盤中的 pullback.sigma = 昨天)；第一天沒有前一日 σ → 略過；每格另存 σ 單位分位 fs_q20/q80/q50
 - marks_rbob：再分現價離另一端 (低點表 = 今日高點) 幾 σ (o0/o1/o2)；另一端缺 → 不進 marks_rbob
 
     python tests/test_pullback_marks.py
@@ -64,7 +65,7 @@ def main():
             mk2[d] = rec(100.0, 101.0, [100.9, 100.7, 100.6, 100.6, 100.6, 100.6, 100.6])
         else:       # 開低 1%、開盤後已回檔 (deep)，13:00 後才出現全日低
             mk2[d] = rec(100.0, 99.0, [98.5, 98.4, 98.3, 98.3, 98.3, 98.3, 97.0])
-    m = pd.DataFrame({"date": days, "sigma_range": 1.0})
+    m = pd.DataFrame({"date": ["2024-12-31"] + days, "sigma_range": 1.0})   # 前面多一天 → 60 天都有前一日 σ
     t = P._hour_low_table(m, mk2)
     assert t["open_at"] == "09:05" and t["n_days"] == 60 and t["window_days"] == P.MARKS_WINDOW_DAYS, t
     assert t["cells"]["10:00|up|shallow"]["p_done"] == 1.0 and t["cells"]["10:00|dn|deep"]["p_done"] == 0.0, t["cells"]
@@ -87,6 +88,14 @@ def main():
     tz = P._hour_low_table(m, noh)
     assert tz["marks_rbob"] == {} and tz["marks"]["10:00"]["n"] == 60
     n += 3
+
+    # σ 用前一交易日：σ 序列 1,1,…,1 (到 days[30])、之後 2 → days[31] 的前一日 σ = 1 (fs = fin)、days[32] 的前一日 σ = 2 (fs = fin/2)
+    m2 = pd.DataFrame({"date": days[:34], "sigma_range": [1.0] * 31 + [2.0] * 3})
+    one = lambda i: P._hour_low_table(m2, {days[i]: mk2[days[i]]})["marks"]["13:00"]  # noqa: E731
+    c31, c32 = one(31), one(32)
+    assert abs(c31["fs_q20"] - c31["fin_q20"]) < 0.01 and abs(c32["fs_q20"] - c32["fin_q20"] / 2) < 0.01, (c31, c32)
+    assert P._hour_low_table(m2, {days[0]: mk2[days[0]]}) == {}, "第一天沒有前一日 σ"
+    n += 2
 
     # 2b. 高點版 = 低點版的鏡像：把每個價格對 100 鏡射 (200 − x)、lo ↔ hi → 結果與低點版相同 (開低 ↔ 開高)
     def mirror(r):
