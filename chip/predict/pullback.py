@@ -111,6 +111,15 @@ def _rb_bin(px: float, lo: float, s: float) -> str:
     return "r0" if rb < RB_CUTS[0] else "r1" if rb < RB_CUTS[1] else "r2"
 
 
+# 11-01 現價離「另一端」幾 σ (低點表 = 離今日高點、高點表 = 離今日低點)：走動式 2019~2026 (App 口徑 n≥30) Brier 低 0.1525→0.1478 (8/8 年)、
+# 高 0.1507→0.1477 (7/8 年)，有判斷比例 69→72% / 72→75%，標籤命中持平 → marks_rbob ("mk|rb|ob") 給 App 最先查
+OB_CUTS = (0.3, 0.8)
+
+
+def _ob_bin(z: float) -> str:
+    return "o0" if z < OB_CUTS[0] else "o1" if z < OB_CUTS[1] else "o2"
+
+
 def _marks_window(today: dt.date | None = None) -> dict[str, dict]:
     """TWSE 每 5 秒指數各時間點 (twse.intraday_marks：開盤 09:05、累積高低從 09:05 起) 近 MARKS_WINDOW_DAYS 日曆天。"""
     from ..sources import twse
@@ -152,18 +161,20 @@ def _hl_table(m: pd.DataFrame, marks: dict[str, dict] | None, side: str) -> dict
             if mk not in rec or mk not in rec[side]:
                 continue
             px, ex = rec[mk], rec[side][mk]
+            other = (rec.get("hi" if lo_side else "lo") or {}).get(mk)
             gap = (op / pc - 1) * 100
             mv = (ex / op - 1) * 100 / s
             rows.append({"mark": mk, "g": "dn" if gap < -0.15 else "up" if gap > 0.15 else "flat",
                          "deep": mv <= -0.5 if lo_side else mv >= 0.5,
                          "rb": _rb_bin(px, ex, s) if lo_side else _rb_bin(ex, px, s),
+                         "ob": None if not other else _ob_bin(((other / px - 1) if lo_side else (px / other - 1)) * 100 / s),
                          "done": ex <= fin * 1.0003 if lo_side else ex >= fin / 1.0003, "fin": (fin / px - 1) * 100})
     if not rows:
         return {}
     h = pd.DataFrame(rows)
     q = 0.2 if lo_side else 0.8
     cell = lambda g: _cell(g, q)  # noqa: E731
-    out = {"n_days": int(len(h) / max(1, h["mark"].nunique())), "open_at": OPEN_AT, "source": "TWSE 每 5 秒指數", "window_days": MARKS_WINDOW_DAYS, "rb_cuts": list(RB_CUTS), "cells": {}, "marks": {}, "cells_rb": {}, "marks_rb": {}}
+    out = {"n_days": int(len(h) / max(1, h["mark"].nunique())), "open_at": OPEN_AT, "source": "TWSE 每 5 秒指數", "window_days": MARKS_WINDOW_DAYS, "rb_cuts": list(RB_CUTS), "ob_cuts": list(OB_CUTS), "cells": {}, "marks": {}, "cells_rb": {}, "marks_rb": {}, "marks_rbob": {}}
     for mk, g in h.groupby("mark"):
         out["marks"][mk] = cell(g)
         for (gg, dp), g3 in g.groupby(["g", "deep"]):
@@ -171,6 +182,9 @@ def _hl_table(m: pd.DataFrame, marks: dict[str, dict] | None, side: str) -> dict
                 out["cells"][f"{mk}|{gg}|{'deep' if dp else 'shallow'}"] = cell(g3)
         for rb, g3 in g.groupby("rb"):
             out["marks_rb"][f"{mk}|{rb}"] = cell(g3)
+        for (rb, ob), g3 in g.dropna(subset=["ob"]).groupby(["rb", "ob"]):
+            if len(g3) >= 20:
+                out["marks_rbob"][f"{mk}|{rb}|{ob}"] = cell(g3)
         for (gg, dp, rb), g3 in g.groupby(["g", "deep", "rb"]):
             if len(g3) >= 20:
                 out["cells_rb"][f"{mk}|{gg}|{'deep' if dp else 'shallow'}|{rb}"] = cell(g3)

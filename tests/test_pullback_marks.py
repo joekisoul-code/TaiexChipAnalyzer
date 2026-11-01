@@ -6,6 +6,7 @@
 - 表帶 open_at = "09:05" (App 依此切換即時口徑)
 - cells_rb / marks_rb：再分現價離今日低點反彈幾 σ (r0/r1/r2)
 - _hour_high_table：高點版 (鏡像；fin_q80)
+- marks_rbob：再分現價離另一端 (低點表 = 今日高點) 幾 σ (o0/o1/o2)；另一端缺 → 不進 marks_rbob
 
     python tests/test_pullback_marks.py
 """
@@ -75,6 +76,17 @@ def main():
     assert t["cells_rb"][f"10:00|up|shallow|{up_rb}"]["p_done"] == 1.0 and t["rb_cuts"] == list(P.RB_CUTS), t["cells_rb"]
     assert sum(c["n"] for k, c in t["marks_rb"].items() if k.startswith("10:00|")) == 60
     n += 3
+    # 離另一端：低點表看離今日高點 (hi/px)；切點 OB_CUTS
+    assert P._ob_bin(0.1) == "o0" and P._ob_bin(0.5) == "o1" and P._ob_bin(1.0) == "o2" and t["ob_cuts"] == list(P.OB_CUTS)
+    assert sum(c["n"] for k, c in t["marks_rbob"].items() if k.startswith("10:00|")) == 60 and all(k.count("|") == 2 for k in t["marks_rbob"])
+    assert {k.split("|")[2] for k in t["marks_rbob"]} == {"o2"}, t["marks_rbob"]   # rec()：今日高點 = 現價 + 10 (≈ 6σ 以上)
+    near = {d: {**r, "hi": {k: v * 1.002 for k, v in r["lo"].items()}, **{k: r["lo"][k] * 1.001 for k in MK}} for d, r in mk2.items()}   # 現價離低 0.1σ、離高 0.1σ
+    tn = P._hour_low_table(m, near)
+    assert set(k for k in tn["marks_rbob"] if k.startswith("10:00|")) == {"10:00|r0|o0"}, tn["marks_rbob"]
+    noh = {d: {**r, "hi": {}} for d, r in mk2.items()}   # 沒有高點紀錄 → 其他表照舊、marks_rbob 空
+    tz = P._hour_low_table(m, noh)
+    assert tz["marks_rbob"] == {} and tz["marks"]["10:00"]["n"] == 60
+    n += 3
 
     # 2b. 高點版 = 低點版的鏡像：把每個價格對 100 鏡射 (200 − x)、lo ↔ hi → 結果與低點版相同 (開低 ↔ 開高)
     def mirror(r):
@@ -87,6 +99,7 @@ def main():
         assert th["cells"][sw(k)]["p_done"] == c["p_done"] and th["cells"][sw(k)]["n"] == c["n"], (k, th["cells"].get(sw(k)), c)
     for k, c in t["cells_rb"].items():
         assert th["cells_rb"][sw(k)]["p_done"] == c["p_done"], k
+    assert th["marks_rbob"] == t["marks_rbob"] or {k: c["p_done"] for k, c in th["marks_rbob"].items()} == {k: c["p_done"] for k, c in t["marks_rbob"].items()}
     assert "fin_q80" in th["marks"]["10:00"] and th["marks"]["10:00"]["fin_q80"] > 0 and "fin_q20" not in th["marks"]["10:00"]
     n += 3
 
