@@ -209,25 +209,30 @@ def test_precheck_est_table_trained():
     assert all("basis" not in c for c in g["cells"].values())
 
 
+def _scaled(c):
+    """11-01：build 發布的分位依今日 σ 縮放 (precheck.scale_cell)。"""
+    return PC.scale_cell(c, float(RL.sigma_series(SC).iloc[-1]))
+
+
 def test_precheck_build_uses_est_preopen_and_actual_intraday():
     bu = ST_PC["gap"]["night_beta"]["beta_recent"]
     out = _build(ST_PC, night=0.02)                                          # 夜盤 → 估計平盤
     gp = out["gap"]
     key = "3|" + ("bull" if gp["regime"].startswith("多頭") else "bear")
     assert abs(gp["est"] - round(bu * 0.02, 2)) < 1e-9 and gp["table"] == "est"
-    assert gp["stats"] == ST_PC["gap"]["cells_est"][key] and gp["stats_actual"] == ST_PC["gap"]["cells"][key] and gp["stats_est"] == gp["stats"]
+    assert gp["stats"] == _scaled(ST_PC["gap"]["cells_est"][key]) and gp["stats_actual"] == _scaled(ST_PC["gap"]["cells"][key]) and gp["stats_est"] == gp["stats"]
     assert "以夜盤估計跳空分組" in gp["text"] and "估計跳空分組" in gp["table_note"] and f"回補 (回到前收) {gp['stats']['p_fill']:.0%}" in gp["text"]
     # 盤中實際開盤已知 → 實際表
     o = float(SC["close"].iloc[-1]) * 1.0001
     out2 = _build(ST_PC, live_open=o)
     g2 = out2["gap"]
-    assert g2["table"] == "actual" and g2["stats"] == ST_PC["gap"]["cells"][key] and g2["source"] == "實際開盤" and "以夜盤估計跳空分組" not in g2["text"]
+    assert g2["table"] == "actual" and g2["stats"] == _scaled(ST_PC["gap"]["cells"][key]) and g2["source"] == "實際開盤" and "以夜盤估計跳空分組" not in g2["text"]
     assert "盤中實際開盤已知" in g2["table_note"]
     # 舊 precheck.json (無 cells_est) → 開盤前仍用實際表並註明可能高估
     old = copy.deepcopy(ST_PC); old["gap"].pop("cells_est"); old["gap"].pop("est_meta")
     out3 = _build(old, night=0.02)
     g3 = out3["gap"]
-    assert g3["table"] == "actual" and g3["stats"] == ST_PC["gap"]["cells"][key] and "stats_est" not in g3 and "暫用實際跳空分組" in g3["table_note"]
+    assert g3["table"] == "actual" and g3["stats"] == _scaled(ST_PC["gap"]["cells"][key]) and "stats_est" not in g3 and "暫用實際跳空分組" in g3["table_note"]
     # 大跳空 (開高/開低) 文字中性
     for nv in (2.5, -2.5, 1.0, -1.0, 0.6, -0.6):
         for st in (ST_PC, old):

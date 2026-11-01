@@ -50,6 +50,45 @@ def _events_for(dates: list[str]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# 11-01 日內 / 回檔 / 上衝分位依波動縮放：分位存 x / σ^SQ_BETA (σ = 前一日 range_levels.sigma_series)，發布時 × 今日 σ^SQ_BETA。
+# 走動式 2014~2026 (擴張視窗)：原本 % 分位的 p20~p80 覆蓋率 2026 只有 29% (應 60%)、逐年 sd 0.112；
+# β=1 (完全 σ 單位) 過度反應 (pinball 只勝 4/13 年)；β=0.5：pinball 日內 −1.7% (10/13 年)、回檔 −3.2% (9/13)、上衝 −5.3% (11/13)，覆蓋 56→59%
+SQ_BETA = 0.5
+SQ_KEYS = ("intra_p20", "intra_p80", "dip_hold_q20", "dip_hold_q50", "pop_hold_q50", "dip_fail_q50")
+
+
+def _sq(gg: pd.DataFrame) -> dict | None:
+    """各分位的 σ^β 正規化版 (需 gg 有 s 欄)；條件與 _cell 原值相同 (守住日 ≥10 等)。"""
+    if "s" not in gg:
+        return None
+    g = gg[gg["s"] > 0]
+    if len(g) < 20:
+        return None
+    r = g["s"] ** SQ_BETA
+    hd, hf = g["hold"] == True, g["hold"] == False  # noqa: E712
+    out = {"intra_p20": float((g["intra"] / r).quantile(0.2)), "intra_p80": float((g["intra"] / r).quantile(0.8))}
+    if hd.sum() >= 10:
+        out["dip_hold_q20"] = float((g["dip"][hd] / r[hd]).quantile(0.2)); out["dip_hold_q50"] = float((g["dip"][hd] / r[hd]).median())
+        out["pop_hold_q50"] = float((g["pop"][hd] / r[hd]).median())
+    if hf.sum() >= 10:
+        out["dip_fail_q50"] = float((g["dip"][hf] / r[hf]).median())
+    return {k: round(v, 4) for k, v in out.items()}
+
+
+def scale_cell(cell: dict, sigma: float | None) -> dict:
+    """發布時：有 sq 且 σ 有效 → SQ_KEYS 換成 sq × σ^β (原值留在 raw_q)；否則原樣回傳。"""
+    sq = cell.get("sq") if isinstance(cell, dict) else None
+    if not sq or not sigma or not (sigma > 0) or not np.isfinite(sigma):
+        return cell
+    c = dict(cell); f = float(sigma) ** SQ_BETA
+    c["raw_q"] = {k: cell.get(k) for k in SQ_KEYS if k in sq}
+    for k in SQ_KEYS:
+        if k in sq and cell.get(k) is not None:
+            c[k] = round(sq[k] * f, 2)
+    c["q_scaled"] = {"beta": SQ_BETA, "sigma": round(float(sigma), 3)}
+    return c
+
+
 def _cell(gg: pd.DataFrame, b, bull) -> dict:
     """一個 (跳空桶, 多空) 格的統計；gg 需有 fill/cont/hold/dip/pop/intra/ret/rng/year 欄 (方向定義由呼叫端決定)。"""
     yr = gg.groupby("year")["cont"].mean(); yr = yr[gg.groupby("year").size() >= 5]
@@ -64,7 +103,8 @@ def _cell(gg: pd.DataFrame, b, bull) -> dict:
     return {"label": GAP_LABELS[int(b)], "regime": "多頭 (前收在月線上)" if bull else "空頭 (前收在月線下)", "n": int(len(gg)), "p_fill": round(float(gg["fill"].mean()), 3), "p_cont": round(cont, 3),
             "p_hold": round(float(gg["hold"].mean()), 3), "intra_mean": round(float(gg["intra"].mean()), 3), "intra_med": round(float(gg["intra"].median()), 3), "intra_p20": round(float(gg["intra"].quantile(0.2)), 2), "intra_p80": round(float(gg["intra"].quantile(0.8)), 2),
             "ret_mean": round(float(gg["ret"].mean()), 3), "p_up_close": round(float((gg["ret"] > 0).mean()), 3), "range_mean": round(float(gg["rng"].mean()), 2),
-            "cont_yr_cons": round(float(((yr >= 0.5) == (cont >= 0.5)).mean()), 2) if len(yr) else None, "years": int(len(yr)), **extra_}
+            "cont_yr_cons": round(float(((yr >= 0.5) == (cont >= 0.5)).mean()), 2) if len(yr) else None, "years": int(len(yr)), **extra_,
+            **({"sq": sq} if (sq := _sq(gg)) else {})}
 
 
 EST_BETA_WIN = 250      # r6 估計跳空表：滾動 β 視窗 (與 build 的「近一年 β」同長)，至少 120 列，往後移一日 (只用前一日以前的資料)
@@ -127,6 +167,11 @@ def train(scored: pd.DataFrame, write: bool = True, verbose: bool = True) -> dic
     d["rng"] = (d["high"] - d["low"]) / d["prev"] * 100
     d["year"] = d["date"].str[:4].astype(int)
     d["bull"] = d["prev"] >= d["ma20"]
+    try:   # 11-01 前一日 σ (分位依波動縮放用)
+        from . import range_levels as RL
+        d["s"] = RL.sigma_series(d).shift(1).values
+    except Exception as e:  # noqa: BLE001
+        log.warning("precheck sigma: %s", e)
     out = {"trained_at": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M:%S"), "gap": {"edges": GAP_EDGES, "labels": GAP_LABELS, "cells": {}}, "calendar": {}}
     g = d.dropna(subset=["gap", "intra", "ma20"]).copy()
     g["bucket"] = np.searchsorted(GAP_EDGES, g["gap"].values, side="right")
@@ -284,6 +329,12 @@ def build(scored: pd.DataFrame, snap: dict | None, fc: dict | None, us_px=None, 
         # r6 (honesty gap_flat_fill)：開盤前 (估計跳空) 用估計跳空分組表；盤中實際開盤已知 → 實際跳空表。估計表缺 (舊 precheck.json / 格 n<20) → 實際表
         estimated = src != "實際開盤"
         table = "est" if (estimated and cell_est) else "actual"
+        try:   # 11-01 分位依今日波動縮放 (σ = 最後一筆收盤的 sigma_series，即明日 / 今日盤中用的 σ)
+            from . import range_levels as RL
+            s_now = float(RL.sigma_series(scored).iloc[-1])
+        except Exception:  # noqa: BLE001
+            s_now = None
+        cell_act, cell_est = scale_cell(cell_act, s_now), scale_cell(cell_est, s_now)
         cell = cell_est if table == "est" else cell_act
         if cell:
             up = est > 0.15; dn = est < -0.15
