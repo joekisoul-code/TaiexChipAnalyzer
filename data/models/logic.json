@@ -1,5 +1,5 @@
 {
- "trained_at": "2026-11-01 08:52:25",
+ "trained_at": "2026-11-01 14:20:29",
  "margin": 0.07,
  "depth": 3,
  "min_leaf": 120,
@@ -730,7 +730,7 @@
      "streak": 1.0,
      "margin_chg5_pct": 0.6238,
      "smart2": -0.1717,
-     "composite_smooth": 1.8,
+     "composite_smooth": 1.9,
      "days_to_settle": 14.0,
      "dow": 2.0,
      "amount_5d_ratio": 1.0073
@@ -769,14 +769,14 @@
     "base": 0.558,
     "oos": {
      "n_days": 3371,
-     "n_calls": 1199,
-     "cov": 0.356,
-     "hit": 0.535,
+     "n_calls": 1208,
+     "cov": 0.358,
+     "hit": 0.536,
      "base": 0.562,
      "yr_min": 0.446,
      "yr_med": 0.529,
      "years": 14,
-     "up_hit": 0.561,
+     "up_hit": 0.564,
      "dn_hit": 0.5
     },
     "rules": [
@@ -1407,7 +1407,7 @@
      "streak": 1.0,
      "margin_chg5_pct": 0.6242,
      "smart2": -0.1792,
-     "composite_smooth": 1.8,
+     "composite_smooth": 1.9,
      "days_to_settle": 14.0,
      "dow": 2.0,
      "amount_5d_ratio": 1.0074
@@ -1446,14 +1446,14 @@
     "base": 0.576,
     "oos": {
      "n_days": 3369,
-     "n_calls": 1808,
-     "cov": 0.537,
-     "hit": 0.464,
+     "n_calls": 1784,
+     "cov": 0.53,
+     "hit": 0.466,
      "base": 0.582,
      "yr_min": 0.331,
      "yr_med": 0.454,
      "years": 14,
-     "up_hit": 0.539,
+     "up_hit": 0.546,
      "dn_hit": 0.42
     },
     "rules": [
@@ -1878,29 +1878,29 @@
         "thr": 0.03
        },
        {
-        "f": "night_chg_pct",
+        "f": "composite_smooth",
         "op": "<=",
-        "thr": 0.68
+        "thr": 17.52
        },
        {
-        "f": "nikkei_r0",
+        "f": "night_chg_pct",
         "op": "<=",
-        "thr": 0.75
+        "thr": 0.53
        }
       ],
-      "text": "前晚夜盤台指期% > 0.03 且 前晚夜盤台指期% ≤ 0.68 且 日經今日% ≤ 0.75",
-      "n": 721,
-      "up_rate": 0.607,
-      "mean_fwd": 0.486,
+      "text": "前晚夜盤台指期% > 0.03 且 籌碼綜合分 ≤ 17.52 且 前晚夜盤台指期% ≤ 0.53",
+      "n": 672,
+      "up_rate": 0.606,
+      "mean_fwd": 0.449,
       "dir": "中性",
       "years": 10,
       "yr_cons": null,
-      "yr_min": 0.475,
-      "yr_max": 0.682,
+      "yr_min": 0.303,
+      "yr_max": 0.679,
       "examples": [
        "2026-09-02",
        "2026-09-08",
-       "2026-09-22"
+       "2026-10-05"
       ]
      },
      {
@@ -1912,97 +1912,58 @@
         "thr": 0.03
        },
        {
-        "f": "night_chg_pct",
+        "f": "composite_smooth",
         "op": "<=",
-        "thr": 0.68
+        "thr": 17.52
        },
        {
-        "f": "nikkei_r0",
+        "f": "night_chg_pct",
         "op": ">",
-        "thr": 0.75
+        "thr": 0.53
        }
       ],
-      "text": "前晚夜盤台指期% > 0.03 且 前晚夜盤台指期% ≤ 0.68 且 日經今日% > 0.75",
-      "n": 188,
-      "up_rate": 0.739,
-      "mean_fwd": 1.019,
-      "dir": "偏多",
-      "years": 10,
-      "yr_cons": 0.8,
-      "yr_min": 0.375,
-      "yr_max": 0.909,
-      "examples": [
-       "2026-05-22",
-       "2026-07-03",
-       "2026-10-05"
-      ]
-     },
-     {
-      "id": 13,
-      "conds": [
-       {
-        "f": "night_chg_pct",
-        "op": ">",
-        "thr": 0.03
-       },
-       {
-        "f": "night_chg_pct",
-        "op": ">",
-        "thr": 0.68
-       },
-       {
-        "f": "vola20",
-        "op": "<=",
-        "thr": 1.06
-       }
-      ],
-      "text": "前晚夜盤台指期% > 0.03 且 前晚夜盤台指期% > 0.68 且 20 日波動率 ≤ 1.06",
-      "n": 130,
-      "up_rate": 0.838,
-      "mean_fwd": 1.742,
+      "text": "前晚夜盤台指期% > 0.03 且 籌碼綜合分 ≤ 17.52 且 前晚夜盤台指期% > 0.53",
+      "n": 382,
+      "up_rate": 0.712,
+      "mean_fwd": 1.281,
       "dir": "偏多",
       "years": 9,
-      "yr_cons": 1.0,
-      "yr_min": 0.625,
-      "yr_max": 1.0,
-      "examples": [
-       "2026-09-04",
-       "2026-09-16",
-       "2026-10-02"
-      ]
-     },
-     {
-      "id": 14,
-      "conds": [
-       {
-        "f": "night_chg_pct",
-        "op": ">",
-        "thr": 0.03
-       },
-       {
-        "f": "night_chg_pct",
-        "op": ">",
-        "thr": 0.68
-       },
-       {
-        "f": "vola20",
-        "op": ">",
-        "thr": 1.06
-       }
-      ],
-      "text": "前晚夜盤台指期% > 0.03 且 前晚夜盤台指期% > 0.68 且 20 日波動率 > 1.06",
-      "n": 227,
-      "up_rate": 0.7,
-      "mean_fwd": 1.58,
-      "dir": "偏多",
-      "years": 7,
-      "yr_cons": 0.86,
-      "yr_min": 0.5,
-      "yr_max": 0.923,
+      "yr_cons": 0.89,
+      "yr_min": 0.393,
+      "yr_max": 0.867,
       "examples": [
        "2026-10-15",
        "2026-10-20",
        "2026-10-21"
+      ]
+     },
+     {
+      "id": 12,
+      "conds": [
+       {
+        "f": "night_chg_pct",
+        "op": ">",
+        "thr": 0.03
+       },
+       {
+        "f": "composite_smooth",
+        "op": ">",
+        "thr": 17.52
+       }
+      ],
+      "text": "前晚夜盤台指期% > 0.03 且 籌碼綜合分 > 17.52",
+      "n": 212,
+      "up_rate": 0.783,
+      "mean_fwd": 1.584,
+      "dir": "偏多",
+      "years": 9,
+      "yr_cons": 1.0,
+      "yr_min": 0.615,
+      "yr_max": 1.0,
+      "examples": [
+       "2026-02-24",
+       "2026-04-08",
+       "2026-04-09"
       ]
      }
     ],
@@ -2040,7 +2001,7 @@
      "streak": 1.0,
      "margin_chg5_pct": 0.6249,
      "smart2": -0.1797,
-     "composite_smooth": 1.8,
+     "composite_smooth": 1.9,
      "days_to_settle": 14.0,
      "dow": 2.0,
      "amount_5d_ratio": 1.0075
@@ -2049,27 +2010,22 @@
      {
       "f": "night_chg_pct",
       "name": "前晚夜盤台指期%",
-      "w": 0.704
+      "w": 0.718
+     },
+     {
+      "f": "composite_smooth",
+      "name": "籌碼綜合分",
+      "w": 0.119
      },
      {
       "f": "ma20_slope",
       "name": "月線斜率",
-      "w": 0.108
-     },
-     {
-      "f": "nikkei_r0",
-      "name": "日經今日%",
-      "w": 0.08
-     },
-     {
-      "f": "vola20",
-      "name": "20 日波動率",
-      "w": 0.061
+      "w": 0.114
      },
      {
       "f": "range_pct",
       "name": "今日振幅%",
-      "w": 0.047
+      "w": 0.049
      }
     ]
    }
