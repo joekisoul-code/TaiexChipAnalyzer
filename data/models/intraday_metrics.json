@@ -4442,7 +4442,7 @@
  "_source": {
   "chosen": "twse",
   "twse": 0.031,
-  "yahoo": 0.0062,
+  "yahoo": 0.0083,
   "months": 28
  },
  "_early": {
