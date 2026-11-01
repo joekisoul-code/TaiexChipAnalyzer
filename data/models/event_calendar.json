@@ -1,7 +1,7 @@
 {
- "generated": "2026-11-01 06:16:05",
+ "generated": "2026-11-02 04:29:50",
  "schema": "event_calendar/v1",
- "asof": "2026-11-01",
+ "asof": "2026-11-02",
  "params_version": "2026-09-27",
  "horizon_days": 120,
  "health": {
@@ -342,7 +342,7 @@
    "n_us": 2,
    "closed_weekdays": 1,
    "range_k1_factor": 1.414,
-   "beyond_horizon": true
+   "beyond_horizon": false
   },
   {
    "date": "2027-03-05",

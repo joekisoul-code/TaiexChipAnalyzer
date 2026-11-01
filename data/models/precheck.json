@@ -1,5 +1,5 @@
 {
- "trained_at": "2026-11-01 21:28:07",
+ "trained_at": "2026-11-02 04:26:02",
  "gap": {
   "edges": [
    -1.5,
@@ -43,7 +43,14 @@
     "dip_hold_q20": -2.97,
     "dip_hold_q50": -1.47,
     "pop_hold_q50": 0.35,
-    "dip_fail_q50": null
+    "dip_fail_q50": null,
+    "sq": {
+     "intra_p20": -1.7516,
+     "intra_p80": 0.2621,
+     "dip_hold_q20": -2.173,
+     "dip_hold_q50": -1.0862,
+     "pop_hold_q50": 0.3238
+    }
    },
    "1|bear": {
     "label": "開低 (-1.5~-0.5%)",
@@ -69,7 +76,15 @@
     "dip_hold_q20": -1.55,
     "dip_hold_q50": -1.0,
     "pop_hold_q50": 0.16,
-    "dip_fail_q50": -0.5
+    "dip_fail_q50": -0.5,
+    "sq": {
+     "intra_p20": -1.077,
+     "intra_p80": 0.4954,
+     "dip_hold_q20": -1.3446,
+     "dip_hold_q50": -0.8777,
+     "pop_hold_q50": 0.1359,
+     "dip_fail_q50": -0.4456
+    }
    },
    "1|bull": {
     "label": "開低 (-1.5~-0.5%)",
@@ -95,7 +110,15 @@
     "dip_hold_q20": -1.23,
     "dip_hold_q50": -0.66,
     "pop_hold_q50": 0.19,
-    "dip_fail_q50": -0.23
+    "dip_fail_q50": -0.23,
+    "sq": {
+     "intra_p20": -0.7622,
+     "intra_p80": 0.2524,
+     "dip_hold_q20": -1.177,
+     "dip_hold_q50": -0.6335,
+     "pop_hold_q50": 0.1994,
+     "dip_fail_q50": -0.2211
+    }
    },
    "2|bear": {
     "label": "小幅開低 (-0.5~-0.15%)",
@@ -121,7 +144,15 @@
     "dip_hold_q20": -1.56,
     "dip_hold_q50": -0.88,
     "pop_hold_q50": 0.17,
-    "dip_fail_q50": -0.36
+    "dip_fail_q50": -0.36,
+    "sq": {
+     "intra_p20": -1.014,
+     "intra_p80": 0.3857,
+     "dip_hold_q20": -1.3742,
+     "dip_hold_q50": -0.8087,
+     "pop_hold_q50": 0.1536,
+     "dip_fail_q50": -0.3708
+    }
    },
    "2|bull": {
     "label": "小幅開低 (-0.5~-0.15%)",
@@ -147,7 +178,15 @@
     "dip_hold_q20": -1.08,
     "dip_hold_q50": -0.61,
     "pop_hold_q50": 0.14,
-    "dip_fail_q50": -0.18
+    "dip_fail_q50": -0.18,
+    "sq": {
+     "intra_p20": -0.6229,
+     "intra_p80": 0.3383,
+     "dip_hold_q20": -1.0321,
+     "dip_hold_q50": -0.5865,
+     "pop_hold_q50": 0.1406,
+     "dip_fail_q50": -0.1743
+    }
    },
    "3|bear": {
     "label": "平盤附近 (±0.15%)",
@@ -173,7 +212,15 @@
     "dip_hold_q20": -0.92,
     "dip_hold_q50": -0.38,
     "pop_hold_q50": 0.39,
-    "dip_fail_q50": -0.47
+    "dip_fail_q50": -0.47,
+    "sq": {
+     "intra_p20": -0.6929,
+     "intra_p80": 0.457,
+     "dip_hold_q20": -0.8842,
+     "dip_hold_q50": -0.4012,
+     "pop_hold_q50": 0.3758,
+     "dip_fail_q50": -0.4907
+    }
    },
    "3|bull": {
     "label": "平盤附近 (±0.15%)",
@@ -199,7 +246,15 @@
     "dip_hold_q20": -0.7,
     "dip_hold_q50": -0.3,
     "pop_hold_q50": 0.29,
-    "dip_fail_q50": -0.39
+    "dip_fail_q50": -0.39,
+    "sq": {
+     "intra_p20": -0.4812,
+     "intra_p80": 0.409,
+     "dip_hold_q20": -0.7477,
+     "dip_hold_q50": -0.3234,
+     "pop_hold_q50": 0.3178,
+     "dip_fail_q50": -0.4207
+    }
    },
    "4|bear": {
     "label": "小幅開高 (0.15~0.5%)",
@@ -225,7 +280,15 @@
     "dip_hold_q20": -0.46,
     "dip_hold_q50": -0.14,
     "pop_hold_q50": 0.64,
-    "dip_fail_q50": -0.86
+    "dip_fail_q50": -0.86,
+    "sq": {
+     "intra_p20": -0.3704,
+     "intra_p80": 0.7372,
+     "dip_hold_q20": -0.435,
+     "dip_hold_q50": -0.1407,
+     "pop_hold_q50": 0.6245,
+     "dip_fail_q50": -0.8269
+    }
    },
    "4|bull": {
     "label": "小幅開高 (0.15~0.5%)",
@@ -251,7 +314,15 @@
     "dip_hold_q20": -0.39,
     "dip_hold_q50": -0.14,
     "pop_hold_q50": 0.5,
-    "dip_fail_q50": -0.77
+    "dip_fail_q50": -0.77,
+    "sq": {
+     "intra_p20": -0.4058,
+     "intra_p80": 0.5987,
+     "dip_hold_q20": -0.3846,
+     "dip_hold_q50": -0.1446,
+     "pop_hold_q50": 0.5061,
+     "dip_fail_q50": -0.7926
+    }
    },
    "5|bear": {
     "label": "開高 (0.5~1.5%)",
@@ -277,7 +348,15 @@
     "dip_hold_q20": -0.53,
     "dip_hold_q50": -0.17,
     "pop_hold_q50": 0.72,
-    "dip_fail_q50": -1.45
+    "dip_fail_q50": -1.45,
+    "sq": {
+     "intra_p20": -0.4841,
+     "intra_p80": 0.8023,
+     "dip_hold_q20": -0.4832,
+     "dip_hold_q50": -0.1503,
+     "pop_hold_q50": 0.6149,
+     "dip_fail_q50": -1.285
+    }
    },
    "5|bull": {
     "label": "開高 (0.5~1.5%)",
@@ -303,7 +382,15 @@
     "dip_hold_q20": -0.49,
     "dip_hold_q50": -0.2,
     "pop_hold_q50": 0.56,
-    "dip_fail_q50": -1.04
+    "dip_fail_q50": -1.04,
+    "sq": {
+     "intra_p20": -0.3968,
+     "intra_p80": 0.649,
+     "dip_hold_q20": -0.4711,
+     "dip_hold_q50": -0.1839,
+     "pop_hold_q50": 0.5445,
+     "dip_fail_q50": -0.9826
+    }
    },
    "6|bear": {
     "label": "大幅開高 (>1.5%)",
@@ -329,7 +416,14 @@
     "dip_hold_q20": -0.47,
     "dip_hold_q50": -0.05,
     "pop_hold_q50": 1.16,
-    "dip_fail_q50": null
+    "dip_fail_q50": null,
+    "sq": {
+     "intra_p20": 0.1084,
+     "intra_p80": 1.0355,
+     "dip_hold_q20": -0.3418,
+     "dip_hold_q50": -0.0324,
+     "pop_hold_q50": 0.9004
+    }
    }
   },
   "night_beta": {
@@ -379,6 +473,14 @@
     "dip_hold_q50": -1.17,
     "pop_hold_q50": 0.03,
     "dip_fail_q50": -0.67,
+    "sq": {
+     "intra_p20": -1.0869,
+     "intra_p80": 0.3072,
+     "dip_hold_q20": -1.6877,
+     "dip_hold_q50": -0.9914,
+     "pop_hold_q50": 0.024,
+     "dip_fail_q50": -0.4217
+    },
     "basis": "est",
     "same_bucket_actual": 0.523
    },
@@ -407,6 +509,13 @@
     "dip_hold_q50": -1.06,
     "pop_hold_q50": 0.03,
     "dip_fail_q50": null,
+    "sq": {
+     "intra_p20": -1.163,
+     "intra_p80": 0.0938,
+     "dip_hold_q20": -1.4243,
+     "dip_hold_q50": -0.941,
+     "pop_hold_q50": 0.0225
+    },
     "basis": "est",
     "same_bucket_actual": 0.466
    },
@@ -435,6 +544,14 @@
     "dip_hold_q50": -0.87,
     "pop_hold_q50": 0.06,
     "dip_fail_q50": -0.33,
+    "sq": {
+     "intra_p20": -0.9484,
+     "intra_p80": 0.2729,
+     "dip_hold_q20": -1.3527,
+     "dip_hold_q50": -0.8383,
+     "pop_hold_q50": 0.0563,
+     "dip_fail_q50": -0.3211
+    },
     "basis": "est",
     "same_bucket_actual": 0.48
    },
@@ -463,6 +580,14 @@
     "dip_hold_q50": -0.68,
     "pop_hold_q50": 0.1,
     "dip_fail_q50": -0.3,
+    "sq": {
+     "intra_p20": -0.6569,
+     "intra_p80": 0.2976,
+     "dip_hold_q20": -1.039,
+     "dip_hold_q50": -0.6306,
+     "pop_hold_q50": 0.0895,
+     "dip_fail_q50": -0.2869
+    },
     "basis": "est",
     "same_bucket_actual": 0.441
    },
@@ -491,6 +616,14 @@
     "dip_hold_q50": -0.37,
     "pop_hold_q50": 0.4,
     "dip_fail_q50": -0.56,
+    "sq": {
+     "intra_p20": -0.7001,
+     "intra_p80": 0.4064,
+     "dip_hold_q20": -0.7819,
+     "dip_hold_q50": -0.3516,
+     "pop_hold_q50": 0.3746,
+     "dip_fail_q50": -0.487
+    },
     "basis": "est",
     "same_bucket_actual": 0.486
    },
@@ -519,6 +652,14 @@
     "dip_hold_q50": -0.27,
     "pop_hold_q50": 0.35,
     "dip_fail_q50": -0.4,
+    "sq": {
+     "intra_p20": -0.4211,
+     "intra_p80": 0.5436,
+     "dip_hold_q20": -0.5982,
+     "dip_hold_q50": -0.2934,
+     "pop_hold_q50": 0.3666,
+     "dip_fail_q50": -0.4211
+    },
     "basis": "est",
     "same_bucket_actual": 0.555
    },
@@ -547,6 +688,14 @@
     "dip_hold_q50": -0.03,
     "pop_hold_q50": 0.72,
     "dip_fail_q50": -0.9,
+    "sq": {
+     "intra_p20": -0.4472,
+     "intra_p80": 0.7548,
+     "dip_hold_q20": -0.3501,
+     "dip_hold_q50": -0.0302,
+     "pop_hold_q50": 0.7029,
+     "dip_fail_q50": -0.82
+    },
     "basis": "est",
     "same_bucket_actual": 0.522
    },
@@ -575,6 +724,14 @@
     "dip_hold_q50": -0.08,
     "pop_hold_q50": 0.59,
     "dip_fail_q50": -0.73,
+    "sq": {
+     "intra_p20": -0.278,
+     "intra_p80": 0.6469,
+     "dip_hold_q20": -0.3474,
+     "dip_hold_q50": -0.0907,
+     "pop_hold_q50": 0.5828,
+     "dip_fail_q50": -0.7055
+    },
     "basis": "est",
     "same_bucket_actual": 0.523
    },
@@ -603,6 +760,13 @@
     "dip_hold_q50": 0.0,
     "pop_hold_q50": 1.06,
     "dip_fail_q50": null,
+    "sq": {
+     "intra_p20": -0.0683,
+     "intra_p80": 1.2217,
+     "dip_hold_q20": -0.2857,
+     "dip_hold_q50": 0.0,
+     "pop_hold_q50": 0.9454
+    },
     "basis": "est",
     "same_bucket_actual": 0.667
    },
@@ -631,6 +795,14 @@
     "dip_hold_q50": -0.03,
     "pop_hold_q50": 0.78,
     "dip_fail_q50": -1.41,
+    "sq": {
+     "intra_p20": -0.2922,
+     "intra_p80": 0.8282,
+     "dip_hold_q20": -0.3351,
+     "dip_hold_q50": -0.029,
+     "pop_hold_q50": 0.6999,
+     "dip_fail_q50": -1.3795
+    },
     "basis": "est",
     "same_bucket_actual": 0.586
    }
