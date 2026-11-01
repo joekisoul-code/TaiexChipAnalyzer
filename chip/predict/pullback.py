@@ -114,6 +114,7 @@ def _rb_bin(px: float, lo: float, s: float) -> str:
 
 # 11-01 現價離「另一端」幾 σ (低點表 = 離今日高點、高點表 = 離今日低點)：走動式 2019~2026 (App 口徑 n≥30) Brier 低 0.1525→0.1478 (8/8 年)、
 # 高 0.1507→0.1477 (7/8 年)，有判斷比例 69→72% / 72→75%，標籤命中持平 → marks_rbob ("mk|rb|ob") 給 App 最先查
+# (11-02 覆核：上面是同日 σ、不含 09:30 的數字；改前一日 σ 後同一比較為低 0.1541→0.1485、高 0.1513→0.1484，含 09:30 的現行基準 0.1614 / 0.1610)
 OB_CUTS = (0.3, 0.8)
 
 
@@ -121,35 +122,99 @@ def _ob_bin(z: float) -> str:
     return "o0" if z < OB_CUTS[0] else "o1" if z < OB_CUTS[1] else "o2"
 
 
-def _marks_window(today: dt.date | None = None) -> dict[str, dict]:
-    """TWSE 每 5 秒指數各時間點 (twse.intraday_marks：開盤 09:05、累積高低從 09:05 起) 近 MARKS_WINDOW_DAYS 日曆天。"""
-    from ..sources import twse
+def _marks_window(today: dt.date | None = None, all_marks: dict[str, dict] | None = None) -> dict[str, dict]:
+    """TWSE 每 5 秒指數各時間點 (twse.intraday_marks：開盤 09:05、累積高低從 09:05 起) 近 MARKS_WINDOW_DAYS 日曆天。all_marks：已取得的全部 (不再抓一次)。"""
+    if all_marks is None:
+        from ..sources import twse
+        all_marks = twse.intraday_marks()
     today = today or dt.datetime.now(config.TZ).date()
     cut = (today - dt.timedelta(days=MARKS_WINDOW_DAYS)).isoformat()
-    return {d: r for d, r in twse.intraday_marks().items() if r and d >= cut}
+    return {d: r for d, r in all_marks.items() if r and d >= cut}
 
 
-def _hour_low_table(m: pd.DataFrame, marks: dict[str, dict] | None = None) -> dict:
+# 11-02 「已出現」機率 p_done 改平滑 logistic (研究 hit2 C + 反方獨立重算；numpy ridge IRLS，λ=1 事先固定)：用 2016~ 全部時間點列 (不只近 3 年)，
+# 設計 = 常數 + 時間點虛擬 + rb (現價離今日低 / 高點幾 σ，鉸鏈 0.15/0.5/1.0) + ob (離另一端幾 σ，鉸鏈 0.3/0.8/1.5) + 各時間點 rb / ob 斜率；rb、ob 截在 3σ，
+# 另加單調上限 (p 隨 rb 不降、隨 ob 不升)。走動式 2019~2026 (每年 / 每週只用之前的列)：Brier 低 0.1614 → 0.1514、高 0.1610 → 0.1529 (兩邊 8/8 年)，
+# 標籤命中 84.0% → 85.2% / 83.3% → 85.0%；46 天 1 分鐘實盤 (含整點之間) 標籤命中 +5.4 / +4.2pt。分位 (fs_q) 與格仍用近 3 年表；App 有 logit 用它的 p，無 → 原表。
+HL_LOGIT = {"lam": 1.0, "cap": 3.0, "rb_knots": (0.15, 0.5, 1.0), "ob_knots": (0.3, 0.8, 1.5), "min_rows": 1000}
+
+
+def _hl_design(mark: np.ndarray, rbz: np.ndarray, obz: np.ndarray) -> np.ndarray:
+    cap = HL_LOGIT["cap"]
+    rb, ob = np.clip(rbz, 0, cap), np.clip(obz, 0, cap)
+    cols = [np.ones(len(rb))] + [(mark == mk).astype(float) for mk in HL_MARKS[1:]]
+    cols += [rb] + [np.maximum(0, rb - k) for k in HL_LOGIT["rb_knots"]]
+    cols += [ob] + [np.maximum(0, ob - k) for k in HL_LOGIT["ob_knots"]]
+    for mk in HL_MARKS[1:]:
+        ind = (mark == mk).astype(float)
+        cols += [ind * rb, ind * ob]
+    return np.column_stack(cols)
+
+
+def _hl_logit(rows: pd.DataFrame) -> dict:
+    """rows：每 (日, 時間點) 一列 (mark / rbz / obz / done / d)。回傳 App 用的各時間點係數 (常數、rb 斜率 + 鉸鏈、ob 斜率 + 鉸鏈) 與單調上限。"""
+    r = rows.dropna(subset=["rbz", "obz"])
+    r = r[r["mark"].isin(HL_MARKS)]
+    if len(r) < HL_LOGIT["min_rows"]:
+        return {}
+    X = _hl_design(r["mark"].to_numpy(), r["rbz"].to_numpy(float), r["obz"].to_numpy(float))
+    y = r["done"].to_numpy(float)
+    pen = np.r_[0.0, np.ones(X.shape[1] - 1)] * HL_LOGIT["lam"]
+    b = np.zeros(X.shape[1])
+    for _ in range(50):
+        p = 1 / (1 + np.exp(-np.clip(X @ b, -30, 30)))
+        step = np.linalg.solve(X.T @ (X * (p * (1 - p))[:, None]) + np.diag(pen), X.T @ (y - p) - pen * b)
+        b = b + step
+        if np.max(np.abs(step)) < 1e-8:
+            break
+    nm, nr, no = len(HL_MARKS) - 1, 1 + len(HL_LOGIT["rb_knots"]), 1 + len(HL_LOGIT["ob_knots"])
+    i_rb, i_ob, i_int = 1 + nm, 1 + nm + nr, 1 + nm + nr + no
+    out = {"v": 1, "model": "ridge logistic (IRLS, lambda 1)", "lambda": HL_LOGIT["lam"], "cap": HL_LOGIT["cap"], "rb_knots": list(HL_LOGIT["rb_knots"]),
+           "ob_knots": list(HL_LOGIT["ob_knots"]), "marks": {}, "n": {}, "fit_from": str(r["d"].min()), "fit_to": str(r["d"].max()), "n_days": int(r["d"].nunique())}
+    for j, mk in enumerate(HL_MARKS):
+        drb, dob = (b[i_int + 2 * (j - 1)], b[i_int + 2 * (j - 1) + 1]) if j else (0.0, 0.0)
+        c = {"c": round(float(b[0] + (b[j] if j else 0.0)), 4),
+             "rb": [round(float(b[i_rb] + drb), 4)] + [round(float(v), 4) for v in b[i_rb + 1:i_rb + nr]],
+             "ob": [round(float(b[i_ob] + dob), 4)] + [round(float(v), 4) for v in b[i_ob + 1:i_ob + no]]}
+        so, sr = np.cumsum(c["ob"]), np.cumsum(c["rb"])     # 單調上限：累積斜率變號的第一個鉸鏈
+        c["ob_max"] = float(next((k for k, s in zip([0.0] + list(HL_LOGIT["ob_knots"]), so) if s >= 0), HL_LOGIT["cap"]))
+        c["rb_max"] = float(next((k for k, s in zip([0.0] + list(HL_LOGIT["rb_knots"]), sr) if s <= 0), HL_LOGIT["cap"]))
+        out["marks"][mk] = c
+        out["n"][mk] = int((r["mark"] == mk).sum())
+    return out
+
+
+def hl_logit_p(lg: dict, mark: str, rz: float | None, oz: float | None) -> float | None:
+    """與 App prediction.js hlLogitP 相同的算式 (測試 / 對照用)；缺值 → None。"""
+    m = (lg.get("marks") or {}).get(mark)
+    if not m or rz is None or oz is None or not (np.isfinite(rz) and np.isfinite(oz)) or rz < 0 or oz < 0:
+        return None
+    cap = lg.get("cap", 3.0); r = min(rz, cap, m.get("rb_max", cap)); o = min(oz, cap, m.get("ob_max", cap))
+    z = m["c"] + m["rb"][0] * r + m["ob"][0] * o
+    z += sum(m["rb"][i + 1] * max(0.0, r - k) for i, k in enumerate(lg["rb_knots"]))
+    z += sum(m["ob"][i + 1] * max(0.0, o - k) for i, k in enumerate(lg["ob_knots"]))
+    return float(1 / (1 + np.exp(-z)))
+
+
+def _hour_low_table(m: pd.DataFrame, marks: dict[str, dict] | None = None, marks_all: dict[str, dict] | None = None) -> dict:
     """盤中低點判斷查表：時間點 × 跳空 (dn/flat/up) × 開盤後已回檔 (deep = 累積低點距開盤 ≤ -0.5σ) → 低點已出現機率、最終低點 (相對該時點價) q20/q50。
     開盤 / 高低 = 09:05 口徑 (見模組說明 5)。
     2026-11-01 加 cells_rb / marks_rb (再分「現價離今日低點反彈幾 σ」r0/r1/r2)：走動式 (每年用前 3 年建表) 2019~2026 Brier 0.200 → 0.153 (8/8 年較好)，
-    「已出現」(p ≥ .75) 命中 83.0% → 89.8% (叫 2,917 → 3,693 次)、「還沒到」(p ≤ .55) 51.1% → 68.7%；App 優先查 cells_rb → marks_rb → 舊 cells。"""
-    return _hl_table(m, marks, "lo")
+    「已出現」(p ≥ .75) 命中 83.0% → 89.8% (叫 2,917 → 3,693 次)、「還沒到」(p ≤ .55) 51.1% → 68.7%；App 優先查 cells_rb → marks_rb → 舊 cells。
+    (以上為同日 σ、不含 09:30 時的數字；前一日 σ + 09:30 的現行基準：Brier 0.1614，11-02 logit 0.1514)"""
+    return _hl_table(m, marks, "lo", marks_all)
 
 
-def _hour_high_table(m: pd.DataFrame, marks: dict[str, dict] | None = None) -> dict:
+def _hour_high_table(m: pd.DataFrame, marks: dict[str, dict] | None = None, marks_all: dict[str, dict] | None = None) -> dict:
     """盤中高點判斷 (低點版的鏡像，2026-11-01)：deep = 累積高點距開盤 ≥ +0.5σ、rb = 現價離今日高點回落幾 σ → 高點已出現機率、最終高點 (相對該時點價) q80/q50。
-    走動式 2019~2026 Brier 0.202 → 0.151 (加回落維度，8/8 年較好)；「已出現」命中 80.9% → 90.8% (叫 3,734 次)、「還沒到」49.3% → 66.7% (2,311 次)。"""
-    return _hl_table(m, marks, "hi")
+    走動式 2019~2026 Brier 0.202 → 0.151 (加回落維度，8/8 年較好)；「已出現」命中 80.9% → 90.8% (叫 3,734 次)、「還沒到」49.3% → 66.7% (2,311 次)。
+    (同上：現行基準 0.1610，11-02 logit 0.1529)"""
+    return _hl_table(m, marks, "hi", marks_all)
 
 
-def _hl_table(m: pd.DataFrame, marks: dict[str, dict] | None, side: str) -> dict:
+def _hl_rows(m: pd.DataFrame, marks: dict[str, dict], side: str) -> pd.DataFrame:
+    """每 (日, 時間點) 一列：分箱 (g / deep / rb / ob)、連續值 rbz / obz (σ 單位，與分箱同算式)、done、最終極值 (fin %、fs σ)。"""
     lo_side = side == "lo"
-    try:
-        marks = _marks_window() if marks is None else marks
-    except Exception as e:  # noqa: BLE001
-        log.warning("hour_%s_table: %s", side, e)
-        return {}
     # 11-01 用前一交易日 σ：App 盤中拿到的 pullback.sigma = 最後一筆收盤日 (= 昨天)；原本用當天 σ (含當天收盤) 有輕微偷看
     sig = dict(zip(m["date"], m["sigma_range"].shift(1)))
     rows = []
@@ -166,14 +231,27 @@ def _hl_table(m: pd.DataFrame, marks: dict[str, dict] | None, side: str) -> dict
             other = (rec.get("hi" if lo_side else "lo") or {}).get(mk)
             gap = (op / pc - 1) * 100
             mv = (ex / op - 1) * 100 / s
-            rows.append({"mark": mk, "g": "dn" if gap < -0.15 else "up" if gap > 0.15 else "flat",
+            rbz = ((px / ex - 1) if lo_side else (ex / px - 1)) * 100 / s
+            obz = None if not other else ((other / px - 1) if lo_side else (px / other - 1)) * 100 / s
+            rows.append({"d": d_, "mark": mk, "g": "dn" if gap < -0.15 else "up" if gap > 0.15 else "flat",
                          "deep": mv <= -0.5 if lo_side else mv >= 0.5,
                          "rb": _rb_bin(px, ex, s) if lo_side else _rb_bin(ex, px, s),
-                         "ob": None if not other else _ob_bin(((other / px - 1) if lo_side else (px / other - 1)) * 100 / s),
+                         "ob": None if obz is None else _ob_bin(obz), "rbz": rbz, "obz": obz,
                          "done": ex <= fin * 1.0003 if lo_side else ex >= fin / 1.0003, "fin": (fin / px - 1) * 100, "fs": (fin / px - 1) * 100 / s})
-    if not rows:
+    return pd.DataFrame(rows)
+
+
+def _hl_table(m: pd.DataFrame, marks: dict[str, dict] | None, side: str, marks_all: dict[str, dict] | None = None) -> dict:
+    """marks = 近 3 年 (格與分位)；marks_all = 2016~ 全部 (11-02 logit；None → 不建 logit，與舊版相同)。"""
+    lo_side = side == "lo"
+    try:
+        marks = _marks_window() if marks is None else marks
+    except Exception as e:  # noqa: BLE001
+        log.warning("hour_%s_table: %s", side, e)
         return {}
-    h = pd.DataFrame(rows)
+    h = _hl_rows(m, marks, side)
+    if h.empty:
+        return {}
     q = 0.2 if lo_side else 0.8
     cell = lambda g: _cell(g, q)  # noqa: E731
     out = {"n_days": int(len(h) / max(1, h["mark"].nunique())), "open_at": OPEN_AT, "source": "TWSE 每 5 秒指數", "window_days": MARKS_WINDOW_DAYS, "rb_cuts": list(RB_CUTS), "ob_cuts": list(OB_CUTS), "cells": {}, "marks": {}, "cells_rb": {}, "marks_rb": {}, "marks_rbob": {}}
@@ -190,6 +268,13 @@ def _hl_table(m: pd.DataFrame, marks: dict[str, dict] | None, side: str) -> dict
         for (gg, dp, rb), g3 in g.groupby(["g", "deep", "rb"]):
             if len(g3) >= 20:
                 out["cells_rb"][f"{mk}|{gg}|{'deep' if dp else 'shallow'}|{rb}"] = cell(g3)
+    if marks_all:
+        try:
+            lg = _hl_logit(_hl_rows(m, marks_all, side))
+            if lg:
+                out["logit"] = lg
+        except Exception as e:  # noqa: BLE001
+            log.warning("hour_%s_table logit: %s", side, e)
     return out
 
 
@@ -284,9 +369,11 @@ def train(scored: pd.DataFrame, write: bool = True, verbose: bool = True, ivk_hi
     mult = RL.load_multipliers() or {}
     use_ivb = bool(ivk_hist and mult.get("base_iv"))
     try:
-        marks = _marks_window()
+        from ..sources import twse
+        marks_all = {d_: r_ for d_, r_ in twse.intraday_marks().items() if r_}   # 11-02：2016~ 全部 (盤中高低點 logit)；近 3 年視窗由此切出
+        marks = _marks_window(all_marks=marks_all)
     except Exception as e:  # noqa: BLE001
-        log.warning("intraday marks: %s", e); marks = {}
+        log.warning("intraday marks: %s", e); marks, marks_all = {}, {}
     out = {"trained_at": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M:%S"), "features": feats, "k": {}, "supports": _support_stats(m), "hour_of_low": _hour_of_low(marks)}
     for k in KS:
         d = m.dropna(subset=[f"yLow{k}", "sigma_range"]).reset_index(drop=True)
@@ -372,8 +459,8 @@ def train(scored: pd.DataFrame, write: bool = True, verbose: bool = True, ivk_hi
                 print(f"  pullback(夜盤) k{k}: pinball 模型 {mo.get('pinball20')} vs 夜盤公式 {fo.get('pinball20')} (改善 {r_.get('improve_pinball')})；觸及 {mo.get('touch20')} vs {fo.get('touch20')}；誤差 {mo.get('mae_low')} vs {fo.get('mae_low')}%；use_model={r_.get('use_model')}")
     except Exception as e:  # noqa: BLE001
         log.warning("pullback night variant: %s", e)
-    out["hour_low_table"] = _hour_low_table(m, marks)
-    out["hour_high_table"] = _hour_high_table(m, marks)
+    out["hour_low_table"] = _hour_low_table(m, marks, marks_all)
+    out["hour_high_table"] = _hour_high_table(m, marks, marks_all)
     if verbose:
         for key, s in out["supports"].items():
             print(f"  支撐 {s['name']}: 回測 {s['n_tested']} 次 止跌率 {s['hold_rate']} (多頭 {s.get('hold_bull')} / 空頭 {s.get('hold_bear')}，年最低 {s['hold_yr_min']})，止跌後 3 日 {s['bounce3_after_hold']}%，跌破後 3 日 {s['break3_after_fail']}%")
