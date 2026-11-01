@@ -6,15 +6,18 @@
    pinball loss、觸及率校準 (目標 20%)、觸及後的超跌幅 (最低點離買點多遠)。只有模型 pinball 至少好 3% 才取代 buy_at，否則只提供參考。
 2. 支撐止跌統計：價格回落到 5 日線 / 月線 / 季線 / 昨日低點 / 20 日低點 附近時，歷史上多常在那裡止跌 (hold) 並反彈；
    → 今日現價下方 3% 內的支撐清單，附「止跌率」與「止跌後 3 日平均反彈」。
-3. 最低點時段：小時 K (Yahoo ^TWII 60m 730d) 統計當日最低價落在哪個時段，分「開低 / 開高」→ 拉回買點的時間窗。
+3. 最低點時段：統計當日最低價落在哪個時段，分「開低 / 開高」→ 拉回買點的時間窗。
 4. 含夜盤變體：特徵 + 夜盤台指期，訓練集含 2010~ (夜盤缺值由 LGB 處理)，2021~ 逐年走動式 vs range_levels 夜盤公式。
    2026-09-28 修正 (r2m B1)：舊版以 date==D 合併，拿到的是「D 開盤前那一晚」(FinMind after_market 的 date = 夜盤準備的隔一交易日)，
    上線卻餵 D 收盤後的夜盤 → 舊的「k1 改善 16%、k2 8%、k3 6%」是錯位造成的假象。改用 range_levels._night_aligned (列 D = D 收盤後、
    D+1 開盤前的夜盤) 並加回歸守門 (夜盤與隔日跳空相關 > 0.5)：對齊重訓後與公式打平 (pinball 0.232/0.364/0.454 vs 0.227/0.361/0.453，−2.2/−1.0/−0.2%)，不採用 (use_model=False)，
    夜盤收後的 buy_at/stop 由 range_levels 夜盤公式產生；模型只留作參考卡片。json 沒有 night.aligned 旗標 (舊模型) 時夜盤變體一律不覆寫。
    同理 X1：range_levels 改用 TXO IV sigma 時，base k1/k2 對 IV 公式只好約 1% (未達 3%) → IV 生效時看 use_model_iv (預期 False)。
-5. 盤中低點判斷 (小時 K 查表)：時間點 × 開盤跳空 (開低/平盤/開高) × 開盤後已回檔 (≥0.5σ / <0.5σ) → 「今日低點已出現」機率、最終低點 (相對現價) 兩成/五成分位。
-   10:00 整體 58%、11:00 70%、12:00 77%、13:00 86%；開低且已回檔 ≥0.5σ 的日子在 10:00 只有 48%、最終低點 q20 −1.3%。
+5. 盤中低點判斷 (查表)：時間點 × 開盤跳空 (開低/平盤/開高) × 開盤後已回檔 (≥0.5σ / <0.5σ) → 「今日低點已出現」機率、最終低點 (相對現價) 兩成/五成分位。
+   2026-11-01：3、5 改用 TWSE 每 5 秒指數 (data/intraday_marks.json，近 MARKS_WINDOW_DAYS 日曆天)，開盤價取 09:05、高低從 09:05 起算。
+   舊來源 Yahoo ^TWII 60m 的開盤價 / 最低價 = 官方值，含 09:00 開盤失真 (未成交股以昨收計)：近 2 年 27% 的日子官方最低價就是這個失真值
+   (平均比 09:05 後最低再低 0.6%)，跳空只反映約一半 → 「低點已出現」被高估約 8~10pt (10:00 58→48%、11:00 71→62%、12:00 78→70%、13:00 87→79%)。
+   App 端要用同口徑 (09:05 開盤、09:05 起最低)；表內 open_at = "09:05" 作為口徑旗標。
 """
 from __future__ import annotations
 
@@ -98,13 +101,23 @@ def _support_stats(m: pd.DataFrame) -> dict:
 
 
 HL_MARKS = ("10:00", "11:00", "12:00", "13:00")
+MARKS_WINDOW_DAYS = 1095   # 近 3 年 (約 730 交易日，與舊 Yahoo 730d 實際取到的天數相近；最低點時段逐年在變 → 不用 2016~ 全部)
+OPEN_AT = "09:05"
 
 
-def _hour_low_table(m: pd.DataFrame) -> dict:
-    """盤中低點判斷查表：時間點 × 跳空 (dn/flat/up) × 開盤後已回檔 (deep = 累積低點距開盤 ≤ -0.5σ) → 低點已出現機率、最終低點 (相對該時點價) q20/q50。"""
+def _marks_window(today: dt.date | None = None) -> dict[str, dict]:
+    """TWSE 每 5 秒指數各時間點 (twse.intraday_marks：開盤 09:05、累積高低從 09:05 起) 近 MARKS_WINDOW_DAYS 日曆天。"""
+    from ..sources import twse
+    today = today or dt.datetime.now(config.TZ).date()
+    cut = (today - dt.timedelta(days=MARKS_WINDOW_DAYS)).isoformat()
+    return {d: r for d, r in twse.intraday_marks().items() if r and d >= cut}
+
+
+def _hour_low_table(m: pd.DataFrame, marks: dict[str, dict] | None = None) -> dict:
+    """盤中低點判斷查表：時間點 × 跳空 (dn/flat/up) × 開盤後已回檔 (deep = 累積低點距開盤 ≤ -0.5σ) → 低點已出現機率、最終低點 (相對該時點價) q20/q50。
+    開盤 / 高低 = 09:05 口徑 (見模組說明 5)。"""
     try:
-        from ..sources import yahoo
-        marks = yahoo.daily_marks("730d")
+        marks = _marks_window() if marks is None else marks
     except Exception as e:  # noqa: BLE001
         log.warning("hour_low_table: %s", e)
         return {}
@@ -125,7 +138,7 @@ def _hour_low_table(m: pd.DataFrame) -> dict:
     if not rows:
         return {}
     h = pd.DataFrame(rows)
-    out = {"n_days": int(len(h) / max(1, h["mark"].nunique())), "cells": {}, "marks": {}}
+    out = {"n_days": int(len(h) / max(1, h["mark"].nunique())), "open_at": OPEN_AT, "source": "TWSE 每 5 秒指數", "window_days": MARKS_WINDOW_DAYS, "cells": {}, "marks": {}}
     for mk, g in h.groupby("mark"):
         out["marks"][mk] = {"n": int(len(g)), "p_done": round(float(g["done"].mean()), 3), "fin_q20": round(float(g["fin"].quantile(0.2)), 2), "fin_q50": round(float(g["fin"].median()), 2)}
         for (gg, dp), g3 in g.groupby(["g", "deep"]):
@@ -134,35 +147,30 @@ def _hour_low_table(m: pd.DataFrame) -> dict:
     return out
 
 
-def _hour_of_low() -> dict:
-    """當日最低價落在哪個小時 K (Yahoo 60m，約 2 年)；分開低 / 開高。"""
+def _hour_of_low(marks: dict[str, dict] | None = None) -> dict:
+    """當日最低價落在哪個小時 (09:05~10:00 記 "09:00"、…、13:00~13:30 含收盤集合競價記 "13:00")；分開低 / 開高 (09:05 價 vs 昨收)。
+    由累積低點判斷：第一個「累積低 = 全日低」的時間點所在的那一小時。"""
     try:
-        from ..sources import yahoo
-        df = yahoo.taiex_hourly("730d")
+        marks = _marks_window() if marks is None else marks
     except Exception as e:  # noqa: BLE001
         log.warning("hour_of_low: %s", e)
         return {}
-    if df is None or df.empty:
-        return {}
-    res = {"all": {}, "gap_down": {}, "gap_up": {}, "n": 0}
-    prev_close = None
+    bins = (("10:00", "09:00"), ("11:00", "10:00"), ("12:00", "11:00"), ("13:00", "12:00"), ("13:30", "13:00"))
     cnt = {"all": {}, "gap_down": {}, "gap_up": {}}
     n = 0
-    for date, g in df.groupby("date", sort=True):
-        g = g.sort_values("time")
-        if "09:00" not in set(g["time"]):
-            prev_close = float(g["close"].iloc[-1]); continue
-        i = g["low"].astype(float).idxmin(); t = str(g.loc[i, "time"])
-        keys = ["all"]
-        if prev_close:
-            keys.append("gap_down" if float(g["open"].iloc[0]) < prev_close else "gap_up")
-        for k in keys:
+    for _d, rec in sorted(marks.items()):
+        lo = rec.get("lo") or {}
+        if not rec.get("prev_close") or not rec.get("open") or any(mk not in lo for mk, _ in bins):
+            continue
+        fin = lo["13:30"]
+        t = next(h for mk, h in bins if lo[mk] <= fin)
+        for k in ("all", "gap_down" if rec["open"] < rec["prev_close"] else "gap_up"):
             cnt[k][t] = cnt[k].get(t, 0) + 1
-        prev_close = float(g["close"].iloc[-1]); n += 1
-    for k, c in cnt.items():
-        tot = sum(c.values()) or 1
-        res[k] = {t: round(v / tot, 3) for t, v in sorted(c.items())}
-    res["n"] = n
+        n += 1
+    if not n:
+        return {}
+    res = {k: {t: round(v / (sum(c.values()) or 1), 3) for t, v in sorted(c.items())} for k, c in cnt.items()}
+    res.update({"n": n, "open_at": OPEN_AT, "source": "TWSE 每 5 秒指數", "window_days": MARKS_WINDOW_DAYS})
     return res
 
 
@@ -220,7 +228,11 @@ def train(scored: pd.DataFrame, write: bool = True, verbose: bool = True, ivk_hi
     m["year"] = m["date"].str[:4].astype(int)
     mult = RL.load_multipliers() or {}
     use_ivb = bool(ivk_hist and mult.get("base_iv"))
-    out = {"trained_at": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M:%S"), "features": feats, "k": {}, "supports": _support_stats(m), "hour_of_low": _hour_of_low()}
+    try:
+        marks = _marks_window()
+    except Exception as e:  # noqa: BLE001
+        log.warning("intraday marks: %s", e); marks = {}
+    out = {"trained_at": dt.datetime.now(config.TZ).strftime("%Y-%m-%d %H:%M:%S"), "features": feats, "k": {}, "supports": _support_stats(m), "hour_of_low": _hour_of_low(marks)}
     for k in KS:
         d = m.dropna(subset=[f"yLow{k}", "sigma_range"]).reset_index(drop=True)
         X, y, yrs = d[feats], d[f"yLow{k}"], d["year"]
@@ -305,7 +317,7 @@ def train(scored: pd.DataFrame, write: bool = True, verbose: bool = True, ivk_hi
                 print(f"  pullback(夜盤) k{k}: pinball 模型 {mo.get('pinball20')} vs 夜盤公式 {fo.get('pinball20')} (改善 {r_.get('improve_pinball')})；觸及 {mo.get('touch20')} vs {fo.get('touch20')}；誤差 {mo.get('mae_low')} vs {fo.get('mae_low')}%；use_model={r_.get('use_model')}")
     except Exception as e:  # noqa: BLE001
         log.warning("pullback night variant: %s", e)
-    out["hour_low_table"] = _hour_low_table(m)
+    out["hour_low_table"] = _hour_low_table(m, marks)
     if verbose:
         for key, s in out["supports"].items():
             print(f"  支撐 {s['name']}: 回測 {s['n_tested']} 次 止跌率 {s['hold_rate']} (多頭 {s.get('hold_bull')} / 空頭 {s.get('hold_bear')}，年最低 {s['hold_yr_min']})，止跌後 3 日 {s['bounce3_after_hold']}%，跌破後 3 日 {s['break3_after_fail']}%")
