@@ -70,6 +70,7 @@ def main():
     assert t["open_at"] == "09:05" and t["n_days"] == 60 and t["window_days"] == P.MARKS_WINDOW_DAYS, t
     assert t["cells"]["10:00|up|shallow"]["p_done"] == 1.0 and t["cells"]["10:00|dn|deep"]["p_done"] == 0.0, t["cells"]
     assert t["marks"]["13:00"]["p_done"] == 0.5 and t["marks"]["13:00"]["n"] == 60
+    assert list(t["marks"]) == ["09:30", "10:00", "11:00", "12:00", "13:00"], list(t["marks"])   # 11-01 加 09:30
     n += 3
     # 反彈維度：現價 = 累積低 + 50 (≈ 0.5σ) → r2 / r1 邊界；r0 = 還在低點附近
     assert P._rb_bin(100.1, 100.0, 1.0) == "r0" and P._rb_bin(100.3, 100.0, 1.0) == "r1" and P._rb_bin(100.6, 100.0, 1.0) == "r2"
