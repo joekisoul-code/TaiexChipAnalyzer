@@ -164,8 +164,12 @@ def records_from_hourly(hr: dict, snap: dict | None) -> list[dict]:
     p = _num(t.get("p_up")); bh = _num(t.get("base_hit")) or 0.5
     call = "偏多" if p >= bh + 0.03 else "偏空" if p <= bh - 0.03 else "中性"
     mark = str(hr.get("mark") or "")
+    # 11-02：09:00~09:14 的發布標成 10:00 (以現價套 10:00 模型的近似)；_merge 保留最早一筆 → 會擋掉真正 10:00 的紀錄，不記
+    if hr.get("asof_t") and ":" in mark and str(hr["asof_t"]) < mark:
+        return []
+    model = t.get("model") or ("early" if hr.get("model") == "early" else "lgbm")   # 11-02 延續模型 (cont) 上線：分模型對帳
     return [{"kind": "hr", "sid": "TAIEX", "as_of": str(hr.get("day")), "target": str(hr.get("day")), "h": 0, "mode": "live:" + mark, "phase": "open", "live": False,
-             "base": _num(hr.get("price")), "p_up": p, "base_hit": bh, "call": call, "strength": "", "call_hit": None, "variant": "hourly", "mark": mark,
+             "base": _num(hr.get("price")), "p_up": p, "base_hit": bh, "call": call, "strength": "", "call_hit": None, "variant": "hourly", "mark": mark, "model": model,
              "level": _num(t.get("level")), "buy_at": None, "sell_at": None, "stop": None, "target_px": None, "range_mode": None, "trend7": None, "realized": None}]
 
 
@@ -472,7 +476,9 @@ def summarize(rows: list[dict]) -> dict:
                                 "mae": round(float(np.mean([abs(r["realized"]["err"]) for r in fin])), 3), "recent": [{"as_of": r["as_of"], "est": r.get("est_gap"), "gap": r["realized"]["gap"], "ret": r["realized"]["ret"], "hold": r["realized"].get("hold")} for r in fin[-10:]][::-1]}
     hr_rows = [r for r in rows if r.get("kind") == "hr"]
     if hr_rows:
-        out["market"]["hourly"] = {"all": _group_stats(hr_rows), "by_mark": {mk_: _group_stats([r for r in hr_rows if r.get("mark") == mk_]) for mk_ in sorted({r.get("mark") or "" for r in hr_rows}) if mk_}}
+        out["market"]["hourly"] = {"all": _group_stats(hr_rows), "by_mark": {mk_: _group_stats([r for r in hr_rows if r.get("mark") == mk_]) for mk_ in sorted({r.get("mark") or "" for r in hr_rows}) if mk_},
+                                   # 11-02：分模型 (lgbm = 11-02 前與其他時間點、cont = 10:00~13:00 延續模型、early = 09:15/09:30)，避免近期命中混兩種模型
+                                   "by_model": {m_: _group_stats([r for r in hr_rows if (r.get("model") or "lgbm") == m_]) for m_ in sorted({r.get("model") or "lgbm" for r in hr_rows})}}
     # 水準偏誤 (即時修正)：近期「預估收盤 vs 實際收盤」的帶號誤差 (相對基準價 %)，指數衰減；下次預測依此微調水準
     # (r6：LEVEL_ADJ_ENABLED=False → 只算統計，adj=0、原算值 adj_raw)
     lb = {}
@@ -586,7 +592,8 @@ def adjust_forecast(fc: dict, summary: dict) -> dict:
         fc["gap_learn"] = summary["market"]["gap"]
     hr = (summary.get("market") or {}).get("hourly") or {}
     if hr:
-        fc["hourly_learn"] = {"all": {k: hr["all"].get(k) for k in ("n_calls", "hit_ewm", "hit20", "hit_all", "base_hit", "brier")}, "by_mark": {m: {k: v.get(k) for k in ("n_calls", "hit_ewm", "hit_all")} for m, v in (hr.get("by_mark") or {}).items()}}
+        fc["hourly_learn"] = {"all": {k: hr["all"].get(k) for k in ("n_calls", "hit_ewm", "hit20", "hit_all", "base_hit", "brier")}, "by_mark": {m: {k: v.get(k) for k in ("n_calls", "hit_ewm", "hit_all")} for m, v in (hr.get("by_mark") or {}).items()},
+                              "by_model": {m: {k: v.get(k) for k in ("n_calls", "hit_ewm", "hit20", "hit_all")} for m, v in (hr.get("by_model") or {}).items()}}
     tt = (summary.get("market") or {}).get("touch") or {}
     fc["learn"] = {"touch_sigma_factor": {h: v.get("sigma_factor") for h, v in tt.items()},
                    "flags": {"degrade": DEGRADE_ENABLED, "platt": PLATT_ENABLED, "touch_factor": TOUCH_FACTOR_ENABLED, "level_adj": LEVEL_ADJ_ENABLED},

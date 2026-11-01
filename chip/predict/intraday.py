@@ -48,6 +48,16 @@ NAMES = {"mark_idx": "時間點", "gap_pct": "開盤跳空%", "ret_open": "開�
          "prev_og": "前一日隔夜跳空%", "prev_oc": "前一日開盤→收盤%"}
 PARAMS = dict(n_estimators=120, learning_rate=0.03, num_leaves=4, min_child_samples=100, subsample=0.7, subsample_freq=1,
               colsample_bytree=0.6, reg_lambda=20.0, verbose=-1)
+# 2026-11-02 延續模型 (研究 hit2 A + 反方獨立重算)：10:00~13:00「現在 → 13:30 收盤」改零參數延續分數
+# z = 開盤 (09:05) 至今% ÷ 前一日 σ (range_levels.sigma_series)；各時間點自己的 5 分位表 (2018~，每週重訓) 給上漲率 / 平均 / 兩成~八成 (y/σ，發布時 × σ)，叫牌規則不變。
+# 走動式 2019-01~2026-10 (每月只用之前的列建表)：rank IC .10~.15 (LightGBM .04~.08；11:00~13:00 逐年 9/9、9/9、8/9 年較好)；
+# 叫牌命中 52.6% → 57.5% (+4.8 [2.3, 7.4])，叫牌比例約 59% → 57%；20~80% 區間覆蓋 40/50/59/73% → 60/61/60/62%。
+# 2024~26 淨正確叫牌數持平 (−0.4 [−5.5, 4.6])：改善是命中率與區間誠實，不是叫更多。09:15 / 09:30 早盤、開盤前、其他目標仍用 LightGBM。
+CONT_MARKS = ["10:00", "11:00", "12:00", "13:00"]
+CONT_TARGET = "13:30"
+CONT_FROM = "2018-01-01"
+CONT_WF_FROM = "2019-01"
+CONT_MIN = 250
 
 
 # ------------------------------------------------------------------ 特徵
@@ -225,8 +235,83 @@ def _metrics(oos: pd.DataFrame) -> dict:
     return met
 
 
+def _cont_table(z: np.ndarray, yz: np.ndarray) -> dict:
+    """延續模型一個時間點的表：z 的 5 分位切點 (M.calibrate 同法) + 每區 y/σ 的上漲率 / 平均 / 兩成 / 八成。"""
+    edges = pd.Series(z).quantile(np.linspace(0, 1, M.N_BINS + 1)[1:-1]).to_numpy(dtype=float)
+    b = np.digitize(z, edges); up = yz > 0
+    bins = [{"p_up": round(float(up[b == k].mean()), 3), "mean_z": float(yz[b == k].mean()), "q20_z": float(np.quantile(yz[b == k], 0.2)),
+             "q80_z": float(np.quantile(yz[b == k], 0.8)), "n": int((b == k).sum())} for k in range(M.N_BINS)]
+    return {"z_edges": edges.tolist(), "bins": bins, "base_hit": round(float(up.mean()), 3), "base_mean_z": float(yz.mean()), "n": int(len(z))}
+
+
+def _cont_apply(T: dict, z: float, sig: float) -> dict:
+    b = int(np.digitize([z], T["z_edges"])[0]); B = T["bins"][b]
+    return {"bin": b, "p_up": B["p_up"], "base_hit": T["base_hit"], "n": B["n"],
+            "mean": B["mean_z"] * sig, "q20": B["q20_z"] * sig, "q80": B["q80_z"] * sig}
+
+
+def _cont_calls(R: pd.DataFrame) -> dict:
+    """叫牌 (p_up vs base_hit ±0.03，與 learn / verdict 同規則) 的比例、命中、淨正確 (每 100 個時間點)、區間覆蓋。"""
+    up = R["y"].to_numpy() > 0
+    pu, bh = R["p_up"].to_numpy(float), R["base_hit"].to_numpy(float)
+    call = np.where(pu >= bh + 0.03 - 1e-9, 1, np.where(pu <= bh - 0.03 + 1e-9, -1, 0)); nz = call != 0
+    ok = ((call == 1) & up) | ((call == -1) & ~up)
+    y = R["y"].to_numpy(float)
+    return {"n": int(len(R)), "coverage": round(float(nz.mean() * 100), 1), "call_hit": round(float(ok[nz].mean() * 100), 1) if nz.any() else None,
+            "edge": round(float((ok[nz].sum() - (~ok[nz]).sum()) / len(R) * 100), 1),
+            "band_cov": round(float(np.mean((y >= R["q20"].to_numpy(float)) & (y <= R["q80"].to_numpy(float))) * 100), 1)}
+
+
+def _cont_wf(Z: pd.DataFrame) -> dict:
+    """走動式：每個測試月 (CONT_WF_FROM~) 只用之前的列 (CONT_FROM~) 建各時間點表 → 叫牌統計 (全期 + 近兩年)。"""
+    out = []
+    for ym in sorted(Z.loc[Z["date"] >= CONT_WF_FROM, "date"].str[:7].unique()):
+        te, hist = Z[Z["date"].str[:7] == ym], Z[Z["date"] < ym + "-01"]
+        for mk, g in te.groupby("mark"):
+            h = hist[hist["mark"] == mk]
+            if len(h) < CONT_MIN:
+                continue
+            T = _cont_table(h["z"].to_numpy(float), h["yz"].to_numpy(float))
+            ap = [_cont_apply(T, z, s) for z, s in zip(g["z"].to_numpy(float), g["s"].to_numpy(float))]
+            out.append(pd.DataFrame({"date": g["date"].values, "mark": mk, "y": g["y"].values, "p_up": [a["p_up"] for a in ap], "base_hit": T["base_hit"],
+                                     "q20": [a["q20"] for a in ap], "q80": [a["q80"] for a in ap]}))
+    if not out:
+        return {}
+    R = pd.concat(out, ignore_index=True)
+    rec_from = f"{int(R['date'].max()[:4]) - 1}-01-01"
+    res = {mk: {**_cont_calls(g), "recent": _cont_calls(g[g["date"] >= rec_from]) if (g["date"] >= rec_from).any() else None} for mk, g in R.groupby("mark")}
+    res["all"] = {**_cont_calls(R), "recent": _cont_calls(R[R["date"] >= rec_from]), "from": str(R["date"].min()), "to": str(R["date"].max()), "recent_from": rec_from}
+    return res
+
+
+def cont_tables(hist: pd.DataFrame, sp: dict) -> dict | None:
+    """延續模型的表 (train 每週重算，存進 bundle['cont'])。hist = build_history('twse') 的列；sp = {date: 前一日 σ}。"""
+    tc = f"to_{CONT_TARGET}"
+    Z = hist[hist["mark"].isin(CONT_MARKS) & (hist["date"] >= CONT_FROM)].dropna(subset=["ret_open", tc])[["date", "mark", "ret_open", tc]].copy()
+    Z["s"] = pd.to_numeric(Z["date"].map(sp), errors="coerce")
+    Z = Z[np.isfinite(Z["s"]) & (Z["s"] > 0)].rename(columns={tc: "y"}).sort_values(["date", "mark"]).reset_index(drop=True)
+    Z["z"] = Z["ret_open"] / Z["s"]; Z["yz"] = Z["y"] / Z["s"]
+    marks = {}
+    for mk, g in Z.groupby("mark"):
+        if len(g) < CONT_MIN:
+            continue
+        T = _cont_table(g["z"].to_numpy(float), g["yz"].to_numpy(float))
+        T["z_edges"] = [round(e, 4) for e in T["z_edges"]]
+        T["base_mean_z"] = round(T["base_mean_z"], 4)
+        for B in T["bins"]:
+            for k in ("mean_z", "q20_z", "q80_z"):
+                B[k] = round(B[k], 4)
+        T["ic"] = round(float(g["ret_open"].rank().corr(g["y"].rank())), 3)
+        marks[mk] = T
+    if not marks:
+        return None
+    return {"marks": marks, "score": "ret_open / sigma_prev", "open_at": "09:05", "target": CONT_TARGET, "sigma": "range_levels.sigma_series 前一日",
+            "from": str(Z["date"].min()), "to": str(Z["date"].max()), "metrics": _cont_wf(Z)}
+
+
 def train(write: bool = True) -> dict:
-    mat = market_matrix(backtest.load_long("2010-01-01"))
+    long_ = backtest.load_long("2010-01-01")
+    mat = market_matrix(long_)
     night = finmind.tx_night_history("2023-01-01")
     ctx = {"daily": _daily_features(mat), "night_map": dict(zip(night["date"], night["night_chg_pct"])) if not night.empty else {}}
     # 兩個來源都跑同一套逐季 walk-forward，在共同月份比盤中 IC，選較好的 (平手偏好 TWSE：開盤定義與盤中即時一致)
@@ -294,11 +379,21 @@ def train(write: bool = True) -> dict:
             early["metrics"][tm] = {k: v for k, v in met.items() if k != "calibration"}
             results[f"early→{tm}"] = met
         bundle["early"] = early
+        try:   # 11-02 延續模型 (10:00~13:00 → 13:30)
+            from . import range_levels as RL
+            lf = long_.reset_index(drop=True)
+            sp = dict(zip(lf["date"].astype(str).str[:10], RL.sigma_series(lf).shift(1).values))
+            cont = cont_tables(hist, sp)
+            if cont:
+                bundle["cont"] = cont
+                results["_cont"] = cont["metrics"]
+        except Exception as e:  # noqa: BLE001
+            log.warning("intraday cont tables: %s", e)
     results["_source"] = {"chosen": src, **compare}
     if write:
         M.save("intraday", bundle)
         M.save_json("intraday_metrics", {**bundle["metrics"], "_source": results["_source"],
-                                         "_early": (bundle.get("early") or {}).get("metrics")})
+                                         "_early": (bundle.get("early") or {}).get("metrics"), "_cont": bundle.get("cont")})
         if tw:
             twse.save_intraday_marks(tw)   # 補抓到的新交易日寫回 (train 模式會 commit 進 git)
     return results
@@ -318,7 +413,7 @@ def _live_rec(snapshot: dict, early: bool = False) -> tuple[dict, str] | None:
     px_at = lambda t: next((b["close"] for b in reversed(bars) if b["time"] <= t), None)  # noqa: E731
     # 開盤價：取 09:05 (避開 09:00:05 失真的第一筆)，不足則取第一筆
     open_px = px_at("09:05") or bars[0]["close"]
-    rec = {"prev_close": idx["prev"], "open": open_px, "hi": {}, "lo": {}}
+    rec = {"prev_close": idx["prev"], "open": open_px, "open_0905": open_px, "hi": {}, "lo": {}}
     last = idx.get("last") or bars[-1]["close"]
     closes = [b["close"] for b in bars if b["time"] >= "09:05"] or [b["close"] for b in bars]   # 高低從 09:05 起算 (與 TWSE 訓練資料同口徑)
     if early and "09:15" <= now_t < "10:00":
@@ -340,8 +435,8 @@ def _live_rec(snapshot: dict, early: bool = False) -> tuple[dict, str] | None:
     prev_mark = MARKS[MARK_IDX[cur] - 1]
     if prev_mark != "pre":
         rec[prev_mark] = p1h or open_px
-    else:
-        rec["open"] = p1h or open_px    # 10:00 的 ret_1h 以 open 計
+    # 10:00 的 ret_1h 在訓練就是以 09:05 開盤計 (mark_rows：前一時間點 = pre → 開盤價)，open 不再改。
+    # 11-02 前這裡在 10:00~10:59 把 open 換成一小時前的價 (10:00 時是失真的 09:00 那筆) → gap_pct / ret_open 與訓練口徑不同
     return rec, cur
 
 
@@ -394,4 +489,37 @@ def forecast(scored: pd.DataFrame, snapshot: dict | None) -> dict:
                               "level_lo": round(px * (1 + (c.get("q20") if c.get("q20") is not None else pred) / 100), 0),
                               "level_hi": round(px * (1 + (c.get("q80") if c.get("q80") is not None else pred) / 100), 0),
                               "drivers": M.explain(B["models"][tm], x, NAMES, top=4), "metrics": B["metrics"].get(tm, {})}
+    # 11-02 延續模型：10:00 起 (09:00~09:14 雖標 10:00 但不算) 的 13:30 目標改由 cont 表給 (欄位同 LightGBM，App / learn / verdict 照讀)
+    cont = bundle.get("cont") if isinstance(bundle.get("cont"), dict) else None
+    if live and not use_early and now_t >= "10:00" and mark in CONT_MARKS and cont and mark in (cont.get("marks") or {}) and CONT_TARGET in out["targets"]:
+        try:
+            from . import range_levels as RL
+            sc = scored.reset_index(drop=True)
+            ds = sc["date"].astype(str).str[:10].tolist()
+            i = len(ds) - 1
+            while i >= 0 and ds[i] >= day:   # σ 用前一交易日 (scored 若已含今日列則往前一筆)
+                i -= 1
+            sig = float(RL.sigma_series(sc).iloc[i]) if i >= 0 else float("nan")
+            o905 = float(rec.get("open_0905") or rec.get("open") or 0)
+            if np.isfinite(sig) and sig > 0 and o905 > 0:
+                T = cont["marks"][mark]
+                ro = (px / o905 - 1) * 100; z = ro / sig
+                r = _cont_apply(T, z, sig)
+                hm, q20, q80 = r["mean"], r["q20"], r["q80"]
+                old = out["targets"][CONT_TARGET]
+                drv = {"feature": "ret_open", "name": NAMES["ret_open"], "value": round(ro, 3), "contrib": round(hm, 3)}
+                out["targets"][CONT_TARGET] = {
+                    "pred": round(hm, 2), "bin": r["bin"], "p_up": r["p_up"], "hist_mean": round(hm, 2), "q20": round(q20, 2), "q80": round(q80, 2), "n": r["n"],
+                    "base_hit": r["base_hit"], "base_mean": round(T["base_mean_z"] * sig, 2),
+                    "level": round(px * (1 + hm / 100), 0), "level_lo": round(px * (1 + q20 / 100), 0), "level_hi": round(px * (1 + q80 / 100), 0),
+                    "drivers": {"positive": [drv] if hm > 0 else [], "negative": [drv] if hm < 0 else [], "bias": 0.0},
+                    "metrics": {**((cont.get("metrics") or {}).get(mark) or {}), "ic": T.get("ic")}, "model": "cont",
+                    "lgbm": {k: old.get(k) for k in ("pred", "p_up", "base_hit", "level", "level_lo", "level_hi")}}
+                out["cont"] = {"mark": mark, "open_0905": round(o905, 2), "ret_open": round(ro, 3), "sigma_prev": round(sig, 3), "sigma_date": ds[i], "z": round(z, 3),
+                               "table_from": cont.get("from"), "table_to": cont.get("to")}
+                out["note"] = (f"13:30 收盤預估用延續模型：09:05 開盤至今 {ro:+.2f}% ÷ 前一日波動 {sig:.2f}% = {z:+.2f}，"
+                               f"查 {mark} 時間點歷史同分位 (2018~，n={r['n']})；其餘目標仍為 LightGBM")
+        except Exception as e:  # noqa: BLE001
+            log.warning("intraday cont forecast: %s", e)
+    out["asof_t"] = now_t if live else None
     return out
