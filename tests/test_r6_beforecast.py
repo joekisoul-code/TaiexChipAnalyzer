@@ -226,7 +226,10 @@ def test_precheck_build_uses_est_preopen_and_actual_intraday():
     o = float(SC["close"].iloc[-1]) * 1.0001
     out2 = _build(ST_PC, live_open=o)
     g2 = out2["gap"]
-    assert g2["table"] == "actual" and g2["stats"] == _scaled(ST_PC["gap"]["cells"][key]) and g2["source"] == "實際開盤" and "以夜盤估計跳空分組" not in g2["text"]
+    # 11-02：盤中 (實際表) 平盤日也套平滑機率 → p_fill / p_hold / p_cont 改模型值 (原格值在 p_cell)，其餘欄位同格
+    sc_ = _scaled(ST_PC["gap"]["cells"][key]); pk = ("p_fill", "p_hold", "p_cont", "p_cell", "p_smooth")
+    assert {k: v for k, v in g2["stats"].items() if k not in pk} == {k: v for k, v in sc_.items() if k not in pk} and g2["stats"]["p_cell"] == {k: sc_[k] for k in pk[:3]}
+    assert g2["table"] == "actual" and g2["stats_actual"] == sc_ and g2["source"] == "實際開盤" and "以夜盤估計跳空分組" not in g2["text"]
     assert "盤中實際開盤已知" in g2["table_note"]
     # 舊 precheck.json (無 cells_est) → 開盤前仍用實際表並註明可能高估
     old = copy.deepcopy(ST_PC); old["gap"].pop("cells_est"); old["gap"].pop("est_meta")

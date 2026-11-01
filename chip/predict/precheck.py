@@ -110,8 +110,81 @@ def _cell(gg: pd.DataFrame, b, bull) -> dict:
 EST_BETA_WIN = 250      # r6 估計跳空表：滾動 β 視窗 (與 build 的「近一年 β」同長)，至少 120 列，往後移一日 (只用前一日以前的資料)
 EST_BETA_MIN = 120
 
+# 11-02 回補 / 守住 / 續走機率改平滑 logistic (ridge IRLS，numpy)：桶平均看不到桶內差異 (例：開高 0.35~0.5% 實際回補 .30，桶平均 .55)。
+# 特徵 [1, u, bull, u×bull, z, √z]；u = 跳空 ≥ 0、z = min(|跳空| / σ_prev^β, 訓練 99.5% 分位)；桶 / 標籤 / n / n≥20 規則不變，只換 p_*。
+# 走動式逐年重訓 (2010~ 擴張)：實際開盤表 (盤中) β=0、近期加權半衰期 5 年、全部日子 → avg3 Brier −5.4e-3 (13/13 年)、回補 −10.5e-3 (13/13)，
+#   敘述 (多半回補 / 守住機率高…) 命中 65% → 72%；估計跳空表 (開盤前) β=0.5、不加權、只用估計非平盤日 (平盤日沿用格) → −4.8e-3 (2020~ 7/7 年)
+SMOOTH = {"act": {"beta": 0.0, "hl_years": 5.0, "nonflat_only": False}, "est": {"beta": 0.5, "hl_years": None, "nonflat_only": True}}
+SMOOTH_LAM = 1.0
+SMOOTH_MIN = 200
+SMOOTH_FEATS = ["1", "u", "bull", "u*bull", "z", "sqrt_z"]
+SMOOTH_T = (("fill", "p_fill"), ("hold", "p_hold"), ("cont", "p_cont"))
 
-def _est_cells(m: pd.DataFrame) -> tuple[dict, dict]:
+
+def _irls(X: np.ndarray, y: np.ndarray, w: np.ndarray, lam: float = SMOOTH_LAM, iters: int = 60, tol: float = 1e-9) -> np.ndarray:
+    """ridge logistic (Newton / IRLS)，截距 (第 0 欄) 不罰。"""
+    k = X.shape[1]
+    P = np.eye(k) * lam; P[0, 0] = 0.0
+    b = np.zeros(k)
+    pm = float(np.clip(np.average(y, weights=w), 1e-3, 1 - 1e-3)); b[0] = np.log(pm / (1 - pm))
+    for _ in range(iters):
+        p = 1 / (1 + np.exp(-np.clip(X @ b, -30, 30)))
+        W = w * p * (1 - p) + 1e-9
+        step = np.linalg.solve((X * W[:, None]).T @ X + P, X.T @ (w * (y - p)) - P @ b)
+        b = b + step
+        if np.max(np.abs(step)) < tol:
+            break
+    return b
+
+
+def _smooth_x(x: float, sigma: float | None, bull: bool, beta: float, zcap: float) -> tuple[np.ndarray, float]:
+    z = min(abs(float(x)) / (float(sigma) ** beta if beta else 1.0), float(zcap))
+    u = 1.0 if x >= 0 else 0.0; b = 1.0 if bull else 0.0
+    return np.array([1.0, u, b, u * b, z, np.sqrt(z)]), z
+
+
+def _smooth_fit(F: pd.DataFrame, xcol: str, kind: str) -> dict | None:
+    """F = train 的 g (實際表，xcol='gap') 或 _est_cells 的 m (估計表，xcol='est')；需 date/bull/bucket/fill/hold/cont (β>0 另需 s)。"""
+    cfg = SMOOTH[kind]; beta = cfg["beta"]
+    F = F.dropna(subset=[xcol, "fill", "hold", "cont"])
+    if beta:
+        if "s" not in F:
+            return None
+        F = F[np.isfinite(F["s"].astype(float)) & (F["s"].astype(float) > 0)]
+    if cfg["nonflat_only"]:
+        F = F[F["bucket"] != 3]
+    if len(F) < SMOOTH_MIN:
+        return None
+    x = F[xcol].astype(float).values
+    z = np.abs(x) / (np.power(F["s"].astype(float).values, beta) if beta else 1.0)
+    zcap = float(np.quantile(z, 0.995)); z = np.minimum(z, zcap)
+    u = (x >= 0).astype(float); bb = F["bull"].astype(float).values
+    X = np.column_stack([np.ones(len(z)), u, bb, u * bb, z, np.sqrt(z)])
+    dts = pd.to_datetime(F["date"])
+    w = np.power(0.5, (dts.max() - dts).dt.days.values / 365.25 / cfg["hl_years"]) if cfg["hl_years"] else np.ones(len(F))
+    coef = {t: [round(float(v), 4) for v in _irls(X, F[t].astype(float).values, w)] for t, _ in SMOOTH_T}
+    return {"beta": beta, "zcap": round(zcap, 4), "hl_years": cfg["hl_years"], "nonflat_only": cfg["nonflat_only"], "lam": SMOOTH_LAM, "n": int(len(F)),
+            "feats": SMOOTH_FEATS, "coef": coef, "fit_from": str(F["date"].iloc[0])[:10], "fit_to": str(F["date"].iloc[-1])[:10]}
+
+
+def smooth_cell(cell: dict, sm: dict | None, x: float, bull: bool, bucket: int, sigma: float | None) -> dict:
+    """發布時：有平滑模型 → p_fill / p_hold / p_cont 換成依跳空幅度的估計 (原格值留 p_cell)；估計表平盤日 / σ 無效 → 原樣。"""
+    if not cell or not sm or not sm.get("coef"):
+        return cell
+    beta = float(sm.get("beta") or 0.0)
+    if beta and not (sigma is not None and np.isfinite(sigma) and sigma > 0):
+        return cell
+    if sm.get("nonflat_only") and int(bucket) == 3:
+        return cell
+    X, z = _smooth_x(x, sigma, bull, beta, sm["zcap"])
+    c = dict(cell); c["p_cell"] = {k: cell.get(k) for _, k in SMOOTH_T}
+    for t, k in SMOOTH_T:
+        c[k] = round(float(1 / (1 + np.exp(-float(X @ np.array(sm["coef"][t], float))))), 3)
+    c["p_smooth"] = {"beta": beta, "z": round(z, 3), "sigma": round(float(sigma), 3) if beta else None, "n": sm.get("n")}
+    return c
+
+
+def _est_cells(m: pd.DataFrame) -> tuple[dict, dict, pd.DataFrame]:
     """r6 (2026-10-07 honesty gap_flat_fill)：開盤前 App 用「β × 夜盤」的估計跳空查表，舊表卻以實際跳空分組 →
     估計平盤 (±0.15%) 日顯示回補 79%，實際只有 66% (2017-11~2026-10，n=756，逐年皆低於 79%)。
     這裡以時點正確的估計跳空分組：β_t = 前 250 個有夜盤日 (至少 120) 的 cov/var，往後移一日；est = β_t × clip(夜盤, ±8)。
@@ -126,7 +199,7 @@ def _est_cells(m: pd.DataFrame) -> tuple[dict, dict]:
     meta = {"n": int(len(m)), "start": str(m["date"].iloc[0]) if len(m) else None, "end": str(m["date"].iloc[-1]) if len(m) else None,
             "beta": f"滾動 {EST_BETA_WIN} 日 (至少 {EST_BETA_MIN}) cov/var，往後移一日", "night_clip": 8}
     if not len(m):
-        return {}, meta
+        return {}, meta, m
     m["est"] = m["beta_pit"] * m["night_chg_pct"].clip(-8, 8)
     m["bucket"] = np.searchsorted(GAP_EDGES, m["est"].values, side="right")
     flat = m["bucket"] == 3
@@ -152,7 +225,7 @@ def _est_cells(m: pd.DataFrame) -> tuple[dict, dict]:
         c["basis"] = "est"
         c["same_bucket_actual"] = round(float((np.searchsorted(GAP_EDGES, gg["gap"].values, side="right") == int(b)).mean()), 3)
         cells[f"{int(b)}|{'bull' if bull else 'bear'}"] = c
-    return cells, meta
+    return cells, meta, m
 
 
 def train(scored: pd.DataFrame, write: bool = True, verbose: bool = True) -> dict:
@@ -184,6 +257,12 @@ def train(scored: pd.DataFrame, write: bool = True, verbose: bool = True) -> dic
         if len(gg) < 20:
             continue
         out["gap"]["cells"][f"{int(b)}|{'bull' if bull else 'bear'}"] = _cell(gg, b, bull)
+    try:   # 11-02 平滑機率 (實際開盤表)
+        sa = _smooth_fit(g, "gap", "act")
+        if sa:
+            out["gap"].setdefault("smooth", {})["act"] = sa
+    except Exception as e:  # noqa: BLE001
+        log.warning("precheck smooth act: %s", e)
     # 夜盤 → 跳空 β (2020~ 有夜盤資料的日子)
     try:
         from . import short_term as ST
@@ -203,9 +282,12 @@ def train(scored: pd.DataFrame, write: bool = True, verbose: bool = True) -> dic
                                             "by_year": by_year, "dir_agree_big": round(float((np.sign(x[big]) == np.sign(y[big])).mean()), 3), "n_big": int(big.sum())}
                 # r6：開盤前 (估計跳空) 用的時點正確估計跳空分組表；盤中 (實際開盤) 仍用上面的 cells
                 try:
-                    ce, cm = _est_cells(m)
+                    ce, cm, me = _est_cells(m)
                     if ce:
                         out["gap"]["cells_est"], out["gap"]["est_meta"] = ce, cm
+                        se = _smooth_fit(me, "est", "est")   # 11-02 平滑機率 (估計跳空表)
+                        if se:
+                            out["gap"].setdefault("smooth", {})["est"] = se
                 except Exception as e:  # noqa: BLE001
                     log.warning("precheck est cells: %s", e)
     except Exception as e:  # noqa: BLE001
@@ -336,6 +418,10 @@ def build(scored: pd.DataFrame, snap: dict | None, fc: dict | None, us_px=None, 
             s_now = None
         cell_act, cell_est = scale_cell(cell_act, s_now), scale_cell(cell_est, s_now)
         cell = cell_est if table == "est" else cell_act
+        try:   # 11-02 平滑機率：開盤前 (含實際表備援格) 用估計表模型、盤中用實際表模型；stats_actual / stats_est 維持格值
+            cell = smooth_cell(cell, (st["gap"].get("smooth") or {}).get("est" if estimated else "act"), est, bull, b, s_now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("precheck smooth: %s", e)
         if cell:
             up = est > 0.15; dn = est < -0.15
             basis = "，以夜盤估計跳空分組" if table == "est" else ""
@@ -345,7 +431,12 @@ def build(scored: pd.DataFrame, snap: dict | None, fc: dict | None, us_px=None, 
                       (f"當日回補 (回到前收) {cell['p_fill']:.0%}、收盤高於開盤 {cell['p_cont']:.0%}" if table == "est" else f"收盤延續開盤方向 {cell['p_cont']:.0%}"))   # r6：實際表平盤格 p_cont = 延續微小實際跳空方向，不是「收盤高於開盤」
                    + f"；日內 (開→收) 平均 {cell['intra_mean']:+.2f}% (兩成~八成 {cell['intra_p20']:+.2f}~{cell['intra_p80']:+.2f}%)、收盤上漲率 {cell['p_up_close']:.0%}、平均振幅 {cell['range_mean']:.2f}%")
             if cell.get("dip_hold_q50") is not None and (up or dn):
-                txt += f"；守住日的日內回檔中位 {cell['dip_hold_q50']:+.2f}%、兩成 {cell['dip_hold_q20']:+.2f}% (未守住日中位 {cell['dip_fail_q50']:+.2f}%)"
+                # 11-02：未守住日 <10 (守住率 >0.9 的格) 時 dip_fail_q50 = None → 原本整句一起格式化會 TypeError，整個 precheck 消失 (卡片 / 判斷總結跳空票 / 帳本列)
+                txt += f"；守住日的日內回檔中位 {cell['dip_hold_q50']:+.2f}%"
+                if cell.get("dip_hold_q20") is not None:
+                    txt += f"、兩成 {cell['dip_hold_q20']:+.2f}%"
+                if cell.get("dip_fail_q50") is not None:
+                    txt += f" (未守住日中位 {cell['dip_fail_q50']:+.2f}%)"
             if cell.get("hold_years"):
                 txt += f"；守住率逐年 {cell['hold_yr_min']:.0%}~{cell['hold_yr_max']:.0%} ({cell['hold_years']} 年)，近三年 {cell['hold_recent']:.0%} (n={cell['n_recent']})"
             # r6：中性描述 (原「不追開盤價 / 進場點 / 短線買點 / 減碼點」)
