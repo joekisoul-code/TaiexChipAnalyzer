@@ -103,6 +103,12 @@ def _support_stats(m: pd.DataFrame) -> dict:
 HL_MARKS = ("10:00", "11:00", "12:00", "13:00")
 MARKS_WINDOW_DAYS = 1095   # 近 3 年 (約 730 交易日，與舊 Yahoo 730d 實際取到的天數相近；最低點時段逐年在變 → 不用 2016~ 全部)
 OPEN_AT = "09:05"
+RB_CUTS = (0.15, 0.5)   # 現價離今日 (09:05 起) 低點反彈幾 σ：r0 < 0.15 (還在低點附近) ≤ r1 < 0.5 ≤ r2 (已明顯彈離)
+
+
+def _rb_bin(px: float, lo: float, s: float) -> str:
+    rb = (px / lo - 1) * 100 / s
+    return "r0" if rb < RB_CUTS[0] else "r1" if rb < RB_CUTS[1] else "r2"
 
 
 def _marks_window(today: dt.date | None = None) -> dict[str, dict]:
@@ -115,7 +121,9 @@ def _marks_window(today: dt.date | None = None) -> dict[str, dict]:
 
 def _hour_low_table(m: pd.DataFrame, marks: dict[str, dict] | None = None) -> dict:
     """盤中低點判斷查表：時間點 × 跳空 (dn/flat/up) × 開盤後已回檔 (deep = 累積低點距開盤 ≤ -0.5σ) → 低點已出現機率、最終低點 (相對該時點價) q20/q50。
-    開盤 / 高低 = 09:05 口徑 (見模組說明 5)。"""
+    開盤 / 高低 = 09:05 口徑 (見模組說明 5)。
+    2026-11-01 加 cells_rb / marks_rb (再分「現價離今日低點反彈幾 σ」r0/r1/r2)：走動式 (每年用前 3 年建表) 2019~2026 Brier 0.200 → 0.153 (8/8 年較好)，
+    「已出現」(p ≥ .75) 命中 83.0% → 89.8% (叫 2,917 → 3,693 次)、「還沒到」(p ≤ .55) 51.1% → 68.7%；App 優先查 cells_rb → marks_rb → 舊 cells。"""
     try:
         marks = _marks_window() if marks is None else marks
     except Exception as e:  # noqa: BLE001
@@ -134,17 +142,26 @@ def _hour_low_table(m: pd.DataFrame, marks: dict[str, dict] | None = None) -> di
                 continue
             px, lo = rec[mk], rec["lo"][mk]
             gap = (op / pc - 1) * 100
-            rows.append({"mark": mk, "g": "dn" if gap < -0.15 else "up" if gap > 0.15 else "flat", "deep": ((lo / op - 1) * 100 / s) <= -0.5, "done": lo <= fin_low * 1.0003, "fin": (fin_low / px - 1) * 100})
+            rows.append({"mark": mk, "g": "dn" if gap < -0.15 else "up" if gap > 0.15 else "flat", "deep": ((lo / op - 1) * 100 / s) <= -0.5, "rb": _rb_bin(px, lo, s), "done": lo <= fin_low * 1.0003, "fin": (fin_low / px - 1) * 100})
     if not rows:
         return {}
     h = pd.DataFrame(rows)
-    out = {"n_days": int(len(h) / max(1, h["mark"].nunique())), "open_at": OPEN_AT, "source": "TWSE 每 5 秒指數", "window_days": MARKS_WINDOW_DAYS, "cells": {}, "marks": {}}
+    out = {"n_days": int(len(h) / max(1, h["mark"].nunique())), "open_at": OPEN_AT, "source": "TWSE 每 5 秒指數", "window_days": MARKS_WINDOW_DAYS, "rb_cuts": list(RB_CUTS), "cells": {}, "marks": {}, "cells_rb": {}, "marks_rb": {}}
     for mk, g in h.groupby("mark"):
         out["marks"][mk] = {"n": int(len(g)), "p_done": round(float(g["done"].mean()), 3), "fin_q20": round(float(g["fin"].quantile(0.2)), 2), "fin_q50": round(float(g["fin"].median()), 2)}
         for (gg, dp), g3 in g.groupby(["g", "deep"]):
             if len(g3) >= 20:
-                out["cells"][f"{mk}|{gg}|{'deep' if dp else 'shallow'}"] = {"n": int(len(g3)), "p_done": round(float(g3["done"].mean()), 3), "fin_q20": round(float(g3["fin"].quantile(0.2)), 2), "fin_q50": round(float(g3["fin"].median()), 2)}
+                out["cells"][f"{mk}|{gg}|{'deep' if dp else 'shallow'}"] = _cell(g3)
+        for rb, g3 in g.groupby("rb"):
+            out["marks_rb"][f"{mk}|{rb}"] = _cell(g3)
+        for (gg, dp, rb), g3 in g.groupby(["g", "deep", "rb"]):
+            if len(g3) >= 20:
+                out["cells_rb"][f"{mk}|{gg}|{'deep' if dp else 'shallow'}|{rb}"] = _cell(g3)
     return out
+
+
+def _cell(g: pd.DataFrame) -> dict:
+    return {"n": int(len(g)), "p_done": round(float(g["done"].mean()), 3), "fin_q20": round(float(g["fin"].quantile(0.2)), 2), "fin_q50": round(float(g["fin"].median()), 2)}
 
 
 def _hour_of_low(marks: dict[str, dict] | None = None) -> dict:

@@ -4,6 +4,7 @@
 - 最低點時段 = 第一個「累積低 = 全日低」的時間點所在小時 (10:00 → "09:00" … 13:30 → "13:00")
 - 視窗 = 近 MARKS_WINDOW_DAYS 日曆天；intraday_marks 抓不到的日子 (None) 略過
 - 表帶 open_at = "09:05" (App 依此切換即時口徑)
+- cells_rb / marks_rb：再分現價離今日低點反彈幾 σ (r0/r1/r2)
 
     python tests/test_pullback_marks.py
 """
@@ -66,6 +67,12 @@ def main():
     assert t["open_at"] == "09:05" and t["n_days"] == 60 and t["window_days"] == P.MARKS_WINDOW_DAYS, t
     assert t["cells"]["10:00|up|shallow"]["p_done"] == 1.0 and t["cells"]["10:00|dn|deep"]["p_done"] == 0.0, t["cells"]
     assert t["marks"]["13:00"]["p_done"] == 0.5 and t["marks"]["13:00"]["n"] == 60
+    n += 3
+    # 反彈維度：現價 = 累積低 + 50 (≈ 0.5σ) → r2 / r1 邊界；r0 = 還在低點附近
+    assert P._rb_bin(100.1, 100.0, 1.0) == "r0" and P._rb_bin(100.3, 100.0, 1.0) == "r1" and P._rb_bin(100.6, 100.0, 1.0) == "r2"
+    up_rb = P._rb_bin(100.6 + 50, 100.6, 1.0)
+    assert t["cells_rb"][f"10:00|up|shallow|{up_rb}"]["p_done"] == 1.0 and t["rb_cuts"] == list(P.RB_CUTS), t["cells_rb"]
+    assert sum(c["n"] for k, c in t["marks_rb"].items() if k.startswith("10:00|")) == 60
     n += 3
 
     # 3. 視窗：只取近 MARKS_WINDOW_DAYS 日曆天，None (抓不到) 略過
