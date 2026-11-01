@@ -550,6 +550,14 @@ def main() -> None:
             print(f"  exdiv_announce: carried over {_x0} snapshots")
     except Exception as e:  # noqa: BLE001
         print("  exdiv_announce failed:", e)
+    # 夜盤盤中快照 (2026-11-01)：夜盤收盤前的部分漲跌能補回多少隔日命中，要有歷史才能驗證 → 夜盤時段每次發布 (含 fast) 存一筆；App 不讀，純研究用
+    try:
+        from chip.predict import night_archive as _na
+        _na0, _na1 = _na.publish(DATA / _na.NAME, snap, (gov8.PAGES_URL.rstrip("/") + "/data/" + _na.NAME,
+                                                         "https://raw.githubusercontent.com/joekisoul-code/TaiexChipAnalyzer/gh-pages/data/" + _na.NAME))
+        print(f"  night_partial: carried {_na0} → {_na1} rows")
+    except Exception as e:  # noqa: BLE001
+        print("  night_partial failed:", e)
     # 操盤台 (2026-09-25)：0050/00631L/00663L/00981A/2330/065423 的均線、選擇權回檔機率帶、高低點承接價、價位帶、回撤控制價位、
     # 資金防守、八大行庫歸檔、00981A 持股、權證、2330 ADR。完整模式重算；fast 模式在清晨/當天第一次 (ADR) 或資料落後最後交易日時重算，其餘沿用上次發布
     def _prev_desk() -> dict:

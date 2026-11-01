@@ -154,7 +154,7 @@ def append(path: Path | str, line: dict | None, cap: int = PIT_MAX, cache=None) 
     cp = _cache_path(cache)
     if not line:
         return len(load(path))
-    rows = merge(merge(load(cp) if cp else [], load(path)), [line], cap)
+    rows = merge(merge(load(cp) if cp else [], load(path), cap), [line], cap)   # 2026-11-01：內層也要帶 cap (原本預設 400 → cap 較大的歸檔每次追加都被截到 400 行)
     write(path, rows)
     if cp:
         write(cp, rows)
