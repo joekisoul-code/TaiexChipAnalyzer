@@ -363,7 +363,7 @@
     "from": "2001-03-01",
     "to": "2026-10-27",
     "raw": 0.7945,
-    "fitted_at": "2026-11-02"
+    "fitted_at": "2026-11-04"
    },
    "beta": "TAIEX close-to-close vs SOX, prior 750 normal days, no intercept",
    "touch_prob": 0.15,

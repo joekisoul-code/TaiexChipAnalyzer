@@ -1,7 +1,7 @@
 {
- "generated": "2026-11-02 04:29:50",
+ "generated": "2026-11-04 20:18:34",
  "schema": "event_calendar/v1",
- "asof": "2026-11-02",
+ "asof": "2026-11-04",
  "params_version": "2026-09-27",
  "horizon_days": 120,
  "health": {
@@ -423,6 +423,15 @@
    "title_zh": "美國 3 月非農就業 (估計)",
    "date_confidence": "estimated",
    "source": "規則估計：月初第一個週五；待 BLS 公告",
+   "beyond_horizon": true
+  },
+  {
+   "date": "2027-04-13",
+   "tw_session": "2027-04-14",
+   "event_type": "us_cpi",
+   "title_zh": "美國 3 月 CPI (估計)",
+   "date_confidence": "estimated",
+   "source": "規則估計：月 10~15 日週中；待 BLS 公告",
    "beyond_horizon": true
   }
  ]
