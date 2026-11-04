@@ -58,6 +58,12 @@ CONT_TARGET = "13:30"
 CONT_FROM = "2018-01-01"
 CONT_WF_FROM = "2019-01"
 CONT_MIN = 250
+# 11-04 (研究 hit3 F + 反方獨立重算) 短目標 (現在 → 11:00 / 12:00 / 13:00) 也用延續表 (同 z、各 (時點, 目標) 一張表)：
+# 20~80% 區間 6 格覆蓋 56~61% (LightGBM 39~68%)、interval score 6/6 格較好；叫牌只有 10:00 / 11:00 → 13:00 兩格經 Bonferroni 仍有效
+# (edge +5.3 / +5.4，8/8、6/8 年)，其他格不給上漲率 (10→12、11→12 不顯著；10→11、12→13 無力)；離目標 < 30 分鐘也不給 (1 分鐘實盤近目標接近擲硬幣)
+CONT_SHORT = {"11:00": ["10:00"], "12:00": ["10:00", "11:00"], "13:00": ["10:00", "11:00", "12:00"]}
+CONT_SHORT_CALL = {("10:00", "13:00"), ("11:00", "13:00")}
+CONT_SHORT_MUTE_MIN = 30   # 保險：目前兩個叫牌格 (10:00/11:00 → 13:00) 在時點用表期間離目標都 ≥ 61 分，實際不會觸發
 
 
 # ------------------------------------------------------------------ 特徵
@@ -241,7 +247,27 @@ def _cont_table(z: np.ndarray, yz: np.ndarray) -> dict:
     b = np.digitize(z, edges); up = yz > 0
     bins = [{"p_up": round(float(up[b == k].mean()), 3), "mean_z": float(yz[b == k].mean()), "q20_z": float(np.quantile(yz[b == k], 0.2)),
              "q80_z": float(np.quantile(yz[b == k], 0.8)), "n": int((b == k).sum())} for k in range(M.N_BINS)]
-    return {"z_edges": edges.tolist(), "bins": bins, "base_hit": round(float(up.mean()), 3), "base_mean_z": float(yz.mean()), "n": int(len(z))}
+    # 11-04 v_z = 該時點全部列 y/σ 的穩健變異 ((q80−q20)/1.6832)²：整點之間依時間在兩時點間線性內插 → 區間縮放 (_cont_k)
+    v_z = float(((np.quantile(yz, 0.8) - np.quantile(yz, 0.2)) / 1.6832) ** 2)
+    return {"z_edges": edges.tolist(), "bins": bins, "base_hit": round(float(up.mean()), 3), "base_mean_z": float(yz.mean()), "n": int(len(z)), "v_z": v_z}
+
+
+def _hm_min(t: str) -> int:
+    return int(t[:2]) * 60 + int(t[3:5])
+
+
+def _cont_k(marks: dict, mark: str, now_t: str) -> float:
+    """11-04 13:30 目標整點之間的區間縮放 k = √(V(t)/V(mark))，V 在 mark → 下一時點之間依時間線性內插；13:00 之後 (收盤集合競價，變異不再縮) 與舊表 → 1。
+    歷史下一時點測試 (2019~2026)：覆蓋 72.4% → 61.1%、interval score 較好 (7/7 年)；46 天 1 分鐘實盤 67.7% → 62.9%。
+    反方：效果與「整點後依時間縮到約 0.7 倍」的常數版相當 (差異不顯著)，不是新發現的結構。"""
+    if mark not in CONT_MARKS or mark == CONT_MARKS[-1] or now_t <= mark:
+        return 1.0
+    nxt = CONT_MARKS[CONT_MARKS.index(mark) + 1]
+    v0, v1 = (marks.get(mark) or {}).get("v_z"), (marks.get(nxt) or {}).get("v_z")
+    if not v0 or not v1:
+        return 1.0
+    w = min(max((_hm_min(now_t) - _hm_min(mark)) / (_hm_min(nxt) - _hm_min(mark)), 0.0), 1.0)
+    return float(np.sqrt(max(v0 + (v1 - v0) * w, 0.0) / v0))
 
 
 def _cont_apply(T: dict, z: float, sig: float) -> dict:
@@ -284,10 +310,9 @@ def _cont_wf(Z: pd.DataFrame) -> dict:
     return res
 
 
-def cont_tables(hist: pd.DataFrame, sp: dict) -> dict | None:
-    """延續模型的表 (train 每週重算，存進 bundle['cont'])。hist = build_history('twse') 的列；sp = {date: 前一日 σ}。"""
-    tc = f"to_{CONT_TARGET}"
-    Z = hist[hist["mark"].isin(CONT_MARKS) & (hist["date"] >= CONT_FROM)].dropna(subset=["ret_open", tc])[["date", "mark", "ret_open", tc]].copy()
+def _cont_build(hist: pd.DataFrame, sp: dict, target: str, marks_list: list[str]) -> tuple[dict, pd.DataFrame]:
+    tc = f"to_{target}"
+    Z = hist[hist["mark"].isin(marks_list) & (hist["date"] >= CONT_FROM)].dropna(subset=["ret_open", tc])[["date", "mark", "ret_open", tc]].copy()
     Z["s"] = pd.to_numeric(Z["date"].map(sp), errors="coerce")
     Z = Z[np.isfinite(Z["s"]) & (Z["s"] > 0)].rename(columns={tc: "y"}).sort_values(["date", "mark"]).reset_index(drop=True)
     Z["z"] = Z["ret_open"] / Z["s"]; Z["yz"] = Z["y"] / Z["s"]
@@ -298,15 +323,33 @@ def cont_tables(hist: pd.DataFrame, sp: dict) -> dict | None:
         T = _cont_table(g["z"].to_numpy(float), g["yz"].to_numpy(float))
         T["z_edges"] = [round(e, 4) for e in T["z_edges"]]
         T["base_mean_z"] = round(T["base_mean_z"], 4)
+        T["v_z"] = round(T["v_z"], 5)
         for B in T["bins"]:
             for k in ("mean_z", "q20_z", "q80_z"):
                 B[k] = round(B[k], 4)
         T["ic"] = round(float(g["ret_open"].rank().corr(g["y"].rank())), 3)
         marks[mk] = T
+    return marks, Z
+
+
+def cont_tables(hist: pd.DataFrame, sp: dict) -> dict | None:
+    """延續模型的表 (train 每週重算，存進 bundle['cont'])。hist = build_history('twse') 的列；sp = {date: 前一日 σ}。
+    11-04：另有 short = {目標: {時點: 表}} (現在 → 11:00 / 12:00 / 13:00) 與 short_metrics。"""
+    marks, Z = _cont_build(hist, sp, CONT_TARGET, CONT_MARKS)
     if not marks:
         return None
-    return {"marks": marks, "score": "ret_open / sigma_prev", "open_at": "09:05", "target": CONT_TARGET, "sigma": "range_levels.sigma_series 前一日",
-            "from": str(Z["date"].min()), "to": str(Z["date"].max()), "metrics": _cont_wf(Z)}
+    out = {"marks": marks, "score": "ret_open / sigma_prev", "open_at": "09:05", "target": CONT_TARGET, "sigma": "range_levels.sigma_series 前一日",
+           "from": str(Z["date"].min()), "to": str(Z["date"].max()), "metrics": _cont_wf(Z), "short": {}, "short_metrics": {},
+           "short_call": sorted(f"{a}>{b}" for a, b in CONT_SHORT_CALL)}
+    for tm, mks in CONT_SHORT.items():
+        try:
+            sm, Zs = _cont_build(hist, sp, tm, mks)
+            if sm:
+                out["short"][tm] = sm
+                out["short_metrics"][tm] = _cont_wf(Zs)
+        except Exception as e:  # noqa: BLE001
+            log.warning("cont short %s: %s", tm, e)
+    return out
 
 
 def train(write: bool = True) -> dict:
@@ -505,7 +548,8 @@ def forecast(scored: pd.DataFrame, snapshot: dict | None) -> dict:
                 T = cont["marks"][mark]
                 ro = (px / o905 - 1) * 100; z = ro / sig
                 r = _cont_apply(T, z, sig)
-                hm, q20, q80 = r["mean"], r["q20"], r["q80"]
+                k = _cont_k(cont["marks"], mark, now_t)   # 11-04 整點之間區間縮放 (上漲率 / 平均不變)
+                hm = r["mean"]; q20, q80 = hm + (r["q20"] - hm) * k, hm + (r["q80"] - hm) * k
                 old = out["targets"][CONT_TARGET]
                 drv = {"feature": "ret_open", "name": NAMES["ret_open"], "value": round(ro, 3), "contrib": round(hm, 3)}
                 out["targets"][CONT_TARGET] = {
@@ -513,12 +557,31 @@ def forecast(scored: pd.DataFrame, snapshot: dict | None) -> dict:
                     "base_hit": r["base_hit"], "base_mean": round(T["base_mean_z"] * sig, 2),
                     "level": round(px * (1 + hm / 100), 0), "level_lo": round(px * (1 + q20 / 100), 0), "level_hi": round(px * (1 + q80 / 100), 0),
                     "drivers": {"positive": [drv] if hm > 0 else [], "negative": [drv] if hm < 0 else [], "bias": 0.0},
-                    "metrics": {**((cont.get("metrics") or {}).get(mark) or {}), "ic": T.get("ic")}, "model": "cont",
-                    "lgbm": {k: old.get(k) for k in ("pred", "p_up", "base_hit", "level", "level_lo", "level_hi")}}
-                out["cont"] = {"mark": mark, "open_0905": round(o905, 2), "ret_open": round(ro, 3), "sigma_prev": round(sig, 3), "sigma_date": ds[i], "z": round(z, 3),
+                    "metrics": {**((cont.get("metrics") or {}).get(mark) or {}), "ic": T.get("ic")}, "model": "cont", "band_k": round(k, 3),
+                    "lgbm": {f: old.get(f) for f in ("pred", "p_up", "base_hit", "level", "level_lo", "level_hi")}}
+                out["cont"] = {"mark": mark, "open_0905": round(o905, 2), "ret_open": round(ro, 3), "sigma_prev": round(sig, 3), "sigma_date": ds[i], "z": round(z, 3), "band_k": round(k, 3),
                                "table_from": cont.get("from"), "table_to": cont.get("to")}
                 out["note"] = (f"13:30 收盤預估用延續模型：09:05 開盤至今 {ro:+.2f}% ÷ 前一日波動 {sig:.2f}% = {z:+.2f}，"
-                               f"查 {mark} 時間點歷史同分位 (2018~，n={r['n']})；其餘目標仍為 LightGBM")
+                               f"查 {mark} 時間點歷史同分位 (2018~，n={r['n']})")
+                # 11-04 短目標：區間全用延續表 (整點之間依剩餘時間 √ 縮放)；上漲率只給 10:00 / 11:00 → 13:00 兩格，且離目標 ≥ 30 分鐘
+                for tm, ST_ in (cont.get("short") or {}).items():
+                    if tm not in out["targets"] or mark not in ST_:
+                        continue
+                    T2 = ST_[mark]; r2 = _cont_apply(T2, z, sig); h2 = r2["mean"]
+                    rem, full = _hm_min(tm) - _hm_min(now_t), _hm_min(tm) - _hm_min(mark)
+                    k2 = float(np.sqrt(max(rem, 0) / full)) if full > 0 and now_t > mark else 1.0
+                    lo2, hi2 = h2 + (r2["q20"] - h2) * k2, h2 + (r2["q80"] - h2) * k2
+                    ok_call = (mark, tm) in CONT_SHORT_CALL and rem >= CONT_SHORT_MUTE_MIN
+                    o2 = out["targets"][tm]
+                    out["targets"][tm] = {
+                        "pred": round(h2, 2), "bin": r2["bin"], "p_up": r2["p_up"] if ok_call else None, "p_up_table": r2["p_up"], "call_ok": ok_call,
+                        "hist_mean": round(h2, 2), "q20": round(lo2, 2), "q80": round(hi2, 2), "n": r2["n"], "base_hit": r2["base_hit"] if ok_call else None,
+                        "level": round(px * (1 + h2 / 100), 0), "level_lo": round(px * (1 + lo2 / 100), 0), "level_hi": round(px * (1 + hi2 / 100), 0),
+                        "drivers": {"positive": [], "negative": [], "bias": 0.0}, "model": "cont", "band_k": round(k2, 3), "ic": T2.get("ic"),
+                        "metrics": ((cont.get("short_metrics") or {}).get(tm) or {}).get(mark) or {},
+                        "lgbm": {f: o2.get(f) for f in ("pred", "p_up", "base_hit", "level", "level_lo", "level_hi")}}
+                if cont.get("short"):
+                    out["note"] += "；11:00 / 12:00 / 13:00 也用延續表 (上漲率只在 10:00、11:00 → 13:00 且離目標 ≥ 30 分鐘時給)"
         except Exception as e:  # noqa: BLE001
             log.warning("intraday cont forecast: %s", e)
     out["asof_t"] = now_t if live else None
