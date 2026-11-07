@@ -1,7 +1,7 @@
 {
- "generated": "2026-11-04 20:18:34",
+ "generated": "2026-11-08 06:18:20",
  "schema": "event_calendar/v1",
- "asof": "2026-11-04",
+ "asof": "2026-11-08",
  "params_version": "2026-09-27",
  "horizon_days": 120,
  "health": {
@@ -20,24 +20,6 @@
   "us_calendar": "NYSE 規則 + ^GSPC 實際交易日 (過去)"
  },
  "events": [
-  {
-   "date": "2026-11-03",
-   "tw_session": "2026-11-04",
-   "event_type": "us_midterm",
-   "date_confidence": "scheduled",
-   "source": "選舉日規則 (11 月第一個週一後的週二)",
-   "title_zh": "美國期中選舉 (台北反應日 11-04)",
-   "beyond_horizon": false
-  },
-  {
-   "date": "2026-11-06",
-   "tw_session": "2026-11-09",
-   "event_type": "us_nfp",
-   "title_zh": "美國 10 月非農就業",
-   "date_confidence": "scheduled",
-   "source": "bls.gov empsit schedule",
-   "beyond_horizon": false
-  },
   {
    "date": "2026-11-10",
    "tw_session": "2026-11-11",
@@ -351,7 +333,7 @@
    "title_zh": "美國 2 月非農就業 (估計)",
    "date_confidence": "estimated",
    "source": "規則估計：月初第一個週五；待 BLS 公告",
-   "beyond_horizon": true
+   "beyond_horizon": false
   },
   {
    "date": "2027-03-16",
@@ -432,6 +414,16 @@
    "title_zh": "美國 3 月 CPI (估計)",
    "date_confidence": "estimated",
    "source": "規則估計：月 10~15 日週中；待 BLS 公告",
+   "beyond_horizon": true
+  },
+  {
+   "date": "2027-04-15",
+   "tw_session": "2027-04-16",
+   "issue_date": "2027-04-15",
+   "event_type": "tsmc_call",
+   "title_zh": "台積電 2027 Q1 法說會 (14:00 台北) (估計)",
+   "date_confidence": "estimated",
+   "source": "規則：1/4/7/10 月 12 日後首個週四；待 TSMC IR 確認",
    "beyond_horizon": true
   }
  ]
